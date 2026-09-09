@@ -75,22 +75,24 @@ inline std::unexpected<Error> err(ErrorCode c, std::string msg,
 
 // --- Rule 26 sanctioned propagation macros ---------------------------------
 // MLK_TRYV(expr): propagate the error of a Result<Ok> expression.
-// MLK_TRY(dst, expr): propagate the error and bind the value to dst.
+// MLK_TRY_VAR(name, expr): declare `name` bound to the success value,
+// propagating the error otherwise. Both compile to a single branch.
+// Fully-qualified mlk::Error keeps the macros safe at any call site.
 #define MLK_TRYV(expr)                                                        \
     do {                                                                      \
         auto _mlk_r = (expr);                                                 \
-        if (!_mlk_r.has_value()) [[unlikely]] {                             \
-            return std::unexpected<Error>(std::move(_mlk_r).error());         \
+        if (!_mlk_r.has_value()) [[unlikely]] {                               \
+            return std::unexpected<::mlk::Error>(                             \
+                std::move(_mlk_r).error());                                   \
         }                                                                     \
     } while (false)
 
-#define MLK_TRY(dst, expr)                                                    \
-    do {                                                                      \
-        auto _mlk_r = (expr);                                                 \
-        if (!_mlk_r.has_value()) [[unlikely]] {                             \
-            return std::unexpected<Error>(std::move(_mlk_r).error());         \
-        }                                                                     \
-        dst = std::move(*_mlk_r);                                             \
-    } while (false)
+#define MLK_TRY_VAR(name, expr)                                               \
+    auto mlk_try_##name = (expr);                                             \
+    if (!mlk_try_##name.has_value()) [[unlikely]] {                           \
+        return std::unexpected<::mlk::Error>(                                 \
+            std::move(mlk_try_##name).error());                               \
+    }                                                                         \
+    auto name = std::move(*mlk_try_##name)
 
 }  // namespace mlk

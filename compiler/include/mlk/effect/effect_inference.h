@@ -3,6 +3,7 @@
 #include "mlk/core/symbol_table.h"
 #include "mlk/effect/effect_kind.h"
 #include "mlk/ir/math_op.h"
+#include "mlk/ir/node_id.h"
 
 namespace mlk {
 

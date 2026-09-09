@@ -36,7 +36,7 @@ public:
                                      AttrList attrs = {}) {
         SmallVector<ValueId, 4> in;
         for (const ValueId v : inputs) in.push_back(v);
-        MLK_TRY(vid, graph_.addNode(op, in, std::move(attrs)));
+        MLK_TRY_VAR(vid, graph_.addNode(op, in, std::move(attrs)));
         return vid;
     }
 

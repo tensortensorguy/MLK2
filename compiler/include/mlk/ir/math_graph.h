@@ -38,11 +38,26 @@ public:
     /// The graph interns generated names through a SymbolTable (Rule 16).
     /// A process-wide synchronized default is provided (Rule 144: allowed
     /// global state), but frontends should pass their own.
+    /// Well-known interned attribute names (Rule 16: interned once, then
+    /// only ids flow — never string comparison in passes).
+    struct WellKnownSymbols {
+        SymbolId shapeDims{kInvalidSymbolId};
+        SymbolId value{kInvalidSymbolId};
+        SymbolId axis{kInvalidSymbolId};
+        SymbolId epsilon{kInvalidSymbolId};
+    };
+
     explicit MathGraph(SymbolTable* symbols = defaultSymbolTable())
         : symbols_(symbols) {
+        wk_.shapeDims = symbols_->intern("shape_dims");
+        wk_.value = symbols_->intern("value");
+        wk_.axis = symbols_->intern("axis");
+        wk_.epsilon = symbols_->intern("epsilon");
         values_.reserve(constants::kInitialValueCapacity);
         nodes_.reserve(constants::kInitialNodeCapacity);
     }
+
+    [[nodiscard]] const WellKnownSymbols& wk() const noexcept { return wk_; }
 
     [[nodiscard]] static SymbolTable* defaultSymbolTable() {
         static SymbolTable table;  // internally synchronized (Rule 144)
@@ -50,6 +65,7 @@ public:
     }
 
     [[nodiscard]] SymbolTable& symbols() noexcept { return *symbols_; }
+    [[nodiscard]] const SymbolTable& symbols() const noexcept { return *symbols_; }
 
     // --- Construction API ----------------------------------------------------
     [[nodiscard]] ValueId addPlaceholder(SymbolId name, MathType type);
@@ -99,6 +115,7 @@ public:
     [[nodiscard]] const SmallVector<ValueId, 4>& outputs() const {
         return outputs_;
     }
+    [[nodiscard]] SmallVector<ValueId, 4>& outputsRef() { return outputs_; }
 
     // Use-def ---------------------------------------------------------------
     /// Users of a value (nodes consuming it). Maintained on construction.
@@ -125,6 +142,10 @@ public:
     /// Registers `newV` as the current representative for the equivalence of
     /// `oldV` without deleting `oldV`. The original stays recoverable.
     void recordEquivalent(ValueId oldV, ValueId newV);
+
+    /// Rewrites every use of oldV to newV (structural rewiring; semantics
+    /// preserved by the caller's legality proof). Rebuilds use-def lists.
+    void replaceOperandUses(ValueId oldV, ValueId newV);
 
     /// Marks a value dead after a versioned, documented lowering decision.
     /// Requires the caller to name the decision (auditability).
@@ -194,6 +215,7 @@ private:
     void attachEffects(Node& n);
 
     SymbolTable* symbols_;
+    WellKnownSymbols wk_{};
     std::vector<Value> values_;
     std::vector<Node> nodes_;
     std::vector<SmallVector<NodeId, 4>> users_;

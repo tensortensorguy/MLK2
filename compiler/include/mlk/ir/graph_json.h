@@ -15,8 +15,7 @@ namespace mlk {
                                               SymbolTable& symbols);
 [[nodiscard]] inline Result<MathGraph> parseGraphFile(
     std::string_view text, SymbolTable& symbols) {
-    json::Value doc;
-    MLK_TRY(doc, json::parse(text));
+    MLK_TRY_VAR(doc, json::parse(text));
     return graphFromJson(doc, symbols);
 }
 

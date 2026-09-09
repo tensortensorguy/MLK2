@@ -19,7 +19,7 @@ namespace mlk {
     const Value& val = graph.value(v);
     if (val.hashValid) return val.hash;
     // Trigger full-graph hash, which populates per-value caches.
-    graphHash(graph);
+    (void)graphHash(graph);
     return graph.value(v).hash;
 }
 

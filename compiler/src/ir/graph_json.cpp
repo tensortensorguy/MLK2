@@ -175,8 +175,7 @@ Result<MathGraph> graphFromJson(const json::Value& doc, SymbolTable& symbols) {
                 }
             }
             if (const json::Value* sh = tv->find("shape")) {
-                Shape parsedShape;
-                MLK_TRY(parsedShape, shapeFromJson(*sh));
+                MLK_TRY_VAR(parsedShape, shapeFromJson(*sh));
                 type.shape = parsedShape;
             }
         }

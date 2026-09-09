@@ -136,6 +136,21 @@ HashValue MathGraph::hash() const {
     return h;
 }
 
+void MathGraph::replaceOperandUses(ValueId oldV, ValueId newV) {
+    if (oldV == newV || oldV >= values_.size() || newV >= values_.size()) {
+        return;
+    }
+    for (auto& n : nodes_) {
+        if (n.flags.test(NodeFlag::Dead)) continue;
+        for (ValueId& in : n.inputs) {
+            if (in == oldV) in = newV;
+        }
+    }
+    rebuildUsers();
+    hashCache_.reset();
+    ++version_;
+}
+
 void MathGraph::recordEquivalent(ValueId oldV, ValueId newV) {
     bool inserted = false;
     ValueId* mapped = representative_.findOrInsert(oldV, &inserted, newV);
