@@ -1,0 +1,5 @@
+{"format":"mlk-graph","version":1,"values":[
+{"id":0,"kind":"placeholder","name":"x","type":{"domain":"float","dtype":"f64"}},
+{"id":1,"kind":"constant","float_value":0.0,"type":{"domain":"float","dtype":"f64"}},
+{"id":2,"kind":"node_result","type":{"domain":"float","dtype":"f64"}}],
+"nodes":[{"id":0,"op":"div","inputs":[0,1]}],"outputs":[2]}

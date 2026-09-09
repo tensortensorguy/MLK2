@@ -50,6 +50,7 @@
 /home/z/my-project/mlk2-repo/build-asan/tests/unit/CMakeFiles/mlk_unit_runtime.dir
 /home/z/my-project/mlk2-repo/build-asan/tests/unit/CMakeFiles/mlk_unit_autotune.dir
 /home/z/my-project/mlk2-repo/build-asan/tests/unit/CMakeFiles/mlk_unit_superopt.dir
+/home/z/my-project/mlk2-repo/build-asan/tests/unit/CMakeFiles/mlk_unit_golden.dir
 /home/z/my-project/mlk2-repo/build-asan/tests/unit/CMakeFiles/test.dir
 /home/z/my-project/mlk2-repo/build-asan/tests/unit/CMakeFiles/edit_cache.dir
 /home/z/my-project/mlk2-repo/build-asan/tests/unit/CMakeFiles/rebuild_cache.dir

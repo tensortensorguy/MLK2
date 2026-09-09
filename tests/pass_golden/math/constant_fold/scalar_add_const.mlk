@@ -1,0 +1,7 @@
+{"format":"mlk-graph","version":1,"values":[
+{"id":0,"kind":"placeholder","name":"x","type":{"domain":"float","dtype":"f64"}},
+{"id":1,"kind":"constant","int_value":2,"type":{"domain":"float","dtype":"f64"}},
+{"id":2,"kind":"constant","int_value":3,"type":{"domain":"float","dtype":"f64"}},
+{"id":3,"kind":"node_result","type":{"domain":"float","dtype":"f64"}},
+{"id":4,"kind":"node_result","type":{"domain":"float","dtype":"f64"}}],
+"nodes":[{"id":0,"op":"add","inputs":[1,2]},{"id":1,"op":"mul","inputs":[0,3]}],"outputs":[4]}

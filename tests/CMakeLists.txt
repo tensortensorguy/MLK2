@@ -9,7 +9,7 @@ function(mlk_add_test name)
     mlk_apply_sanitizers(${name})
     add_test(NAME ${name} COMMAND ${name})
     set_tests_properties(${name} PROPERTIES
-        ENVIRONMENT "MLK_TEST_DIR=${CMAKE_CURRENT_SOURCE_DIR}")
+        ENVIRONMENT "MLK_TEST_DIR=${CMAKE_SOURCE_DIR}/tests")
     set(MLK_ALL_SOURCES ${MLK_ALL_SOURCES} ${ARG_SOURCES} PARENT_SCOPE)
 endfunction()
 

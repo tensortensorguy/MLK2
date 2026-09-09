@@ -106,23 +106,19 @@ build cmake_object_order_depends_target_mlk_core: phony || .
 build compiler/CMakeFiles/mlk_core.dir/src/core/diagnostics.cpp.o: CXX_COMPILER__mlk_core_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/core/diagnostics.cpp || cmake_object_order_depends_target_mlk_core
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_core.dir/src/core/diagnostics.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_core.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_core.dir/src/core
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_core.dir/mlk_core.pdb
-  TARGET_PDB = bin/lib/libmlk_core.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_core.dir
 
 build compiler/CMakeFiles/mlk_core.dir/src/core/json.cpp.o: CXX_COMPILER__mlk_core_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/core/json.cpp || cmake_object_order_depends_target_mlk_core
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_core.dir/src/core/json.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_core.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_core.dir/src/core
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_core.dir/mlk_core.pdb
-  TARGET_PDB = bin/lib/libmlk_core.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_core.dir
 
 
@@ -139,9 +135,8 @@ build bin/lib/libmlk_core.a: CXX_STATIC_LIBRARY_LINKER__mlk_core_Debug compiler/
   OBJECT_DIR = compiler/CMakeFiles/mlk_core.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_core.dir/mlk_core.pdb
   TARGET_FILE = bin/lib/libmlk_core.a
-  TARGET_PDB = bin/lib/libmlk_core.pdb
+  TARGET_PDB = mlk_core.a.dbg
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_core.dir
 
 # =============================================================================
@@ -156,78 +151,64 @@ build cmake_object_order_depends_target_mlk_ir: phony || cmake_object_order_depe
 build compiler/CMakeFiles/mlk_ir.dir/src/ir/math_op.cpp.o: CXX_COMPILER__mlk_ir_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/ir/math_op.cpp || cmake_object_order_depends_target_mlk_ir
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_ir.dir/src/ir/math_op.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_ir.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_ir.dir/src/ir
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_ir.dir/mlk_ir.pdb
-  TARGET_PDB = bin/lib/libmlk_ir.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_ir.dir
 
 build compiler/CMakeFiles/mlk_ir.dir/src/ir/names.cpp.o: CXX_COMPILER__mlk_ir_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/ir/names.cpp || cmake_object_order_depends_target_mlk_ir
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_ir.dir/src/ir/names.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_ir.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_ir.dir/src/ir
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_ir.dir/mlk_ir.pdb
-  TARGET_PDB = bin/lib/libmlk_ir.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_ir.dir
 
 build compiler/CMakeFiles/mlk_ir.dir/src/ir/math_graph.cpp.o: CXX_COMPILER__mlk_ir_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/ir/math_graph.cpp || cmake_object_order_depends_target_mlk_ir
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_ir.dir/src/ir/math_graph.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_ir.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_ir.dir/src/ir
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_ir.dir/mlk_ir.pdb
-  TARGET_PDB = bin/lib/libmlk_ir.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_ir.dir
 
 build compiler/CMakeFiles/mlk_ir.dir/src/ir/graph_printer.cpp.o: CXX_COMPILER__mlk_ir_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/ir/graph_printer.cpp || cmake_object_order_depends_target_mlk_ir
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_ir.dir/src/ir/graph_printer.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_ir.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_ir.dir/src/ir
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_ir.dir/mlk_ir.pdb
-  TARGET_PDB = bin/lib/libmlk_ir.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_ir.dir
 
 build compiler/CMakeFiles/mlk_ir.dir/src/ir/graph_json.cpp.o: CXX_COMPILER__mlk_ir_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/ir/graph_json.cpp || cmake_object_order_depends_target_mlk_ir
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_ir.dir/src/ir/graph_json.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_ir.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_ir.dir/src/ir
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_ir.dir/mlk_ir.pdb
-  TARGET_PDB = bin/lib/libmlk_ir.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_ir.dir
 
 build compiler/CMakeFiles/mlk_ir.dir/src/support/kernel_ir.cpp.o: CXX_COMPILER__mlk_ir_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/support/kernel_ir.cpp || cmake_object_order_depends_target_mlk_ir
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_ir.dir/src/support/kernel_ir.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_ir.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_ir.dir/src/support
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_ir.dir/mlk_ir.pdb
-  TARGET_PDB = bin/lib/libmlk_ir.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_ir.dir
 
 build compiler/CMakeFiles/mlk_ir.dir/src/effect/effect_inference.cpp.o: CXX_COMPILER__mlk_ir_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/effect/effect_inference.cpp || cmake_object_order_depends_target_mlk_ir
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_ir.dir/src/effect/effect_inference.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_ir.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_ir.dir/src/effect
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_ir.dir/mlk_ir.pdb
-  TARGET_PDB = bin/lib/libmlk_ir.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_ir.dir
 
 
@@ -244,9 +225,8 @@ build bin/lib/libmlk_ir.a: CXX_STATIC_LIBRARY_LINKER__mlk_ir_Debug compiler/CMak
   OBJECT_DIR = compiler/CMakeFiles/mlk_ir.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_ir.dir/mlk_ir.pdb
   TARGET_FILE = bin/lib/libmlk_ir.a
-  TARGET_PDB = bin/lib/libmlk_ir.pdb
+  TARGET_PDB = mlk_ir.a.dbg
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_ir.dir
 
 # =============================================================================
@@ -261,34 +241,28 @@ build cmake_object_order_depends_target_mlk_type: phony || cmake_object_order_de
 build compiler/CMakeFiles/mlk_type.dir/src/type/domain.cpp.o: CXX_COMPILER__mlk_type_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/type/domain.cpp || cmake_object_order_depends_target_mlk_type
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_type.dir/src/type/domain.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_type.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_type.dir/src/type
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_type.dir/mlk_type.pdb
-  TARGET_PDB = bin/lib/libmlk_type.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_type.dir
 
 build compiler/CMakeFiles/mlk_type.dir/src/type/domain_profile.cpp.o: CXX_COMPILER__mlk_type_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/type/domain_profile.cpp || cmake_object_order_depends_target_mlk_type
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_type.dir/src/type/domain_profile.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_type.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_type.dir/src/type
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_type.dir/mlk_type.pdb
-  TARGET_PDB = bin/lib/libmlk_type.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_type.dir
 
 build compiler/CMakeFiles/mlk_type.dir/src/type/type_inference.cpp.o: CXX_COMPILER__mlk_type_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/type/type_inference.cpp || cmake_object_order_depends_target_mlk_type
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_type.dir/src/type/type_inference.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_type.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_type.dir/src/type
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_type.dir/mlk_type.pdb
-  TARGET_PDB = bin/lib/libmlk_type.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_type.dir
 
 
@@ -305,9 +279,8 @@ build bin/lib/libmlk_type.a: CXX_STATIC_LIBRARY_LINKER__mlk_type_Debug compiler/
   OBJECT_DIR = compiler/CMakeFiles/mlk_type.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_type.dir/mlk_type.pdb
   TARGET_FILE = bin/lib/libmlk_type.a
-  TARGET_PDB = bin/lib/libmlk_type.pdb
+  TARGET_PDB = mlk_type.a.dbg
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_type.dir
 
 # =============================================================================
@@ -322,12 +295,10 @@ build cmake_object_order_depends_target_mlk_property: phony || cmake_object_orde
 build compiler/CMakeFiles/mlk_property.dir/src/property/property_inference.cpp.o: CXX_COMPILER__mlk_property_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/property/property_inference.cpp || cmake_object_order_depends_target_mlk_property
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_property.dir/src/property/property_inference.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_property.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_property.dir/src/property
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_property.dir/mlk_property.pdb
-  TARGET_PDB = bin/lib/libmlk_property.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_property.dir
 
 
@@ -344,9 +315,8 @@ build bin/lib/libmlk_property.a: CXX_STATIC_LIBRARY_LINKER__mlk_property_Debug c
   OBJECT_DIR = compiler/CMakeFiles/mlk_property.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_property.dir/mlk_property.pdb
   TARGET_FILE = bin/lib/libmlk_property.a
-  TARGET_PDB = bin/lib/libmlk_property.pdb
+  TARGET_PDB = mlk_property.a.dbg
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_property.dir
 
 # =============================================================================
@@ -361,12 +331,10 @@ build cmake_object_order_depends_target_mlk_proof: phony || cmake_object_order_d
 build compiler/CMakeFiles/mlk_proof.dir/src/proof/accuracy_contract.cpp.o: CXX_COMPILER__mlk_proof_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/proof/accuracy_contract.cpp || cmake_object_order_depends_target_mlk_proof
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_proof.dir/src/proof/accuracy_contract.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_proof.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_proof.dir/src/proof
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_proof.dir/mlk_proof.pdb
-  TARGET_PDB = bin/lib/libmlk_proof.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_proof.dir
 
 
@@ -383,9 +351,8 @@ build bin/lib/libmlk_proof.a: CXX_STATIC_LIBRARY_LINKER__mlk_proof_Debug compile
   OBJECT_DIR = compiler/CMakeFiles/mlk_proof.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_proof.dir/mlk_proof.pdb
   TARGET_FILE = bin/lib/libmlk_proof.a
-  TARGET_PDB = bin/lib/libmlk_proof.pdb
+  TARGET_PDB = mlk_proof.a.dbg
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_proof.dir
 
 # =============================================================================
@@ -400,12 +367,10 @@ build cmake_object_order_depends_target_mlk_verifier: phony || cmake_object_orde
 build compiler/CMakeFiles/mlk_verifier.dir/src/verifier/graph_verifier.cpp.o: CXX_COMPILER__mlk_verifier_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/verifier/graph_verifier.cpp || cmake_object_order_depends_target_mlk_verifier
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_verifier.dir/src/verifier/graph_verifier.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_verifier.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_verifier.dir/src/verifier
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_verifier.dir/mlk_verifier.pdb
-  TARGET_PDB = bin/lib/libmlk_verifier.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_verifier.dir
 
 
@@ -422,9 +387,8 @@ build bin/lib/libmlk_verifier.a: CXX_STATIC_LIBRARY_LINKER__mlk_verifier_Debug c
   OBJECT_DIR = compiler/CMakeFiles/mlk_verifier.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_verifier.dir/mlk_verifier.pdb
   TARGET_FILE = bin/lib/libmlk_verifier.a
-  TARGET_PDB = bin/lib/libmlk_verifier.pdb
+  TARGET_PDB = mlk_verifier.a.dbg
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_verifier.dir
 
 # =============================================================================
@@ -439,12 +403,10 @@ build cmake_object_order_depends_target_mlk_pass_core: phony || cmake_object_ord
 build compiler/CMakeFiles/mlk_pass_core.dir/src/pass/pass_registry.cpp.o: CXX_COMPILER__mlk_pass_core_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/pass/pass_registry.cpp || cmake_object_order_depends_target_mlk_pass_core
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_pass_core.dir/src/pass/pass_registry.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_pass_core.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_pass_core.dir/src/pass
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_pass_core.dir/mlk_pass_core.pdb
-  TARGET_PDB = bin/lib/libmlk_pass_core.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_pass_core.dir
 
 
@@ -461,9 +423,8 @@ build bin/lib/libmlk_pass_core.a: CXX_STATIC_LIBRARY_LINKER__mlk_pass_core_Debug
   OBJECT_DIR = compiler/CMakeFiles/mlk_pass_core.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_pass_core.dir/mlk_pass_core.pdb
   TARGET_FILE = bin/lib/libmlk_pass_core.a
-  TARGET_PDB = bin/lib/libmlk_pass_core.pdb
+  TARGET_PDB = mlk_pass_core.a.dbg
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_pass_core.dir
 
 # =============================================================================
@@ -478,12 +439,10 @@ build cmake_object_order_depends_target_mlk_cost: phony || cmake_object_order_de
 build compiler/CMakeFiles/mlk_cost.dir/src/cost/cost_model.cpp.o: CXX_COMPILER__mlk_cost_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/cost/cost_model.cpp || cmake_object_order_depends_target_mlk_cost
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_cost.dir/src/cost/cost_model.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_cost.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_cost.dir/src/cost
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_cost.dir/mlk_cost.pdb
-  TARGET_PDB = bin/lib/libmlk_cost.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_cost.dir
 
 
@@ -500,9 +459,8 @@ build bin/lib/libmlk_cost.a: CXX_STATIC_LIBRARY_LINKER__mlk_cost_Debug compiler/
   OBJECT_DIR = compiler/CMakeFiles/mlk_cost.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_cost.dir/mlk_cost.pdb
   TARGET_FILE = bin/lib/libmlk_cost.a
-  TARGET_PDB = bin/lib/libmlk_cost.pdb
+  TARGET_PDB = mlk_cost.a.dbg
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_cost.dir
 
 # =============================================================================
@@ -517,133 +475,109 @@ build cmake_object_order_depends_target_mlk_passes: phony || cmake_object_order_
 build compiler/CMakeFiles/mlk_passes.dir/src/passes/passes.cpp.o: CXX_COMPILER__mlk_passes_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/passes/passes.cpp || cmake_object_order_depends_target_mlk_passes
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_passes.dir/src/passes/passes.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_passes.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_passes.dir/src/passes
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_passes.dir/mlk_passes.pdb
-  TARGET_PDB = bin/lib/libmlk_passes.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_passes.dir
 
 build compiler/CMakeFiles/mlk_passes.dir/src/passes/analysis/analysis_passes.cpp.o: CXX_COMPILER__mlk_passes_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/passes/analysis/analysis_passes.cpp || cmake_object_order_depends_target_mlk_passes
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_passes.dir/src/passes/analysis/analysis_passes.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_passes.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_passes.dir/src/passes/analysis
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_passes.dir/mlk_passes.pdb
-  TARGET_PDB = bin/lib/libmlk_passes.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_passes.dir
 
 build compiler/CMakeFiles/mlk_passes.dir/src/passes/math/math_passes.cpp.o: CXX_COMPILER__mlk_passes_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/passes/math/math_passes.cpp || cmake_object_order_depends_target_mlk_passes
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_passes.dir/src/passes/math/math_passes.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_passes.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_passes.dir/src/passes/math
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_passes.dir/mlk_passes.pdb
-  TARGET_PDB = bin/lib/libmlk_passes.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_passes.dir
 
 build compiler/CMakeFiles/mlk_passes.dir/src/passes/egraph/egraph.cpp.o: CXX_COMPILER__mlk_passes_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/passes/egraph/egraph.cpp || cmake_object_order_depends_target_mlk_passes
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_passes.dir/src/passes/egraph/egraph.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_passes.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_passes.dir/src/passes/egraph
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_passes.dir/mlk_passes.pdb
-  TARGET_PDB = bin/lib/libmlk_passes.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_passes.dir
 
 build compiler/CMakeFiles/mlk_passes.dir/src/passes/egraph/egraph_passes.cpp.o: CXX_COMPILER__mlk_passes_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/passes/egraph/egraph_passes.cpp || cmake_object_order_depends_target_mlk_passes
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_passes.dir/src/passes/egraph/egraph_passes.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_passes.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_passes.dir/src/passes/egraph
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_passes.dir/mlk_passes.pdb
-  TARGET_PDB = bin/lib/libmlk_passes.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_passes.dir
 
 build compiler/CMakeFiles/mlk_passes.dir/src/passes/calculus/calculus_passes.cpp.o: CXX_COMPILER__mlk_passes_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/passes/calculus/calculus_passes.cpp || cmake_object_order_depends_target_mlk_passes
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_passes.dir/src/passes/calculus/calculus_passes.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_passes.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_passes.dir/src/passes/calculus
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_passes.dir/mlk_passes.pdb
-  TARGET_PDB = bin/lib/libmlk_passes.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_passes.dir
 
 build compiler/CMakeFiles/mlk_passes.dir/src/passes/tensor/tensor_passes.cpp.o: CXX_COMPILER__mlk_passes_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/passes/tensor/tensor_passes.cpp || cmake_object_order_depends_target_mlk_passes
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_passes.dir/src/passes/tensor/tensor_passes.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_passes.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_passes.dir/src/passes/tensor
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_passes.dir/mlk_passes.pdb
-  TARGET_PDB = bin/lib/libmlk_passes.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_passes.dir
 
 build compiler/CMakeFiles/mlk_passes.dir/src/passes/approx/approx_passes.cpp.o: CXX_COMPILER__mlk_passes_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/passes/approx/approx_passes.cpp || cmake_object_order_depends_target_mlk_passes
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_passes.dir/src/passes/approx/approx_passes.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_passes.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_passes.dir/src/passes/approx
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_passes.dir/mlk_passes.pdb
-  TARGET_PDB = bin/lib/libmlk_passes.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_passes.dir
 
 build compiler/CMakeFiles/mlk_passes.dir/src/passes/schedule/schedule_passes.cpp.o: CXX_COMPILER__mlk_passes_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/passes/schedule/schedule_passes.cpp || cmake_object_order_depends_target_mlk_passes
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_passes.dir/src/passes/schedule/schedule_passes.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_passes.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_passes.dir/src/passes/schedule
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_passes.dir/mlk_passes.pdb
-  TARGET_PDB = bin/lib/libmlk_passes.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_passes.dir
 
 build compiler/CMakeFiles/mlk_passes.dir/src/passes/physical/physical_passes.cpp.o: CXX_COMPILER__mlk_passes_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/passes/physical/physical_passes.cpp || cmake_object_order_depends_target_mlk_passes
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_passes.dir/src/passes/physical/physical_passes.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_passes.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_passes.dir/src/passes/physical
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_passes.dir/mlk_passes.pdb
-  TARGET_PDB = bin/lib/libmlk_passes.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_passes.dir
 
 build compiler/CMakeFiles/mlk_passes.dir/src/passes/lower/lower_passes.cpp.o: CXX_COMPILER__mlk_passes_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/passes/lower/lower_passes.cpp || cmake_object_order_depends_target_mlk_passes
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_passes.dir/src/passes/lower/lower_passes.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_passes.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_passes.dir/src/passes/lower
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_passes.dir/mlk_passes.pdb
-  TARGET_PDB = bin/lib/libmlk_passes.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_passes.dir
 
 build compiler/CMakeFiles/mlk_passes.dir/src/passes/backend/backend_passes.cpp.o: CXX_COMPILER__mlk_passes_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/passes/backend/backend_passes.cpp || cmake_object_order_depends_target_mlk_passes
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_passes.dir/src/passes/backend/backend_passes.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_passes.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_passes.dir/src/passes/backend
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_passes.dir/mlk_passes.pdb
-  TARGET_PDB = bin/lib/libmlk_passes.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_passes.dir
 
 
@@ -660,9 +594,8 @@ build bin/lib/libmlk_passes.a: CXX_STATIC_LIBRARY_LINKER__mlk_passes_Debug compi
   OBJECT_DIR = compiler/CMakeFiles/mlk_passes.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_passes.dir/mlk_passes.pdb
   TARGET_FILE = bin/lib/libmlk_passes.a
-  TARGET_PDB = bin/lib/libmlk_passes.pdb
+  TARGET_PDB = mlk_passes.a.dbg
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_passes.dir
 
 # =============================================================================
@@ -677,12 +610,10 @@ build cmake_object_order_depends_target_mlk_pipeline: phony || cmake_object_orde
 build compiler/CMakeFiles/mlk_pipeline.dir/src/pipeline/pipeline_runner.cpp.o: CXX_COMPILER__mlk_pipeline_unscanned_Debug /home/z/my-project/mlk2-repo/compiler/src/pipeline/pipeline_runner.cpp || cmake_object_order_depends_target_mlk_pipeline
   CONFIG = Debug
   DEP_FILE = compiler/CMakeFiles/mlk_pipeline.dir/src/pipeline/pipeline_runner.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = compiler/CMakeFiles/mlk_pipeline.dir
   OBJECT_FILE_DIR = compiler/CMakeFiles/mlk_pipeline.dir/src/pipeline
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_pipeline.dir/mlk_pipeline.pdb
-  TARGET_PDB = bin/lib/libmlk_pipeline.pdb
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_pipeline.dir
 
 
@@ -699,9 +630,8 @@ build bin/lib/libmlk_pipeline.a: CXX_STATIC_LIBRARY_LINKER__mlk_pipeline_Debug c
   OBJECT_DIR = compiler/CMakeFiles/mlk_pipeline.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = compiler/CMakeFiles/mlk_pipeline.dir/mlk_pipeline.pdb
   TARGET_FILE = bin/lib/libmlk_pipeline.a
-  TARGET_PDB = bin/lib/libmlk_pipeline.pdb
+  TARGET_PDB = mlk_pipeline.a.dbg
   TARGET_SUPPORT_DIR = compiler/CMakeFiles/mlk_pipeline.dir
 
 
@@ -756,23 +686,19 @@ build cmake_object_order_depends_target_mlk_runtime: phony || cmake_object_order
 build runtime/CMakeFiles/mlk_runtime.dir/src/runtime_core.cpp.o: CXX_COMPILER__mlk_runtime_unscanned_Debug /home/z/my-project/mlk2-repo/runtime/src/runtime_core.cpp || cmake_object_order_depends_target_mlk_runtime
   CONFIG = Debug
   DEP_FILE = runtime/CMakeFiles/mlk_runtime.dir/src/runtime_core.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = runtime/CMakeFiles/mlk_runtime.dir
   OBJECT_FILE_DIR = runtime/CMakeFiles/mlk_runtime.dir/src
-  TARGET_COMPILE_PDB = runtime/CMakeFiles/mlk_runtime.dir/mlk_runtime.pdb
-  TARGET_PDB = bin/lib/libmlk_runtime.pdb
   TARGET_SUPPORT_DIR = runtime/CMakeFiles/mlk_runtime.dir
 
 build runtime/CMakeFiles/mlk_runtime.dir/src/execution/execution.cpp.o: CXX_COMPILER__mlk_runtime_unscanned_Debug /home/z/my-project/mlk2-repo/runtime/src/execution/execution.cpp || cmake_object_order_depends_target_mlk_runtime
   CONFIG = Debug
   DEP_FILE = runtime/CMakeFiles/mlk_runtime.dir/src/execution/execution.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = runtime/CMakeFiles/mlk_runtime.dir
   OBJECT_FILE_DIR = runtime/CMakeFiles/mlk_runtime.dir/src/execution
-  TARGET_COMPILE_PDB = runtime/CMakeFiles/mlk_runtime.dir/mlk_runtime.pdb
-  TARGET_PDB = bin/lib/libmlk_runtime.pdb
   TARGET_SUPPORT_DIR = runtime/CMakeFiles/mlk_runtime.dir
 
 
@@ -789,9 +715,8 @@ build bin/lib/libmlk_runtime.a: CXX_STATIC_LIBRARY_LINKER__mlk_runtime_Debug run
   OBJECT_DIR = runtime/CMakeFiles/mlk_runtime.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = runtime/CMakeFiles/mlk_runtime.dir/mlk_runtime.pdb
   TARGET_FILE = bin/lib/libmlk_runtime.a
-  TARGET_PDB = bin/lib/libmlk_runtime.pdb
+  TARGET_PDB = mlk_runtime.a.dbg
   TARGET_SUPPORT_DIR = runtime/CMakeFiles/mlk_runtime.dir
 
 
@@ -846,12 +771,10 @@ build cmake_object_order_depends_target_mlk_autotune: phony || cmake_object_orde
 build autotuner/CMakeFiles/mlk_autotune.dir/src/autotuner.cpp.o: CXX_COMPILER__mlk_autotune_unscanned_Debug /home/z/my-project/mlk2-repo/autotuner/src/autotuner.cpp || cmake_object_order_depends_target_mlk_autotune
   CONFIG = Debug
   DEP_FILE = autotuner/CMakeFiles/mlk_autotune.dir/src/autotuner.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/runtime/include
   OBJECT_DIR = autotuner/CMakeFiles/mlk_autotune.dir
   OBJECT_FILE_DIR = autotuner/CMakeFiles/mlk_autotune.dir/src
-  TARGET_COMPILE_PDB = autotuner/CMakeFiles/mlk_autotune.dir/mlk_autotune.pdb
-  TARGET_PDB = bin/lib/libmlk_autotune.pdb
   TARGET_SUPPORT_DIR = autotuner/CMakeFiles/mlk_autotune.dir
 
 
@@ -868,9 +791,8 @@ build bin/lib/libmlk_autotune.a: CXX_STATIC_LIBRARY_LINKER__mlk_autotune_Debug a
   OBJECT_DIR = autotuner/CMakeFiles/mlk_autotune.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = autotuner/CMakeFiles/mlk_autotune.dir/mlk_autotune.pdb
   TARGET_FILE = bin/lib/libmlk_autotune.a
-  TARGET_PDB = bin/lib/libmlk_autotune.pdb
+  TARGET_PDB = mlk_autotune.a.dbg
   TARGET_SUPPORT_DIR = autotuner/CMakeFiles/mlk_autotune.dir
 
 
@@ -925,12 +847,10 @@ build cmake_object_order_depends_target_mlk_superopt: phony || cmake_object_orde
 build superopt/CMakeFiles/mlk_superopt.dir/src/superopt.cpp.o: CXX_COMPILER__mlk_superopt_unscanned_Debug /home/z/my-project/mlk2-repo/superopt/src/superopt.cpp || cmake_object_order_depends_target_mlk_superopt
   CONFIG = Debug
   DEP_FILE = superopt/CMakeFiles/mlk_superopt.dir/src/superopt.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = superopt/CMakeFiles/mlk_superopt.dir
   OBJECT_FILE_DIR = superopt/CMakeFiles/mlk_superopt.dir/src
-  TARGET_COMPILE_PDB = superopt/CMakeFiles/mlk_superopt.dir/mlk_superopt.pdb
-  TARGET_PDB = bin/lib/libmlk_superopt.pdb
   TARGET_SUPPORT_DIR = superopt/CMakeFiles/mlk_superopt.dir
 
 
@@ -947,9 +867,8 @@ build bin/lib/libmlk_superopt.a: CXX_STATIC_LIBRARY_LINKER__mlk_superopt_Debug s
   OBJECT_DIR = superopt/CMakeFiles/mlk_superopt.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = superopt/CMakeFiles/mlk_superopt.dir/mlk_superopt.pdb
   TARGET_FILE = bin/lib/libmlk_superopt.a
-  TARGET_PDB = bin/lib/libmlk_superopt.pdb
+  TARGET_PDB = mlk_superopt.a.dbg
   TARGET_SUPPORT_DIR = superopt/CMakeFiles/mlk_superopt.dir
 
 
@@ -1084,12 +1003,10 @@ build cmake_object_order_depends_target_mlk_backend_cpu: phony || cmake_object_o
 build backends/cpu/CMakeFiles/mlk_backend_cpu.dir/src/cpp_emitter.cpp.o: CXX_COMPILER__mlk_backend_cpu_unscanned_Debug /home/z/my-project/mlk2-repo/backends/cpu/src/cpp_emitter.cpp || cmake_object_order_depends_target_mlk_backend_cpu
   CONFIG = Debug
   DEP_FILE = backends/cpu/CMakeFiles/mlk_backend_cpu.dir/src/cpp_emitter.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/backends/cpu/include -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include
   OBJECT_DIR = backends/cpu/CMakeFiles/mlk_backend_cpu.dir
   OBJECT_FILE_DIR = backends/cpu/CMakeFiles/mlk_backend_cpu.dir/src
-  TARGET_COMPILE_PDB = backends/cpu/CMakeFiles/mlk_backend_cpu.dir/mlk_backend_cpu.pdb
-  TARGET_PDB = bin/lib/libmlk_backend_cpu.pdb
   TARGET_SUPPORT_DIR = backends/cpu/CMakeFiles/mlk_backend_cpu.dir
 
 
@@ -1106,9 +1023,8 @@ build bin/lib/libmlk_backend_cpu.a: CXX_STATIC_LIBRARY_LINKER__mlk_backend_cpu_D
   OBJECT_DIR = backends/cpu/CMakeFiles/mlk_backend_cpu.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = backends/cpu/CMakeFiles/mlk_backend_cpu.dir/mlk_backend_cpu.pdb
   TARGET_FILE = bin/lib/libmlk_backend_cpu.a
-  TARGET_PDB = bin/lib/libmlk_backend_cpu.pdb
+  TARGET_PDB = mlk_backend_cpu.a.dbg
   TARGET_SUPPORT_DIR = backends/cpu/CMakeFiles/mlk_backend_cpu.dir
 
 
@@ -1204,12 +1120,10 @@ build tests/unit/CMakeFiles/mlk_unit_core.dir/unit_core.cpp.o: CXX_COMPILER__mlk
   CONFIG = Debug
   DEFINES = -DMLK_TEST_MAIN=\"mlk_unit_core\"
   DEP_FILE = tests/unit/CMakeFiles/mlk_unit_core.dir/unit_core.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_core.dir
   OBJECT_FILE_DIR = tests/unit/CMakeFiles/mlk_unit_core.dir
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_core.dir/
-  TARGET_PDB = bin/mlk_unit_core.pdb
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_core.dir
 
 
@@ -1229,9 +1143,8 @@ build bin/mlk_unit_core: CXX_EXECUTABLE_LINKER__mlk_unit_core_Debug tests/unit/C
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_core.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_core.dir/
   TARGET_FILE = bin/mlk_unit_core
-  TARGET_PDB = bin/mlk_unit_core.pdb
+  TARGET_PDB = mlk_unit_core.dbg
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_core.dir
 
 # =============================================================================
@@ -1247,12 +1160,10 @@ build tests/unit/CMakeFiles/mlk_unit_ir.dir/unit_ir.cpp.o: CXX_COMPILER__mlk_uni
   CONFIG = Debug
   DEFINES = -DMLK_TEST_MAIN=\"mlk_unit_ir\"
   DEP_FILE = tests/unit/CMakeFiles/mlk_unit_ir.dir/unit_ir.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_ir.dir
   OBJECT_FILE_DIR = tests/unit/CMakeFiles/mlk_unit_ir.dir
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_ir.dir/
-  TARGET_PDB = bin/mlk_unit_ir.pdb
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_ir.dir
 
 
@@ -1272,9 +1183,8 @@ build bin/mlk_unit_ir: CXX_EXECUTABLE_LINKER__mlk_unit_ir_Debug tests/unit/CMake
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_ir.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_ir.dir/
   TARGET_FILE = bin/mlk_unit_ir
-  TARGET_PDB = bin/mlk_unit_ir.pdb
+  TARGET_PDB = mlk_unit_ir.dbg
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_ir.dir
 
 # =============================================================================
@@ -1290,12 +1200,10 @@ build tests/unit/CMakeFiles/mlk_unit_passes_math.dir/unit_passes_math.cpp.o: CXX
   CONFIG = Debug
   DEFINES = -DMLK_TEST_MAIN=\"mlk_unit_passes_math\"
   DEP_FILE = tests/unit/CMakeFiles/mlk_unit_passes_math.dir/unit_passes_math.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_passes_math.dir
   OBJECT_FILE_DIR = tests/unit/CMakeFiles/mlk_unit_passes_math.dir
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_passes_math.dir/
-  TARGET_PDB = bin/mlk_unit_passes_math.pdb
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_passes_math.dir
 
 
@@ -1315,9 +1223,8 @@ build bin/mlk_unit_passes_math: CXX_EXECUTABLE_LINKER__mlk_unit_passes_math_Debu
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_passes_math.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_passes_math.dir/
   TARGET_FILE = bin/mlk_unit_passes_math
-  TARGET_PDB = bin/mlk_unit_passes_math.pdb
+  TARGET_PDB = mlk_unit_passes_math.dbg
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_passes_math.dir
 
 # =============================================================================
@@ -1333,12 +1240,10 @@ build tests/unit/CMakeFiles/mlk_unit_passes_analysis.dir/unit_passes_analysis.cp
   CONFIG = Debug
   DEFINES = -DMLK_TEST_MAIN=\"mlk_unit_passes_analysis\"
   DEP_FILE = tests/unit/CMakeFiles/mlk_unit_passes_analysis.dir/unit_passes_analysis.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_passes_analysis.dir
   OBJECT_FILE_DIR = tests/unit/CMakeFiles/mlk_unit_passes_analysis.dir
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_passes_analysis.dir/
-  TARGET_PDB = bin/mlk_unit_passes_analysis.pdb
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_passes_analysis.dir
 
 
@@ -1358,9 +1263,8 @@ build bin/mlk_unit_passes_analysis: CXX_EXECUTABLE_LINKER__mlk_unit_passes_analy
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_passes_analysis.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_passes_analysis.dir/
   TARGET_FILE = bin/mlk_unit_passes_analysis
-  TARGET_PDB = bin/mlk_unit_passes_analysis.pdb
+  TARGET_PDB = mlk_unit_passes_analysis.dbg
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_passes_analysis.dir
 
 # =============================================================================
@@ -1376,12 +1280,10 @@ build tests/unit/CMakeFiles/mlk_unit_egraph.dir/unit_egraph.cpp.o: CXX_COMPILER_
   CONFIG = Debug
   DEFINES = -DMLK_TEST_MAIN=\"mlk_unit_egraph\"
   DEP_FILE = tests/unit/CMakeFiles/mlk_unit_egraph.dir/unit_egraph.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_egraph.dir
   OBJECT_FILE_DIR = tests/unit/CMakeFiles/mlk_unit_egraph.dir
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_egraph.dir/
-  TARGET_PDB = bin/mlk_unit_egraph.pdb
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_egraph.dir
 
 
@@ -1401,9 +1303,8 @@ build bin/mlk_unit_egraph: CXX_EXECUTABLE_LINKER__mlk_unit_egraph_Debug tests/un
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_egraph.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_egraph.dir/
   TARGET_FILE = bin/mlk_unit_egraph
-  TARGET_PDB = bin/mlk_unit_egraph.pdb
+  TARGET_PDB = mlk_unit_egraph.dbg
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_egraph.dir
 
 # =============================================================================
@@ -1419,12 +1320,10 @@ build tests/unit/CMakeFiles/mlk_unit_calculus.dir/unit_calculus.cpp.o: CXX_COMPI
   CONFIG = Debug
   DEFINES = -DMLK_TEST_MAIN=\"mlk_unit_calculus\"
   DEP_FILE = tests/unit/CMakeFiles/mlk_unit_calculus.dir/unit_calculus.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_calculus.dir
   OBJECT_FILE_DIR = tests/unit/CMakeFiles/mlk_unit_calculus.dir
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_calculus.dir/
-  TARGET_PDB = bin/mlk_unit_calculus.pdb
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_calculus.dir
 
 
@@ -1444,9 +1343,8 @@ build bin/mlk_unit_calculus: CXX_EXECUTABLE_LINKER__mlk_unit_calculus_Debug test
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_calculus.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_calculus.dir/
   TARGET_FILE = bin/mlk_unit_calculus
-  TARGET_PDB = bin/mlk_unit_calculus.pdb
+  TARGET_PDB = mlk_unit_calculus.dbg
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_calculus.dir
 
 # =============================================================================
@@ -1462,12 +1360,10 @@ build tests/unit/CMakeFiles/mlk_unit_tensor.dir/unit_tensor.cpp.o: CXX_COMPILER_
   CONFIG = Debug
   DEFINES = -DMLK_TEST_MAIN=\"mlk_unit_tensor\"
   DEP_FILE = tests/unit/CMakeFiles/mlk_unit_tensor.dir/unit_tensor.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_tensor.dir
   OBJECT_FILE_DIR = tests/unit/CMakeFiles/mlk_unit_tensor.dir
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_tensor.dir/
-  TARGET_PDB = bin/mlk_unit_tensor.pdb
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_tensor.dir
 
 
@@ -1487,9 +1383,8 @@ build bin/mlk_unit_tensor: CXX_EXECUTABLE_LINKER__mlk_unit_tensor_Debug tests/un
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_tensor.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_tensor.dir/
   TARGET_FILE = bin/mlk_unit_tensor
-  TARGET_PDB = bin/mlk_unit_tensor.pdb
+  TARGET_PDB = mlk_unit_tensor.dbg
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_tensor.dir
 
 # =============================================================================
@@ -1505,12 +1400,10 @@ build tests/unit/CMakeFiles/mlk_unit_runtime.dir/unit_runtime.cpp.o: CXX_COMPILE
   CONFIG = Debug
   DEFINES = -DMLK_TEST_MAIN=\"mlk_unit_runtime\"
   DEP_FILE = tests/unit/CMakeFiles/mlk_unit_runtime.dir/unit_runtime.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_runtime.dir
   OBJECT_FILE_DIR = tests/unit/CMakeFiles/mlk_unit_runtime.dir
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_runtime.dir/
-  TARGET_PDB = bin/mlk_unit_runtime.pdb
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_runtime.dir
 
 
@@ -1530,9 +1423,8 @@ build bin/mlk_unit_runtime: CXX_EXECUTABLE_LINKER__mlk_unit_runtime_Debug tests/
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_runtime.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_runtime.dir/
   TARGET_FILE = bin/mlk_unit_runtime
-  TARGET_PDB = bin/mlk_unit_runtime.pdb
+  TARGET_PDB = mlk_unit_runtime.dbg
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_runtime.dir
 
 # =============================================================================
@@ -1548,12 +1440,10 @@ build tests/unit/CMakeFiles/mlk_unit_autotune.dir/unit_autotune.cpp.o: CXX_COMPI
   CONFIG = Debug
   DEFINES = -DMLK_TEST_MAIN=\"mlk_unit_autotune\"
   DEP_FILE = tests/unit/CMakeFiles/mlk_unit_autotune.dir/unit_autotune.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_autotune.dir
   OBJECT_FILE_DIR = tests/unit/CMakeFiles/mlk_unit_autotune.dir
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_autotune.dir/
-  TARGET_PDB = bin/mlk_unit_autotune.pdb
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_autotune.dir
 
 
@@ -1573,9 +1463,8 @@ build bin/mlk_unit_autotune: CXX_EXECUTABLE_LINKER__mlk_unit_autotune_Debug test
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_autotune.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_autotune.dir/
   TARGET_FILE = bin/mlk_unit_autotune
-  TARGET_PDB = bin/mlk_unit_autotune.pdb
+  TARGET_PDB = mlk_unit_autotune.dbg
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_autotune.dir
 
 # =============================================================================
@@ -1591,12 +1480,10 @@ build tests/unit/CMakeFiles/mlk_unit_superopt.dir/unit_superopt.cpp.o: CXX_COMPI
   CONFIG = Debug
   DEFINES = -DMLK_TEST_MAIN=\"mlk_unit_superopt\"
   DEP_FILE = tests/unit/CMakeFiles/mlk_unit_superopt.dir/unit_superopt.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_superopt.dir
   OBJECT_FILE_DIR = tests/unit/CMakeFiles/mlk_unit_superopt.dir
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_superopt.dir/
-  TARGET_PDB = bin/mlk_unit_superopt.pdb
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_superopt.dir
 
 
@@ -1616,10 +1503,49 @@ build bin/mlk_unit_superopt: CXX_EXECUTABLE_LINKER__mlk_unit_superopt_Debug test
   OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_superopt.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/unit/CMakeFiles/mlk_unit_superopt.dir/
   TARGET_FILE = bin/mlk_unit_superopt
-  TARGET_PDB = bin/mlk_unit_superopt.pdb
+  TARGET_PDB = mlk_unit_superopt.dbg
   TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_superopt.dir
+
+# =============================================================================
+# Object build statements for EXECUTABLE target mlk_unit_golden
+
+
+#############################################
+# Order-only phony target for mlk_unit_golden
+
+build cmake_object_order_depends_target_mlk_unit_golden: phony || cmake_object_order_depends_target_mlk_autotune cmake_object_order_depends_target_mlk_backend_cpu cmake_object_order_depends_target_mlk_core cmake_object_order_depends_target_mlk_cost cmake_object_order_depends_target_mlk_ir cmake_object_order_depends_target_mlk_pass_core cmake_object_order_depends_target_mlk_passes cmake_object_order_depends_target_mlk_pipeline cmake_object_order_depends_target_mlk_proof cmake_object_order_depends_target_mlk_property cmake_object_order_depends_target_mlk_runtime cmake_object_order_depends_target_mlk_superopt cmake_object_order_depends_target_mlk_type cmake_object_order_depends_target_mlk_verifier
+
+build tests/unit/CMakeFiles/mlk_unit_golden.dir/unit_golden.cpp.o: CXX_COMPILER__mlk_unit_golden_unscanned_Debug /home/z/my-project/mlk2-repo/tests/unit/unit_golden.cpp || cmake_object_order_depends_target_mlk_unit_golden
+  CONFIG = Debug
+  DEFINES = -DMLK_TEST_MAIN=\"mlk_unit_golden\"
+  DEP_FILE = tests/unit/CMakeFiles/mlk_unit_golden.dir/unit_golden.cpp.o.d
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
+  INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
+  OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_golden.dir
+  OBJECT_FILE_DIR = tests/unit/CMakeFiles/mlk_unit_golden.dir
+  TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_golden.dir
+
+
+# =============================================================================
+# Link build statements for EXECUTABLE target mlk_unit_golden
+
+
+#############################################
+# Link the executable bin/mlk_unit_golden
+
+build bin/mlk_unit_golden: CXX_EXECUTABLE_LINKER__mlk_unit_golden_Debug tests/unit/CMakeFiles/mlk_unit_golden.dir/unit_golden.cpp.o | bin/lib/libmlk_runtime.a bin/lib/libmlk_autotune.a bin/lib/libmlk_superopt.a bin/lib/libmlk_backend_cpu.a bin/lib/libmlk_runtime.a bin/lib/libmlk_pipeline.a bin/lib/libmlk_passes.a bin/lib/libmlk_pass_core.a bin/lib/libmlk_proof.a bin/lib/libmlk_cost.a bin/lib/libmlk_verifier.a bin/lib/libmlk_property.a bin/lib/libmlk_type.a bin/lib/libmlk_ir.a bin/lib/libmlk_core.a || bin/lib/libmlk_autotune.a bin/lib/libmlk_backend_cpu.a bin/lib/libmlk_core.a bin/lib/libmlk_cost.a bin/lib/libmlk_ir.a bin/lib/libmlk_pass_core.a bin/lib/libmlk_passes.a bin/lib/libmlk_pipeline.a bin/lib/libmlk_proof.a bin/lib/libmlk_property.a bin/lib/libmlk_runtime.a bin/lib/libmlk_superopt.a bin/lib/libmlk_type.a bin/lib/libmlk_verifier.a
+  CONFIG = Debug
+  DEP_FILE = tests/unit/CMakeFiles/mlk_unit_golden.dir/link.d
+  FLAGS = -g
+  LINK_FLAGS = -fsanitize=address -Wl,--dependency-file=tests/unit/CMakeFiles/mlk_unit_golden.dir/link.d
+  LINK_LIBRARIES = bin/lib/libmlk_runtime.a  bin/lib/libmlk_autotune.a  bin/lib/libmlk_superopt.a  bin/lib/libmlk_backend_cpu.a  bin/lib/libmlk_runtime.a  bin/lib/libmlk_pipeline.a  bin/lib/libmlk_passes.a  bin/lib/libmlk_pass_core.a  bin/lib/libmlk_proof.a  bin/lib/libmlk_cost.a  bin/lib/libmlk_verifier.a  bin/lib/libmlk_property.a  bin/lib/libmlk_type.a  bin/lib/libmlk_ir.a  bin/lib/libmlk_core.a
+  OBJECT_DIR = tests/unit/CMakeFiles/mlk_unit_golden.dir
+  POST_BUILD = :
+  PRE_LINK = :
+  TARGET_FILE = bin/mlk_unit_golden
+  TARGET_PDB = mlk_unit_golden.dbg
+  TARGET_SUPPORT_DIR = tests/unit/CMakeFiles/mlk_unit_golden.dir
 
 
 #############################################
@@ -1674,12 +1600,10 @@ build tests/differential/CMakeFiles/mlk_differential.dir/differential_test.cpp.o
   CONFIG = Debug
   DEFINES = -DMLK_TEST_MAIN=\"mlk_differential\"
   DEP_FILE = tests/differential/CMakeFiles/mlk_differential.dir/differential_test.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
   OBJECT_DIR = tests/differential/CMakeFiles/mlk_differential.dir
   OBJECT_FILE_DIR = tests/differential/CMakeFiles/mlk_differential.dir
-  TARGET_COMPILE_PDB = tests/differential/CMakeFiles/mlk_differential.dir/
-  TARGET_PDB = bin/mlk_differential.pdb
   TARGET_SUPPORT_DIR = tests/differential/CMakeFiles/mlk_differential.dir
 
 
@@ -1699,9 +1623,8 @@ build bin/mlk_differential: CXX_EXECUTABLE_LINKER__mlk_differential_Debug tests/
   OBJECT_DIR = tests/differential/CMakeFiles/mlk_differential.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/differential/CMakeFiles/mlk_differential.dir/
   TARGET_FILE = bin/mlk_differential
-  TARGET_PDB = bin/mlk_differential.pdb
+  TARGET_PDB = mlk_differential.dbg
   TARGET_SUPPORT_DIR = tests/differential/CMakeFiles/mlk_differential.dir
 
 
@@ -1757,12 +1680,10 @@ build tests/fallback/CMakeFiles/mlk_fallback.dir/fallback_test.cpp.o: CXX_COMPIL
   CONFIG = Debug
   DEFINES = -DMLK_TEST_MAIN=\"mlk_fallback\"
   DEP_FILE = tests/fallback/CMakeFiles/mlk_fallback.dir/fallback_test.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
   OBJECT_DIR = tests/fallback/CMakeFiles/mlk_fallback.dir
   OBJECT_FILE_DIR = tests/fallback/CMakeFiles/mlk_fallback.dir
-  TARGET_COMPILE_PDB = tests/fallback/CMakeFiles/mlk_fallback.dir/
-  TARGET_PDB = bin/mlk_fallback.pdb
   TARGET_SUPPORT_DIR = tests/fallback/CMakeFiles/mlk_fallback.dir
 
 
@@ -1782,9 +1703,8 @@ build bin/mlk_fallback: CXX_EXECUTABLE_LINKER__mlk_fallback_Debug tests/fallback
   OBJECT_DIR = tests/fallback/CMakeFiles/mlk_fallback.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/fallback/CMakeFiles/mlk_fallback.dir/
   TARGET_FILE = bin/mlk_fallback
-  TARGET_PDB = bin/mlk_fallback.pdb
+  TARGET_PDB = mlk_fallback.dbg
   TARGET_SUPPORT_DIR = tests/fallback/CMakeFiles/mlk_fallback.dir
 
 
@@ -1840,12 +1760,10 @@ build tests/fuzz/CMakeFiles/mlk_fuzz.dir/fuzz_test.cpp.o: CXX_COMPILER__mlk_fuzz
   CONFIG = Debug
   DEFINES = -DMLK_TEST_MAIN=\"mlk_fuzz\"
   DEP_FILE = tests/fuzz/CMakeFiles/mlk_fuzz.dir/fuzz_test.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
   OBJECT_DIR = tests/fuzz/CMakeFiles/mlk_fuzz.dir
   OBJECT_FILE_DIR = tests/fuzz/CMakeFiles/mlk_fuzz.dir
-  TARGET_COMPILE_PDB = tests/fuzz/CMakeFiles/mlk_fuzz.dir/
-  TARGET_PDB = bin/mlk_fuzz.pdb
   TARGET_SUPPORT_DIR = tests/fuzz/CMakeFiles/mlk_fuzz.dir
 
 
@@ -1865,9 +1783,8 @@ build bin/mlk_fuzz: CXX_EXECUTABLE_LINKER__mlk_fuzz_Debug tests/fuzz/CMakeFiles/
   OBJECT_DIR = tests/fuzz/CMakeFiles/mlk_fuzz.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/fuzz/CMakeFiles/mlk_fuzz.dir/
   TARGET_FILE = bin/mlk_fuzz
-  TARGET_PDB = bin/mlk_fuzz.pdb
+  TARGET_PDB = mlk_fuzz.dbg
   TARGET_SUPPORT_DIR = tests/fuzz/CMakeFiles/mlk_fuzz.dir
 
 
@@ -1923,12 +1840,10 @@ build tests/security/CMakeFiles/mlk_security.dir/security_test.cpp.o: CXX_COMPIL
   CONFIG = Debug
   DEFINES = -DMLK_TEST_MAIN=\"mlk_security\"
   DEP_FILE = tests/security/CMakeFiles/mlk_security.dir/security_test.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
   OBJECT_DIR = tests/security/CMakeFiles/mlk_security.dir
   OBJECT_FILE_DIR = tests/security/CMakeFiles/mlk_security.dir
-  TARGET_COMPILE_PDB = tests/security/CMakeFiles/mlk_security.dir/
-  TARGET_PDB = bin/mlk_security.pdb
   TARGET_SUPPORT_DIR = tests/security/CMakeFiles/mlk_security.dir
 
 
@@ -1948,9 +1863,8 @@ build bin/mlk_security: CXX_EXECUTABLE_LINKER__mlk_security_Debug tests/security
   OBJECT_DIR = tests/security/CMakeFiles/mlk_security.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/security/CMakeFiles/mlk_security.dir/
   TARGET_FILE = bin/mlk_security
-  TARGET_PDB = bin/mlk_security.pdb
+  TARGET_PDB = mlk_security.dbg
   TARGET_SUPPORT_DIR = tests/security/CMakeFiles/mlk_security.dir
 
 
@@ -2006,12 +1920,10 @@ build tests/replay/CMakeFiles/mlk_replay.dir/replay_test.cpp.o: CXX_COMPILER__ml
   CONFIG = Debug
   DEFINES = -DMLK_TEST_MAIN=\"mlk_replay\"
   DEP_FILE = tests/replay/CMakeFiles/mlk_replay.dir/replay_test.cpp.o.d
-  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized
+  FLAGS = -g -std=c++26 -fsanitize=address -fno-omit-frame-pointer -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -Wnon-virtual-dtor -Wcast-align -Wno-maybe-uninitialized -Werror
   INCLUDES = -I/home/z/my-project/mlk2-repo/tests/framework -I/home/z/my-project/mlk2-repo/runtime/include -I/home/z/my-project/mlk2-repo/compiler/include -I/home/z/my-project/mlk2-repo/autotuner/include -I/home/z/my-project/mlk2-repo/superopt/include -I/home/z/my-project/mlk2-repo/backends/cpu/include
   OBJECT_DIR = tests/replay/CMakeFiles/mlk_replay.dir
   OBJECT_FILE_DIR = tests/replay/CMakeFiles/mlk_replay.dir
-  TARGET_COMPILE_PDB = tests/replay/CMakeFiles/mlk_replay.dir/
-  TARGET_PDB = bin/mlk_replay.pdb
   TARGET_SUPPORT_DIR = tests/replay/CMakeFiles/mlk_replay.dir
 
 
@@ -2031,9 +1943,8 @@ build bin/mlk_replay: CXX_EXECUTABLE_LINKER__mlk_replay_Debug tests/replay/CMake
   OBJECT_DIR = tests/replay/CMakeFiles/mlk_replay.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/replay/CMakeFiles/mlk_replay.dir/
   TARGET_FILE = bin/mlk_replay
-  TARGET_PDB = bin/mlk_replay.pdb
+  TARGET_PDB = mlk_replay.dbg
   TARGET_SUPPORT_DIR = tests/replay/CMakeFiles/mlk_replay.dir
 
 
@@ -2145,6 +2056,8 @@ build mlk_unit_calculus: phony bin/mlk_unit_calculus
 build mlk_unit_core: phony bin/mlk_unit_core
 
 build mlk_unit_egraph: phony bin/mlk_unit_egraph
+
+build mlk_unit_golden: phony bin/mlk_unit_golden
 
 build mlk_unit_ir: phony bin/mlk_unit_ir
 
@@ -2266,7 +2179,7 @@ build tests/security/all: phony bin/mlk_security
 #############################################
 # Folder: /home/z/my-project/mlk2-repo/build-asan/tests/unit
 
-build tests/unit/all: phony bin/mlk_unit_core bin/mlk_unit_ir bin/mlk_unit_passes_math bin/mlk_unit_passes_analysis bin/mlk_unit_egraph bin/mlk_unit_calculus bin/mlk_unit_tensor bin/mlk_unit_runtime bin/mlk_unit_autotune bin/mlk_unit_superopt
+build tests/unit/all: phony bin/mlk_unit_core bin/mlk_unit_ir bin/mlk_unit_passes_math bin/mlk_unit_passes_analysis bin/mlk_unit_egraph bin/mlk_unit_calculus bin/mlk_unit_tensor bin/mlk_unit_runtime bin/mlk_unit_autotune bin/mlk_unit_superopt bin/mlk_unit_golden
 
 # =============================================================================
 # Built-in targets
@@ -2275,14 +2188,14 @@ build tests/unit/all: phony bin/mlk_unit_core bin/mlk_unit_ir bin/mlk_unit_passe
 #############################################
 # Re-run CMake if any of its inputs changed.
 
-build build.ninja /home/z/my-project/mlk2-repo/build-asan/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/compiler/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/runtime/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/autotuner/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/superopt/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/backends/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/backends/interpreter/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/backends/cpu/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/tests/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/tests/unit/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/tests/differential/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/tests/fallback/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/tests/fuzz/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/tests/security/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/tests/replay/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/CTestTestfile.cmake /home/z/my-project/mlk2-repo/build-asan/tests/CTestTestfile.cmake /home/z/my-project/mlk2-repo/build-asan/tests/unit/CTestTestfile.cmake /home/z/my-project/mlk2-repo/build-asan/tests/differential/CTestTestfile.cmake /home/z/my-project/mlk2-repo/build-asan/tests/fallback/CTestTestfile.cmake /home/z/my-project/mlk2-repo/build-asan/tests/fuzz/CTestTestfile.cmake /home/z/my-project/mlk2-repo/build-asan/tests/security/CTestTestfile.cmake /home/z/my-project/mlk2-repo/build-asan/tests/replay/CTestTestfile.cmake: RERUN_CMAKE | /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompiler.cmake.in /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCommonLanguageInclude.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCompilerIdDetection.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerSupport.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineSystem.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeGenericSystem.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeInitializeConfigs.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeLanguageInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeNinjaFindMake.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeParseImplicitIncludeInfo.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeParseImplicitLinkInfo.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeParseLibraryArchitecture.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystem.cmake.in /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInitialize.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCXXCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCompilerCommon.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/ADSP-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/ARMCC-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/ARMClang-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/AppleClang-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Borland-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/CMakeCommonCompilerMacros.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Clang-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Clang-DetermineCompilerInternal.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Compaq-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Cray-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/CrayClang-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Diab-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Embarcadero-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Fujitsu-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/FujitsuClang-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GHS-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX-CXXImportStd.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-FindBinUtils.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/HP-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IAR-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IBMCPP-CXX-DetermineVersionInternal.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IBMClang-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Intel-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IntelLLVM-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/LCC-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/MSVC-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/NVHPC-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/NVIDIA-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/OpenWatcom-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/OrangeC-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/PGI-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/PathScale-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/PellesC-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Renesas-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/SCO-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/SunPro-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/TI-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/TIClang-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Tasking-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/VisualAge-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Watcom-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/XL-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/XLClang-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/zOS-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCXXLinkerInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCommonLinkerInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeDetermineLinkerId.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeInspectCXXLinker.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/FeatureTesting.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-Determine-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-Initialize.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/UnixPaths.cmake /home/z/my-project/mlk2-repo/CMakeLists.txt /home/z/my-project/mlk2-repo/autotuner/CMakeLists.txt /home/z/my-project/mlk2-repo/backends/CMakeLists.txt /home/z/my-project/mlk2-repo/backends/cpu/CMakeLists.txt /home/z/my-project/mlk2-repo/backends/interpreter/CMakeLists.txt /home/z/my-project/mlk2-repo/cmake/compiler_flags.cmake /home/z/my-project/mlk2-repo/cmake/dependencies.cmake /home/z/my-project/mlk2-repo/cmake/mlk_library.cmake /home/z/my-project/mlk2-repo/cmake/sanitizers.cmake /home/z/my-project/mlk2-repo/cmake/tools.cmake /home/z/my-project/mlk2-repo/compiler/CMakeLists.txt /home/z/my-project/mlk2-repo/runtime/CMakeLists.txt /home/z/my-project/mlk2-repo/superopt/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/differential/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/fallback/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/fuzz/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/replay/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/security/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/unit/CMakeLists.txt CMakeCache.txt CMakeFiles/4.4.3/CMakeCXXCompiler.cmake CMakeFiles/4.4.3/CMakeSystem.cmake
+build build.ninja /home/z/my-project/mlk2-repo/build-asan/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/compiler/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/runtime/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/autotuner/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/superopt/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/backends/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/backends/interpreter/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/backends/cpu/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/tests/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/tests/unit/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/tests/differential/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/tests/fallback/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/tests/fuzz/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/tests/security/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/tests/replay/cmake_install.cmake /home/z/my-project/mlk2-repo/build-asan/CTestTestfile.cmake /home/z/my-project/mlk2-repo/build-asan/tests/CTestTestfile.cmake /home/z/my-project/mlk2-repo/build-asan/tests/unit/CTestTestfile.cmake /home/z/my-project/mlk2-repo/build-asan/tests/differential/CTestTestfile.cmake /home/z/my-project/mlk2-repo/build-asan/tests/fallback/CTestTestfile.cmake /home/z/my-project/mlk2-repo/build-asan/tests/fuzz/CTestTestfile.cmake /home/z/my-project/mlk2-repo/build-asan/tests/security/CTestTestfile.cmake /home/z/my-project/mlk2-repo/build-asan/tests/replay/CTestTestfile.cmake: RERUN_CMAKE | /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCommonLanguageInclude.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeGenericSystem.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeInitializeConfigs.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeLanguageInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInitialize.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/CMakeCommonCompilerMacros.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCXXLinkerInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCommonLinkerInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-Initialize.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/UnixPaths.cmake /home/z/my-project/mlk2-repo/CMakeLists.txt /home/z/my-project/mlk2-repo/autotuner/CMakeLists.txt /home/z/my-project/mlk2-repo/backends/CMakeLists.txt /home/z/my-project/mlk2-repo/backends/cpu/CMakeLists.txt /home/z/my-project/mlk2-repo/backends/interpreter/CMakeLists.txt /home/z/my-project/mlk2-repo/cmake/compiler_flags.cmake /home/z/my-project/mlk2-repo/cmake/dependencies.cmake /home/z/my-project/mlk2-repo/cmake/mlk_library.cmake /home/z/my-project/mlk2-repo/cmake/sanitizers.cmake /home/z/my-project/mlk2-repo/cmake/tools.cmake /home/z/my-project/mlk2-repo/compiler/CMakeLists.txt /home/z/my-project/mlk2-repo/runtime/CMakeLists.txt /home/z/my-project/mlk2-repo/superopt/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/differential/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/fallback/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/fuzz/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/replay/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/security/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/unit/CMakeLists.txt CMakeCache.txt CMakeFiles/4.4.3/CMakeCXXCompiler.cmake CMakeFiles/4.4.3/CMakeSystem.cmake
   pool = console
 
 
 #############################################
 # A missing CMake input file is not an error.
 
-build /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompiler.cmake.in /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCommonLanguageInclude.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCompilerIdDetection.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerSupport.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineSystem.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeGenericSystem.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeInitializeConfigs.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeLanguageInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeNinjaFindMake.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeParseImplicitIncludeInfo.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeParseImplicitLinkInfo.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeParseLibraryArchitecture.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystem.cmake.in /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInitialize.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCXXCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCompilerCommon.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/ADSP-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/ARMCC-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/ARMClang-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/AppleClang-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Borland-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/CMakeCommonCompilerMacros.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Clang-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Clang-DetermineCompilerInternal.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Compaq-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Cray-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/CrayClang-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Diab-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Embarcadero-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Fujitsu-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/FujitsuClang-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GHS-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX-CXXImportStd.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-FindBinUtils.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/HP-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IAR-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IBMCPP-CXX-DetermineVersionInternal.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IBMClang-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Intel-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IntelLLVM-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/LCC-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/MSVC-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/NVHPC-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/NVIDIA-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/OpenWatcom-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/OrangeC-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/PGI-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/PathScale-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/PellesC-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Renesas-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/SCO-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/SunPro-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/TI-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/TIClang-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Tasking-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/VisualAge-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Watcom-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/XL-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/XLClang-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/zOS-CXX-DetermineCompiler.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCXXLinkerInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCommonLinkerInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeDetermineLinkerId.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeInspectCXXLinker.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/FeatureTesting.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-Determine-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-Initialize.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/UnixPaths.cmake /home/z/my-project/mlk2-repo/CMakeLists.txt /home/z/my-project/mlk2-repo/autotuner/CMakeLists.txt /home/z/my-project/mlk2-repo/backends/CMakeLists.txt /home/z/my-project/mlk2-repo/backends/cpu/CMakeLists.txt /home/z/my-project/mlk2-repo/backends/interpreter/CMakeLists.txt /home/z/my-project/mlk2-repo/cmake/compiler_flags.cmake /home/z/my-project/mlk2-repo/cmake/dependencies.cmake /home/z/my-project/mlk2-repo/cmake/mlk_library.cmake /home/z/my-project/mlk2-repo/cmake/sanitizers.cmake /home/z/my-project/mlk2-repo/cmake/tools.cmake /home/z/my-project/mlk2-repo/compiler/CMakeLists.txt /home/z/my-project/mlk2-repo/runtime/CMakeLists.txt /home/z/my-project/mlk2-repo/superopt/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/differential/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/fallback/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/fuzz/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/replay/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/security/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/unit/CMakeLists.txt CMakeCache.txt CMakeFiles/4.4.3/CMakeCXXCompiler.cmake CMakeFiles/4.4.3/CMakeSystem.cmake: phony
+build /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCommonLanguageInclude.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeGenericSystem.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeInitializeConfigs.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeLanguageInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInitialize.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/CMakeCommonCompilerMacros.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCXXLinkerInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCommonLinkerInformation.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU-CXX.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-Initialize.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux.cmake /home/z/.local/lib/python3.13/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/UnixPaths.cmake /home/z/my-project/mlk2-repo/CMakeLists.txt /home/z/my-project/mlk2-repo/autotuner/CMakeLists.txt /home/z/my-project/mlk2-repo/backends/CMakeLists.txt /home/z/my-project/mlk2-repo/backends/cpu/CMakeLists.txt /home/z/my-project/mlk2-repo/backends/interpreter/CMakeLists.txt /home/z/my-project/mlk2-repo/cmake/compiler_flags.cmake /home/z/my-project/mlk2-repo/cmake/dependencies.cmake /home/z/my-project/mlk2-repo/cmake/mlk_library.cmake /home/z/my-project/mlk2-repo/cmake/sanitizers.cmake /home/z/my-project/mlk2-repo/cmake/tools.cmake /home/z/my-project/mlk2-repo/compiler/CMakeLists.txt /home/z/my-project/mlk2-repo/runtime/CMakeLists.txt /home/z/my-project/mlk2-repo/superopt/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/differential/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/fallback/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/fuzz/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/replay/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/security/CMakeLists.txt /home/z/my-project/mlk2-repo/tests/unit/CMakeLists.txt CMakeCache.txt CMakeFiles/4.4.3/CMakeCXXCompiler.cmake CMakeFiles/4.4.3/CMakeSystem.cmake: phony
 
 
 #############################################

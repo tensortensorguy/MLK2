@@ -92,7 +92,9 @@ std::string printGraph(const MathGraph& graph, const PrintOptions& opts,
         out += " (outputs";
         for (const ValueId v : graph.outputs()) {
             out.push_back(' ');
-            appendValue(graph, v, symbols, opts, out);
+            // Outputs print their current representative (Rule 21: the
+            // equivalence mapping is part of the graph's meaning).
+            appendValue(graph, graph.representative(v), symbols, opts, out);
         }
         out.push_back(')');
     }
