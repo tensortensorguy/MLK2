@@ -145,11 +145,12 @@ Result<ExecutionResult> interpretGraph(
             case MathOp::Box:
             case MathOp::Unbox:
             case MathOp::NativeToMathRef:
-            case MathOp::MathToNativeRef:
+            case MathOp::MathToNativeRef: {
                 double* cslot =
                     state.scalars.findOrInsert(n.results[0], nullptr, a);
                 *cslot = a;
                 break;
+            }
             default: {
                 bool ok = true;
                 const double r = evalScalar(n.op, a, b, ok);

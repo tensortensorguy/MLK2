@@ -12,6 +12,7 @@
 #include "mlk/core/hash.h"
 #include "mlk/core/small_vector.h"
 #include "mlk/core/symbol_table.h"
+#include "mlk/ir/math_op.h"
 #include "mlk/support/json.h"
 
 namespace mlk {
