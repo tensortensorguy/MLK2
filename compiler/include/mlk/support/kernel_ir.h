@@ -9,6 +9,8 @@
 #pragma once
 
 #include "mlk/core/constants.h"
+#include "mlk/core/hash_map.h"
+#include "mlk/type/domain.h"
 #include "mlk/core/hash.h"
 #include "mlk/core/small_vector.h"
 #include "mlk/core/symbol_table.h"
