@@ -217,7 +217,7 @@ int runExec(int argc, char** argv) {
     profile.capabilities.set(mlk::Capability::HasNumericValues);
     profile.capabilities.set(mlk::Capability::HasFloatingPoint);
     mlk::AccuracyContract contract;
-    auto r = engine.execute(graph, profile, contract, tier);
+    auto r = engine.execute(graph, profile, contract, tier, inputs);
     if (!r.has_value()) {
         std::fprintf(stderr, "mlkc: execution failed: %s\n",
                      r.error().message.c_str());

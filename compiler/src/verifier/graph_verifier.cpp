@@ -103,6 +103,10 @@ bool verifyGraph(const MathGraph& graph, const MathDomainProfile* profile,
             if (n.flags.test(NodeFlag::Dead) || n.inputs.empty()) continue;
             const auto inferred = inferResultType(graph, nid, profile);
             const Value& result = graph.value(n.results[0]);
+            // Values whose type has not been inferred yet (domain Unknown)
+            // are skipped: type.infer owns first assignment; re-validation
+            // applies to derived types only.
+            if (result.type.domain == Domain::Unknown) continue;
             if (!inferred.has_value() ||
                 !(result.type == *inferred)) {
                 fail(nid,

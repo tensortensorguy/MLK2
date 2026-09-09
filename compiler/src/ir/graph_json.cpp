@@ -124,12 +124,16 @@ Result<MathGraph> graphFromJson(const json::Value& doc, SymbolTable& symbols) {
 
     MathGraph graph{&symbols};
 
+    // fileId -> graphId mapping for leaves and (lazily) node results.
+    // File convention: values are dense 0..N-1; node_result entries appear
+    // in node creation order; nodes appear in topological order. The loader
+    // validates all of it (Rule 124).
+    OpenHashMap<int64_t, ValueId> idMap;
+
     const json::Value* vals = doc.find("values");
     if (vals == nullptr || !vals->isArray()) {
         return err(ErrorCode::ParseError, "missing values array");
     }
-    // Values must come back with their original ids to keep operand refs
-    // valid; ids are dense and must match file order.
     uint32_t expectedId = 0;
     for (const auto& vo : vals->asArray()) {
         const json::Value* idv = vo.find("id");
@@ -138,20 +142,24 @@ Result<MathGraph> graphFromJson(const json::Value& doc, SymbolTable& symbols) {
             return err(ErrorCode::ParseError,
                        "value ids must be dense in file order");
         }
+        const int64_t fileId = idv->asInt();
         ++expectedId;
         const json::Value* kindv = vo.find("kind");
         if (kindv == nullptr || !kindv->isString()) {
             return err(ErrorCode::ParseError, "value missing kind");
         }
         const std::string kind = kindv->asString();
+        if (kind == "node_result") {
+            continue;  // created by addNode in the node pass below
+        }
 
         MathType type;
         if (const json::Value* tv = vo.find("type")) {
             if (const json::Value* d = tv->find("domain")) {
                 if (d->isString()) {
-                    // Dense domain parse via name table.
                     const char* dn = d->asString().c_str();
-                    for (uint8_t i = 0; i <= static_cast<uint8_t>(Domain::Distribution);
+                    for (uint8_t i = 0;
+                         i <= static_cast<uint8_t>(Domain::Distribution);
                          ++i) {
                         if (__builtin_strcmp(domainName(static_cast<Domain>(i)),
                                              dn) == 0) {
@@ -206,13 +214,21 @@ Result<MathGraph> graphFromJson(const json::Value& doc, SymbolTable& symbols) {
         } else {
             return err(ErrorCode::ParseError, "unknown value kind: " + kind);
         }
-        (void)vid;
+        ValueId* slot = idMap.findOrInsert(fileId, nullptr, vid);
+        *slot = vid;
     }
 
     const json::Value* nodes = doc.find("nodes");
     if (nodes == nullptr || !nodes->isArray()) {
         return err(ErrorCode::ParseError, "missing nodes array");
     }
+    auto resolveInput = [&](int64_t fileId) -> Result<ValueId> {
+        if (const ValueId* v = idMap.find(fileId)) return *v;
+        return err(ErrorCode::ParseError,
+                   "input references value " + std::to_string(fileId) +
+                       " before its producer (nodes must be topological)");
+    };
+    uint32_t nodeIndex = 0;
     for (const auto& no : nodes->asArray()) {
         const json::Value* opv = no.find("op");
         if (opv == nullptr || !opv->isString()) {
@@ -229,13 +245,34 @@ Result<MathGraph> graphFromJson(const json::Value& doc, SymbolTable& symbols) {
         SmallVector<ValueId, 4> inputs;
         for (const auto& i : ins->asArray()) {
             if (!i.isInt()) return err(ErrorCode::ParseError, "input not int");
-            const int64_t iv = i.asInt();
-            if (iv < 0 || iv >= static_cast<int64_t>(graph.numValues())) {
-                return err(ErrorCode::ParseError, "input id out of range");
-            }
-            inputs.push_back(static_cast<ValueId>(iv));
+            MLK_TRY_VAR(resolved, resolveInput(i.asInt()));
+            inputs.push_back(resolved);
         }
-        MLK_TRYV(graph.addNode(op, inputs));
+        MLK_TRY_VAR(resultV, graph.addNode(op, inputs));
+        // The nodeIndex-th node_result value in file order maps to this
+        // result (file convention; validated against dense ids).
+        const int64_t resultFileId = [&] {
+            uint32_t seen = 0;
+            for (const auto& vo : vals->asArray()) {
+                const json::Value* idv = vo.find("id");
+                const json::Value* kindv = vo.find("kind");
+                if (kindv != nullptr && kindv->isString() &&
+                    kindv->asString() == "node_result") {
+                    if (seen == nodeIndex && idv != nullptr && idv->isInt()) {
+                        return idv->asInt();
+                    }
+                    ++seen;
+                }
+            }
+            return static_cast<int64_t>(-1);
+        }();
+        if (resultFileId < 0) {
+            return err(ErrorCode::ParseError,
+                       "node_result values must match node count");
+        }
+        ValueId* slot = idMap.findOrInsert(resultFileId, nullptr, resultV);
+        *slot = resultV;
+        ++nodeIndex;
     }
 
     if (const json::Value* outs = doc.find("outputs")) {
@@ -243,11 +280,9 @@ Result<MathGraph> graphFromJson(const json::Value& doc, SymbolTable& symbols) {
             return err(ErrorCode::ParseError, "outputs must be array");
         }
         for (const auto& o : outs->asArray()) {
-            if (!o.isInt() || o.asInt() < 0 ||
-                o.asInt() >= static_cast<int64_t>(graph.numValues())) {
-                return err(ErrorCode::ParseError, "output id out of range");
-            }
-            graph.addOutput(static_cast<ValueId>(o.asInt()));
+            if (!o.isInt()) return err(ErrorCode::ParseError, "output not int");
+            MLK_TRY_VAR(resolved, resolveInput(o.asInt()));
+            graph.addOutput(resolved);
         }
     }
     return graph;

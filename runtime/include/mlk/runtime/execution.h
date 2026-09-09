@@ -62,9 +62,12 @@ public:
 
     /// Executes: Tier 0 interpreter for tier==Tier0 or when no kernel is
     /// installed yet; otherwise the kernel executor (with Tier 0 fallback).
+    /// `inputScalars` binds placeholders/variables in value-id order
+    /// (documented ABI order; see kernel_abi.md).
     [[nodiscard]] Result<ExecutionResult> execute(
         const MathGraph& graph, const MathDomainProfile& profile,
-        const AccuracyContract& accuracy, Tier requestedTier);
+        const AccuracyContract& accuracy, Tier requestedTier,
+        const SmallVector<double, 8>& inputScalars);
 
     [[nodiscard]] std::shared_ptr<const Realization> current() const noexcept {
         return current_.load(std::memory_order_acquire);

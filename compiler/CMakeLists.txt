@@ -23,6 +23,10 @@ mlk_add_library(mlk_ir
         src/ir/graph_printer.cpp
         src/ir/graph_json.cpp
         src/support/kernel_ir.cpp
+        # Rule 140: the effect model is part of the IR core. It lives here
+        # to keep the dependency flow acyclic (effect inference is an
+        # op-table concern, not an upstream layer).
+        src/effect/effect_inference.cpp
     PUBLIC_DEPS mlk_core
 )
 
@@ -42,12 +46,11 @@ mlk_add_library(mlk_property
     PUBLIC_DEPS mlk_core mlk_ir mlk_type
 )
 
-mlk_add_library(mlk_effect
-    INCLUDE_DIR include
-    SOURCES
-        src/effect/effect_inference.cpp
-    PUBLIC_DEPS mlk_core mlk_ir
-)
+# mlk_effect: the effect system headers + implementation now live in
+# mlk_ir (Rule 140: effects are IR core). Kept as an interface target so the
+# CMake target list matches the layout spec exactly.
+add_library(mlk_effect INTERFACE)
+target_link_libraries(mlk_effect INTERFACE mlk_ir)
 
 mlk_add_library(mlk_proof
     INCLUDE_DIR include

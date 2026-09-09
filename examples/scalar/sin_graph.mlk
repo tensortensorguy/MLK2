@@ -1,0 +1,19 @@
+{
+  "format": "mlk-graph",
+  "version": 1,
+  "values": [
+    {"id": 0, "kind": "placeholder", "name": "x", "type": {"domain": "float", "dtype": "f64"}},
+    {"id": 1, "kind": "constant", "int_value": 3, "type": {"domain": "float", "dtype": "f64"}},
+    {"id": 2, "kind": "node_result", "type": {"domain": "float", "dtype": "f64"}},
+    {"id": 3, "kind": "node_result", "type": {"domain": "float", "dtype": "f64"}},
+    {"id": 4, "kind": "node_result", "type": {"domain": "float", "dtype": "f64"}},
+    {"id": 5, "kind": "node_result", "type": {"domain": "float", "dtype": "f64"}}
+  ],
+  "nodes": [
+    {"id": 0, "op": "mul", "inputs": [0, 0]},
+    {"id": 1, "op": "mul", "inputs": [1, 0]},
+    {"id": 2, "op": "add", "inputs": [2, 3]},
+    {"id": 3, "op": "sin", "inputs": [4]}
+  ],
+  "outputs": [5]
+}

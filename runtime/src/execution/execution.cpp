@@ -274,18 +274,13 @@ void ExecutionEngine::install(std::shared_ptr<const Realization> next) {
 
 Result<ExecutionResult> ExecutionEngine::execute(
     const MathGraph& graph, const MathDomainProfile& profile,
-    const AccuracyContract& accuracy, Tier requestedTier) {
+    const AccuracyContract& accuracy, Tier requestedTier,
+    const SmallVector<double, 8>& inputScalars) {
     auto realization = current();
     const bool useKernel = requestedTier != Tier::Tier0 &&
                            realization != nullptr &&
                            realization->kernel != nullptr;
-    SmallVector<double, 8> inputs;
-    for (const auto& v : graph.values()) {
-        if (v.kind == ValueKind::Placeholder ||
-            v.kind == ValueKind::Variable) {
-            inputs.push_back(1.0);
-        }
-    }
+    const SmallVector<double, 8>& inputs = inputScalars;
     if (useKernel) {
         auto r = executeKernel(*realization->kernel, graph, inputs, &cancel_);
         if (r.has_value()) return r;
