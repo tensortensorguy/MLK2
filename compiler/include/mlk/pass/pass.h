@@ -44,8 +44,8 @@ struct PassBudget {
 };
 
 class CostModel;
-class TelemetrySink;
 class CancellationToken;  // see mlk/core/cancellation.h
+class IEventSink;         // see mlk/core/event_sink.h (telemetry face)
 
 /// PassContext (spec §6): everything a pass may see. No hidden globals
 /// (Rule 144).
@@ -54,7 +54,7 @@ struct PassContext {
     const AccuracyContract* accuracy{nullptr};
     CostModel* costModel{nullptr};
     DiagnosticEngine* diag{nullptr};
-    TelemetrySink* telemetry{nullptr};
+    IEventSink* telemetry{nullptr};
     CancellationToken* cancel{nullptr};
     SymbolTable* symbols{nullptr};
     PassBudget budget{};

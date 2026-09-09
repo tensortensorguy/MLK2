@@ -94,5 +94,14 @@ mlk_add_library(mlk_passes
         mlk_verifier mlk_pass_core mlk_cost
 )
 
+mlk_add_library(mlk_pipeline
+    INCLUDE_DIR include
+    SOURCES
+        src/pipeline/pipeline_runner.cpp
+    PUBLIC_DEPS mlk_core mlk_ir mlk_type mlk_proof mlk_verifier
+        mlk_pass_core mlk_passes mlk_cost
+)
+
 set(MLK_COMPILER_LIBS mlk_core mlk_ir mlk_type mlk_property mlk_effect
-    mlk_proof mlk_verifier mlk_pass_core mlk_cost mlk_passes PARENT_SCOPE)
+    mlk_proof mlk_verifier mlk_pass_core mlk_cost mlk_passes mlk_pipeline
+    PARENT_SCOPE)
