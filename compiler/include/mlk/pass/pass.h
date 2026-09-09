@@ -89,7 +89,9 @@ class Pass {
 public:
     virtual ~Pass() = default;
 
-    [[nodiscard]] virtual SymbolId name() const = 0;
+    /// Stable textual identity (interned per-SymbolTable by the registry;
+    /// Rule 16: ids are table-scoped, so passes carry text, not ids).
+    [[nodiscard]] virtual const char* nameText() const = 0;
     [[nodiscard]] virtual PassKind kind() const = 0;
 
     [[nodiscard]] virtual Result<PassResult> run(PassContext& ctx,

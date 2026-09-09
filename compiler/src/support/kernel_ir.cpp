@@ -23,7 +23,8 @@ const char* kernelOpName(KernelOp op) noexcept {
 bool isScalarRealizable(MathOp op) noexcept {
     switch (op) {  // Rule 78: exhaustive
         case MathOp::Add: case MathOp::Sub: case MathOp::Mul:
-        case MathOp::Div: case MathOp::Neg: case MathOp::Exp:
+        case MathOp::Div: case MathOp::Neg: case MathOp::Pow:
+        case MathOp::Exp:
         case MathOp::Log: case MathOp::Sin: case MathOp::Cos:
         case MathOp::Tan: case MathOp::Tanh: case MathOp::Sqrt:
         case MathOp::Rsqrt: case MathOp::Erf: case MathOp::Gelu:

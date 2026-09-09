@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mlkplus/proof_certificate.schema.json",
+  "title": "MLK+ Proof Certificate",
+  "type": "object",
+  "required": [
+    "kind"
+  ],
+  "properties": {
+    "kind": {
+      "enum": [
+        "algebraic_identity",
+        "domain_constrained",
+        "error_bound",
+        "test_evidence"
+      ]
+    },
+    "applied_rules": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "error_bound_ulps": {
+      "type": "number"
+    },
+    "max_abs_error": {
+      "type": "number"
+    },
+    "predicates": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -1,0 +1,42 @@
+# `math.identity_elim`
+
+**Category:** math · **Tier support:** T1-T3 · **Kill switch:** yes (Rule 60/150)
+
+## Purpose
+Removes identity ops: x+0, x*1, transpose(transpose(x)); -0.0 and NaN semantics gated.
+
+## Inputs
+A verified Math IR graph (with types inferred), PassContext (domain profile, accuracy contract, budget, kill switches, diagnostics).
+
+## Outputs
+Transformed graph (new values; originals recoverable — Rule 21) and pass result metadata.
+
+## Required analyses
+See docs/pass_registry.md (contract `required` list per pass).
+
+## Produced analyses
+See docs/pass_registry.md (contract `produced` list per pass).
+
+## Legality conditions
+FP x+0 requires -0.0 policy; x*0 only for integers.
+
+## Accuracy impact
+Exact under stated policies.
+
+## Performance impact
+Removes ops.
+
+## Tier support
+T1-T3 (see pipeline definitions in `mlk/pipeline/pipeline_runner.h` and spec §9).
+
+## Budget
+Bounded by PassBudget (node edits + fixpoint iterations); violations return BudgetExceeded and trigger fallback — never stalls (Rule 131).
+
+## Kill switch
+Every pass is independently disableable via the context kill-switch map; skipped passes are recorded in telemetry (Rules 60, 150).
+
+## Tests
+See `tests/unit/` and `tests/pass_golden/` for this pass's coverage; differential coverage in `tests/differential/` (Rule 43).
+
+## Known limitations
+MVP scope per layout spec §11 (MVP pass set); Tier-3 extensions (full rule tables, polyhedral scheduling, external proof engines) are tracked in the roadmap (docs/architecture.md).

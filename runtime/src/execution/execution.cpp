@@ -28,6 +28,12 @@ namespace {
             }
             return a / b;
         case MathOp::Neg: return -a;
+        case MathOp::Pow:
+            if (a == 0.0 && b < 0.0) {
+                ok = false;  // singularity (0^-k)
+                return 0.0;
+            }
+            return std::pow(a, b);
         case MathOp::Exp: return std::exp(a);
         case MathOp::Log:
             if (a <= 0.0) {

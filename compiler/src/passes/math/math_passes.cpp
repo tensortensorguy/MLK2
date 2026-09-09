@@ -200,21 +200,26 @@ public:
                 continue;  // symbolic: never folded (Rule 87)
             }
             bool allConst = n.numInputs() > 0;
+            for (const ValueId in : n.inputs) {
+                if (!isConst(graph, in, nullptr, nullptr)) {
+                    allConst = false;
+                    break;
+                }
+            }
+            if (!allConst) continue;
             double a = 0.0;
+            double b2 = 0.0;
             int64_t ai = 0, bi = 0;
+            (void)isConst(graph, n.inputs[0], &a, &ai);
+            if (n.numInputs() == 2) {
+                (void)isConst(graph, n.inputs[1], &b2, &bi);
+            }
             bool allIntConst = true;
             for (const ValueId in : n.inputs) {
-                if (!isConst(graph, in, &a, &ai)) {
-                    allConst = false;
+                if (!g_isIntConst(graph, in)) {
                     allIntConst = false;
                     break;
                 }
-                if (!g_isIntConst(graph, in)) allIntConst = false;
-            }
-            if (!allConst) continue;
-            double b2 = 0.0;
-            if (n.numInputs() == 2) {
-                (void)isConst(graph, n.inputs[1], &b2, &bi);
             }
             if (allIntConst && n.numInputs() == 2 &&
                 (n.op == MathOp::Add || n.op == MathOp::Sub ||
@@ -569,7 +574,7 @@ public:
         for (uint32_t iter = 0; iter < ctx.budget.fixpointIterations; ++iter) {
             bool any = false;
             for (Pass* sub : subs) {
-                if (ctx.killed(sub->name())) continue;
+                if (ctx.killed(ctx.symbols->intern(sub->nameText()))) continue;
                 MLK_TRY_VAR(subResult, sub->run(ctx, graph));
                 any = any || subResult.changed;
             }

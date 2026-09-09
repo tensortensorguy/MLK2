@@ -1,0 +1,8 @@
+{
+  "suite": "elementwise_math",
+  "graphs": [
+    "examples/scalar/sin_graph.mlk"
+  ],
+  "reps": 30,
+  "warmup": 5
+}

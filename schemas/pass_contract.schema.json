@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mlkplus/pass_contract.schema.json",
+  "title": "MLK+ Pass Contract",
+  "type": "object",
+  "required": [
+    "name",
+    "kind"
+  ],
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "analysis",
+        "transform",
+        "lowering",
+        "verify",
+        "tune",
+        "superopt"
+      ]
+    },
+    "required": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "produced": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "invalidated": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tiers": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "tier0",
+          "tier1",
+          "tier2",
+          "tier3"
+        ]
+      }
+    },
+    "deterministic": {
+      "type": "boolean"
+    },
+    "kill_switchable": {
+      "type": "boolean"
+    }
+  }
+}

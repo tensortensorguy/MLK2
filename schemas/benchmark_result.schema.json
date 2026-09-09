@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mlkplus/benchmark_result.schema.json",
+  "title": "MLK+ Benchmark Result",
+  "type": "object",
+  "required": [
+    "min_ms",
+    "median_ms",
+    "stddev_ms",
+    "ops_per_second",
+    "reps"
+  ],
+  "properties": {
+    "min_ms": {
+      "type": "number"
+    },
+    "median_ms": {
+      "type": "number"
+    },
+    "stddev_ms": {
+      "type": "number"
+    },
+    "ops_per_second": {
+      "type": "number"
+    },
+    "reps": {
+      "type": "integer"
+    }
+  }
+}

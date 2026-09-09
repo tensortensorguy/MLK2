@@ -14,18 +14,19 @@ namespace mlk::passes {
 class PassBase : public Pass {
 public:
     PassBase(SymbolTable& symbols, const char* name, PassKind kind)
-        : symbols_(symbols),
-          nameId_(symbols.intern(name)),
-          kind_(kind),
-          nameStr_(name) {}
+        : symbols_(symbols), kind_(kind), nameStr_(name) {}
 
-    [[nodiscard]] SymbolId name() const override { return nameId_; }
+    [[nodiscard]] const char* nameText() const override {
+        return nameStr_.c_str();
+    }
     [[nodiscard]] PassKind kind() const override { return kind_; }
-    [[nodiscard]] const char* cName() const { return nameStr_.c_str(); }
+    /// Table-scoped id (resolved through the CURRENT context table).
+    [[nodiscard]] SymbolId nameId(SymbolTable& symbols) const {
+        return symbols.intern(nameStr_);
+    }
 
 protected:
     SymbolTable& symbols_;
-    SymbolId nameId_;
     PassKind kind_;
     std::string nameStr_;
 };

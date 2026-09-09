@@ -17,7 +17,7 @@ class Flags {
     static_assert(sizeof(E) <= sizeof(uint64_t));
 
 public:
-    using Underlying = std::make_unsigned_t<std::underlying_type_t<E>>;
+    using Underlying = std::uint64_t;  // supports enums wider than 32 bits
 
     constexpr Flags() noexcept = default;
     constexpr Flags(E e) noexcept

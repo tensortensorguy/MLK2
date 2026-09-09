@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mlkplus/realization.schema.json",
+  "title": "MLK+ Realization",
+  "type": "object",
+  "required": [
+    "format_version",
+    "key"
+  ],
+  "properties": {
+    "format_version": {
+      "type": "integer"
+    },
+    "key": {
+      "type": "object",
+      "required": [
+        "graph_hash",
+        "accuracy_hash",
+        "pass_pipeline_hash",
+        "hardware_fingerprint"
+      ],
+      "properties": {
+        "graph_hash": {
+          "type": "integer"
+        },
+        "property_facts_hash": {
+          "type": "integer"
+        },
+        "shape_bucket": {
+          "type": "integer"
+        },
+        "accuracy_hash": {
+          "type": "integer"
+        },
+        "profile_version": {
+          "type": "integer"
+        },
+        "compiler_version": {
+          "type": "integer"
+        },
+        "pass_pipeline_hash": {
+          "type": "integer"
+        },
+        "superopt_version": {
+          "type": "integer"
+        },
+        "hardware_fingerprint": {
+          "type": "integer"
+        }
+      }
+    },
+    "strategy": {
+      "type": "string"
+    },
+    "kernel_hash": {
+      "type": "integer"
+    },
+    "schedule": {
+      "type": "object"
+    },
+    "proof_ref": {
+      "type": "string"
+    },
+    "measured_ms": {
+      "type": "number"
+    }
+  }
+}

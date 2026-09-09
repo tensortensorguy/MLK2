@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mlkplus/math_domain_profile.schema.json",
+  "title": "MLK+ Math Domain Profile",
+  "type": "object",
+  "required": [
+    "name"
+  ],
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^Has[A-Za-z]+$"
+      }
+    },
+    "numeric": {
+      "type": "object",
+      "properties": {
+        "preserve_nan": {
+          "type": "boolean"
+        },
+        "preserve_negative_zero": {
+          "type": "boolean"
+        },
+        "preserve_inf": {
+          "type": "boolean"
+        },
+        "allow_reassociation": {
+          "type": "boolean"
+        },
+        "allow_fma_contraction": {
+          "type": "boolean"
+        },
+        "allow_approx_reciprocal": {
+          "type": "boolean"
+        }
+      }
+    },
+    "approximation": {
+      "type": "object",
+      "properties": {
+        "allow_approximation": {
+          "type": "boolean"
+        },
+        "default_max_ulps": {
+          "type": "number"
+        },
+        "default_max_abs_error": {
+          "type": "number"
+        },
+        "default_max_rel_error": {
+          "type": "number"
+        }
+      }
+    },
+    "laws": {
+      "type": "object",
+      "properties": {
+        "commutative_mul": {
+          "enum": [
+            "true",
+            "false",
+            "unknown"
+          ]
+        },
+        "associative_add": {
+          "enum": [
+            "true",
+            "false",
+            "unknown"
+          ]
+        },
+        "distributive_mul_add": {
+          "enum": [
+            "true",
+            "false",
+            "unknown"
+          ]
+        }
+      }
+    }
+  }
+}

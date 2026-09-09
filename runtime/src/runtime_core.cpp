@@ -77,6 +77,8 @@ json::Value GraphState::toJson() const {
             json::Value{static_cast<int64_t>(resumeNode)});
     doc.set("graph_version",
             json::Value{static_cast<int64_t>(graphVersion)});
+    doc.set("domain_version",
+            json::Value{static_cast<int64_t>(domainVersion)});
     json::Value binds = json::Array{};
     for (const auto& b : bindings) {
         json::Value bo = json::Object{};
@@ -101,6 +103,10 @@ Result<GraphState> GraphState::fromJson(const json::Value& doc) {
                    101);
     }
     s.resumeNode = static_cast<NodeId>(rn->asInt());
+    const json::Value* gv = doc.find("graph_version");
+    if (gv != nullptr && gv->isInt()) s.graphVersion = static_cast<uint64_t>(gv->asInt());
+    const json::Value* dv = doc.find("domain_version");
+    if (dv != nullptr && dv->isInt()) s.domainVersion = static_cast<uint64_t>(dv->asInt());
     const json::Value* binds = doc.find("bindings");
     if (binds == nullptr || !binds->isArray()) {
         return err(ErrorCode::ParseError, "GraphState missing bindings", 101);

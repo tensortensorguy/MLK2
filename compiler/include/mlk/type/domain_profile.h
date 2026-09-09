@@ -26,7 +26,7 @@ namespace mlk {
 /// Capability flags (Part 0: Domain Capability Flags). If a capability is
 /// absent, the compiler must not assume the feature exists; if present, the
 /// compiler must preserve its observable semantics.
-enum class Capability : uint32_t {
+enum class Capability : uint64_t {
     HasSymbolicValues = 0,
     HasNumericValues,
     HasExactArithmetic,

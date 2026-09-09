@@ -18,6 +18,7 @@ void emitCompute(std::string& out, MathOp op, SymbolTable& symbols) {
         case MathOp::Mul: expr = "x[i] * y[i]"; break;
         case MathOp::Div: expr = "x[i] / y[i]"; break;
         case MathOp::Neg: expr = "-x[i]"; break;
+        case MathOp::Pow: expr = "mlk_pow(x[i], y[i])"; break;
         case MathOp::Exp: expr = "mlk_exp(x[i])"; break;
         case MathOp::Log: expr = "mlk_log(x[i])"; break;
         case MathOp::Sin: expr = "mlk_sin(x[i])"; break;
@@ -58,7 +59,8 @@ Result<std::string> emitCppSource(const KernelModule& kernel,
     out += "static inline double mlk_exp(double x){return ::exp(x);}\n";
     out += "static inline double mlk_log(double x){return ::log(x);}\n";
     out += "static inline double mlk_sqrt(double x){return ::sqrt(x);}\n";
-    out += "static inline double mlk_erf(double x){return ::erf(x);}\n\n";
+    out += "static inline double mlk_erf(double x){return ::erf(x);}\n";
+    out += "static inline double mlk_pow(double x, double y){return ::pow(x, y);}\n\n";
     out += "extern \"C\" void mlk_kernel(const double* x, const double* y, "
            "double* out, int64_t n) {\n";
     out += "    for (int64_t i = 0; i < n; ++i) {\n";

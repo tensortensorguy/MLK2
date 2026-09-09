@@ -45,7 +45,9 @@ public:
 
     Result<PassResult> run(PassContext& ctx, MathGraph& graph) override {
         PassResult r;
-        r.nodesBefore = graph.liveNodeCount();        MLK_TRY_VAR(changed, inferTypes(graph, *ctx.domainProfile));
+        r.nodesBefore = graph.liveNodeCount();
+        MLK_TRY_VAR(changed,
+                    inferTypesReported(graph, *ctx.domainProfile, *ctx.diag));
         r.changed = changed != 0;
         r.nodesAfter = graph.liveNodeCount();
         return r;

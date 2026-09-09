@@ -1,0 +1,33 @@
+{
+  "name": "tensor_f32_cpu",
+  "version": "1.0.0",
+  "capabilities": [
+    "HasNumericValues",
+    "HasFloatingPoint",
+    "HasTensorDomain",
+    "HasDynamicShapes",
+    "HasLayoutTransforms",
+    "HasKernelFusion",
+    "HasAutotuning",
+    "HasCPUBackend"
+  ],
+  "numeric": {
+    "preserve_nan": true,
+    "preserve_negative_zero": true,
+    "preserve_inf": true,
+    "allow_reassociation": false,
+    "allow_fma_contraction": true,
+    "allow_approx_reciprocal": false
+  },
+  "approximation": {
+    "allow_approximation": false,
+    "default_max_ulps": 4,
+    "default_max_abs_error": 9.9999999999999995e-07,
+    "default_max_rel_error": 9.9999999999999995e-07
+  },
+  "laws": {
+    "commutative_mul": "true",
+    "associative_add": "unknown",
+    "distributive_mul_add": "true"
+  }
+}

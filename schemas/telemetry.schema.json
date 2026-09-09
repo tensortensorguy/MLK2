@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mlkplus/telemetry.schema.json",
+  "title": "MLK+ Telemetry Event",
+  "type": "object",
+  "required": [
+    "kind"
+  ],
+  "properties": {
+    "kind": {
+      "enum": [
+        "compile_attempt",
+        "compile_failure",
+        "tune_attempt",
+        "tune_failure",
+        "fallback",
+        "guard_failure",
+        "invalidation",
+        "budget_violation",
+        "cache_pressure",
+        "blacklist",
+        "tier_transition",
+        "perf_counter"
+      ]
+    },
+    "pass": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "counter": {
+      "type": "integer"
+    },
+    "from_tier": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3
+    },
+    "to_tier": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3
+    },
+    "graph_version": {
+      "type": "integer"
+    }
+  }
+}

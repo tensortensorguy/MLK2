@@ -10,7 +10,7 @@ void registerPass(SymbolTable& symbols, Pass& pass, PassKind kind,
                   std::initializer_list<const char*> produced,
                   std::initializer_list<const char*> invalidated,
                   std::initializer_list<Tier> tiers) {
-    PassRegistrar reg(symbols, symbols.text(pass.name()).c_str(), kind,
+    PassRegistrar reg(symbols, pass.nameText(), kind,
                       required, produced, invalidated, tiers, &pass);
 }
 

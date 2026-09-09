@@ -121,13 +121,6 @@ public:
         for (const auto& e : entries_) fn(e.key, e.value);
     }
 
-    [[nodiscard]] std::vector<std::pair<Key, Value>>& entries() {
-        return entries_;
-    }
-    [[nodiscard]] const std::vector<std::pair<Key, Value>>& entries() const {
-        return entries_;
-    }
-
 private:
     struct Slot {
         Key key;

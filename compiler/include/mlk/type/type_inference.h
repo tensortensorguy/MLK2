@@ -6,6 +6,7 @@
 
 #include "mlk/core/result.h"
 #include "mlk/ir/math_graph.h"
+#include "mlk/core/diagnostics.h"
 #include "mlk/type/domain_profile.h"
 
 namespace mlk {
@@ -14,6 +15,12 @@ namespace mlk {
 /// Returns the number of values whose type was (re)assigned.
 [[nodiscard]] Result<uint32_t> inferTypes(MathGraph& graph,
                                           const MathDomainProfile& profile);
+
+/// As inferTypes, but reports actionable diagnostics (Rule 67) into `diag`
+/// before failing.
+[[nodiscard]] Result<uint32_t> inferTypesReported(
+    MathGraph& graph, const MathDomainProfile& profile,
+    DiagnosticEngine& diag);
 
 /// Shape-only inference (after type.infer has established element dtypes).
 [[nodiscard]] Result<uint32_t> inferShapes(MathGraph& graph);

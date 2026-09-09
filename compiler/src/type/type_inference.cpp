@@ -5,6 +5,8 @@
 #include "mlk/type/type_inference.h"
 
 #include "mlk/core/diagnostics.h"
+
+#include <string>
 #include "mlk/type/shape.h"
 #include "mlk/core/constants.h"
 
@@ -195,12 +197,24 @@ Result<uint32_t> inferTypes(MathGraph& graph,
         if (n.inputs.empty()) continue;
         auto inferred = inferResultType(graph, nid, &profile);
         if (!inferred.has_value()) {
+            // Rule 67: actionable diagnostic — location, expected vs actual,
+            // violated rule, suggested fix.
+            Diagnostic d;
+            d.severity = Severity::Error;
+            d.nodeId = nid;
+            d.message =
+                std::string("type inference failed at '") + opName(n.op) +
+                "' node";
+            d.expected =
+                "compatible operand dtypes/shapes (or explicit conversion)";
+            d.actual = "operands require implicit coercion";
+            d.rule = "Rule 39";
+            d.suggestedFix =
+                "insert an explicit conversion node (Rule 39 list) before "
+                "this operation";
             return err(ErrorCode::InvalidGraph,
-                       std::string("type inference failed at node ") +
-                           opName(n.op) +
-                           " (operand dtypes/shapes incompatible; Rule 39 "
-                           "forbids implicit conversion — insert explicit "
-                           "conversion nodes)",
+                       d.message + " (" + d.actual + "; " + d.rule + ": " +
+                           d.suggestedFix + ")",
                        39);
         }
         Value& result = graph.value(n.results[0]);
@@ -229,6 +243,23 @@ Result<uint32_t> inferShapes(MathGraph& graph) {
         ++validated;
     }
     return validated;
+}
+
+Result<uint32_t> inferTypesReported(MathGraph& graph,
+                                    const MathDomainProfile& profile,
+                                    DiagnosticEngine& diag) {
+    auto result = inferTypes(graph, profile);
+    if (!result.has_value()) {
+        Diagnostic d;
+        d.severity = Severity::Error;
+        d.message = result.error().message;
+        d.rule = "Rule 39";
+        d.suggestedFix =
+            "insert an explicit conversion node (Rule 39 list) before the "
+            "failing operation, or make operand dtypes/shapes compatible";
+        diag.report(std::move(d));
+    }
+    return result;
 }
 
 }  // namespace mlk

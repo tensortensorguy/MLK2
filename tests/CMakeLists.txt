@@ -1,1 +1,21 @@
-# Implemented in a later milestone of this build-out.
+# MLK+ test suites (layout spec §14; Rules 40-44, 47, 80, 153).
+function(mlk_add_test name)
+    cmake_parse_arguments(ARG "" "" "SOURCES;DEPS" ${ARGN})
+    add_executable(${name} ${ARG_SOURCES})
+    target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/tests/framework)
+    target_link_libraries(${name} PRIVATE ${ARG_DEPS})
+    target_compile_definitions(${name} PRIVATE MLK_TEST_MAIN="${name}")
+    mlk_apply_flags(${name})
+    mlk_apply_sanitizers(${name})
+    add_test(NAME ${name} COMMAND ${name})
+    set_tests_properties(${name} PROPERTIES
+        ENVIRONMENT "MLK_TEST_DIR=${CMAKE_CURRENT_SOURCE_DIR}")
+    set(MLK_ALL_SOURCES ${MLK_ALL_SOURCES} ${ARG_SOURCES} PARENT_SCOPE)
+endfunction()
+
+add_subdirectory(unit)
+add_subdirectory(differential)
+add_subdirectory(fallback)
+add_subdirectory(fuzz)
+add_subdirectory(security)
+add_subdirectory(replay)
