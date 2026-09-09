@@ -1,0 +1,20 @@
+# Build outputs
+build/
+out/
+.cache/
+*.o
+*.a
+*.so
+
+# Local caches from realization/benchmark/proof storage (layout spec §.cache)
+.cache/realizations/
+.cache/benchmarks/
+.cache/proofs/
+.cache/compiled/
+.cache/replay/
+
+# Tooling
+compile_commands.json
+.idea/
+.vscode/
+*.swp
