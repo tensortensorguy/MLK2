@@ -18,9 +18,11 @@ mlk_add_library(mlk_ir
     INCLUDE_DIR include
     SOURCES
         src/ir/math_op.cpp
+        src/ir/names.cpp
         src/ir/math_graph.cpp
         src/ir/graph_printer.cpp
         src/ir/graph_json.cpp
+        src/support/kernel_ir.cpp
     PUBLIC_DEPS mlk_core
 )
 

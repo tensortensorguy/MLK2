@@ -301,3 +301,56 @@ Result<CacheEntry> Autotuner::tune(const MathGraph& graph,
 }
 
 }  // namespace mlk
+
+// --- benchmarkGraph (benchmarker.h contract; Rule 49 protocol) -------------
+#include <cstdlib>
+
+namespace mlk {
+
+namespace {
+double benchNowMs() {
+    using clock = std::chrono::steady_clock;
+    return std::chrono::duration<double, std::milli>(
+               clock::now().time_since_epoch())
+        .count();
+}
+}  // namespace
+
+Result<BenchmarkMeasurement> benchmarkGraph(const MathGraph& graph,
+                                            SymbolTable& symbols,
+                                            const BenchmarkProtocol& p) {
+    BenchmarkMeasurement m;
+    m.reps = p.reps;
+    SmallVector<double, 8> inputs;
+    for (std::size_t i = 0; i < 8; ++i) inputs.push_back(sampleInput(i + 3));
+    SmallVector<double, 64> samples;
+    for (uint32_t r = 0; r < p.warmup + p.reps; ++r) {
+        const double t0 = benchNowMs();
+        auto run = interpretGraph(graph, inputs);
+        if (!run.has_value()) {
+            return err(ErrorCode::VerificationFailed,
+                       "graph failed during benchmark (Rule 58)", 58);
+        }
+        const double t1 = benchNowMs();
+        if (r >= p.warmup) samples.push_back(t1 - t0);
+    }
+    if (samples.empty()) {
+        return err(ErrorCode::VerificationFailed, "no samples", 49);
+    }
+    SmallVector<double, 64> sorted = samples;
+    std::sort(sorted.begin(), sorted.end());
+    m.minMs = sorted.front();
+    m.medianMs = sorted[sorted.size() / 2];
+    double mean = 0.0;
+    for (const double s : samples) mean += s;
+    mean /= static_cast<double>(samples.size());
+    double var = 0.0;
+    for (const double s : samples) var += (s - mean) * (s - mean);
+    var /= static_cast<double>(samples.size());
+    m.stddevMs = std::sqrt(var);
+    m.opsPerSecond = mean > 0.0 ? 1000.0 / mean : 0.0;
+    (void)symbols;
+    return m;
+}
+
+}  // namespace mlk
