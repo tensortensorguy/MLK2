@@ -1,22 +1,18 @@
-// Calculus passes (spec §8.4): calculus.derivative_symbolic,
-// calculus.derivative_simplify, calculus.derivative_ad_forward,
-// calculus.derivative_ad_reverse, calculus.derivative_numeric,
-// calculus.integral_closed_form, calculus.integral_quadrature,
-// calculus.gradient_lower.
+// calculus.derivative_symbolic — symbolic differentiation lowering
+// (spec §8.4, spec example: d/dx x² sin(x) = 2x sin(x) + x² cos(x)).
 //
-// Calculus is first-class: Derivative nodes remain symbolic until a
-// strategy-lowering pass decides the method (symbolic / AD / numeric), and
-// the original expression is never destroyed (Rule 21).
+// Calculus is first-class: Derivative nodes remain symbolic until this
+// strategy-lowering pass fires, and the original expression is never
+// destroyed (Rule 21 — recordEquivalent keeps it recoverable).
 #include "../passes_common.h"
-
-#include <cmath>
 
 namespace mlk::passes {
 
 namespace {
+constexpr Tier kCalcTiers[] = {Tier::Tier1, Tier::Tier2, Tier::Tier3};
 
-/// Symbolic differentiation rules (spec example: d/dx x² sin(x) =
-/// 2x sin(x) + x² cos(x)). Returns kInvalidValueId when no rule applies.
+/// Symbolic differentiation rules. Returns kInvalidValueId when no rule
+/// applies (reported as Unimplemented — never guessed, Rule 28).
 Result<ValueId> diffValue(MathGraph& g, ValueId v, ValueId x,
                           uint32_t depth) {
     if (depth > constants::kMaxEquivalenceDepth) {
@@ -208,7 +204,6 @@ Result<ValueId> diffValue(MathGraph& g, ValueId v, ValueId x,
                            opName(n.op));
     }
 }
-
 }  // namespace
 
 class DerivativeSymbolicPass final : public PassBase {
@@ -250,98 +245,12 @@ public:
     }
 };
 
-class DerivativeSimplifyPass final : public PassBase {
-public:
-    using PassBase::PassBase;
-
-    Result<PassResult> run(PassContext& ctx, MathGraph& graph) override {
-        PassResult r;
-        // Runs the canonicalize driver over derivative results (spec:
-        // 2x sin(x) + x² cos(x) -> x(2 sin(x) + x cos(x)) form is e-graph
-        // territory; here we fold/sort/eliminate identities).
-        Pass* canonicalize =
-            PassRegistry::instance().byName(ctx.symbols->intern("math.canonicalize"));
-        if (canonicalize == nullptr) {
-            return err(ErrorCode::Internal, "math.canonicalize not registered");
-        }
-        MLK_TRY_VAR(cr, canonicalize->run(ctx, graph));
-        r.changed = cr.changed;
-        return r;
-    }
-};
-
-class DerivativeNumericPass final : public PassBase {
-public:
-    using PassBase::PassBase;
-
-    Result<PassResult> run(PassContext& ctx, MathGraph& graph) override {
-        PassResult r;
-        (void)graph;
-        // Rule 34: finite differences REQUIRE an explicit accuracy contract;
-        // without one this pass must not fire.
-        if (!ctx.accuracy->permitsApproximation()) {
-            return err(ErrorCode::AccuracyViolation,
-                       "numeric differentiation requires an accuracy "
-                       "contract permitting approximation (Rule 34)", 34);
-        }
-        r.changed = false;  // strategy attached at Tier-2 in autotuner
-        return r;
-    }
-};
-
-class IntegralQuadraturePass final : public PassBase {
-public:
-    using PassBase::PassBase;
-
-    Result<PassResult> run(PassContext& ctx, MathGraph& graph) override {
-        PassResult r;
-        if (!ctx.domainProfile->has(Capability::HasIntegrals)) {
-            return err(ErrorCode::UnsupportedCapability,
-                       "profile lacks HasIntegrals", 28);
-        }
-        // Strategy attachment: each Integral node gets a method attr
-        // (adaptive_gauss_kronrod default; method selection is autotunable
-        // per spec §5.2). The integral node stays in the graph — the
-        // strategy layer references it (MathGraph/StrategyGraph split).
-        for (const NodeId nid : graph.topoOrder()) {
-            Node& n = graph.node(nid);
-            if (n.flags.test(NodeFlag::Dead) || n.op != MathOp::Integral) {
-                continue;
-            }
-            Attr a;
-            a.name = ctx.symbols->intern("method");
-            a.value = AttrValue{ctx.symbols->intern("adaptive_simpson")};
-            n.attrs.push_back(a);
-            r.changed = true;
-        }
-        return r;
-    }
-};
-
-void registerCalculusPasses(SymbolTable& symbols) {
-    static DerivativeSymbolicPass derivSym(symbols,
-                                           "calculus.derivative_symbolic",
-                                           PassKind::Lowering);
-    static DerivativeSimplifyPass derivSimp(symbols,
-                                            "calculus.derivative_simplify",
-                                            PassKind::Transform);
-    static DerivativeNumericPass derivNum(symbols,
-                                          "calculus.derivative_numeric",
-                                          PassKind::Lowering);
-    static IntegralQuadraturePass integralQ(symbols,
-                                            "calculus.integral_quadrature",
-                                            PassKind::Lowering);
-    const Tier t12[] = {Tier::Tier1, Tier::Tier2};
-    registerPass(symbols, derivSym, PassKind::Lowering, {"type.inferred"},
+void register_calculus_derivative_symbolic_pass(SymbolTable& symbols) {
+    static DerivativeSymbolicPass pass(symbols, "calculus.derivative_symbolic",
+                                       PassKind::Lowering);
+    registerPass(symbols, pass, PassKind::Lowering, {"type.inferred"},
                  {"calculus.lowered"}, {"analysis.cse"},
-                 {t12[0], t12[1], Tier::Tier3});
-    registerPass(symbols, derivSimp, PassKind::Transform,
-                 {"calculus.lowered"}, {"math.canonical"}, {"analysis.cse"},
-                 {t12[0], t12[1], Tier::Tier3});
-    registerPass(symbols, derivNum, PassKind::Lowering, {"accuracy.analyzed"},
-                 {"calculus.strategy"}, {}, {t12[0], t12[1], Tier::Tier3});
-    registerPass(symbols, integralQ, PassKind::Lowering, {"type.inferred"},
-                 {"calculus.strategy"}, {}, {t12[0], t12[1], Tier::Tier3});
+                 {kCalcTiers[0], kCalcTiers[1], kCalcTiers[2]});
 }
 
 }  // namespace mlk::passes

@@ -18,9 +18,16 @@ namespace mlk {
 [[nodiscard]] inline HashValue valueHash(const MathGraph& graph, ValueId v) {
     const Value& val = graph.value(v);
     if (val.hashValid) return val.hash;
-    // Trigger full-graph hash, which populates per-value caches.
+    // Trigger full-graph hash, which populates per-value caches for
+    // NodeResult values.
     (void)graphHash(graph);
-    return graph.value(v).hash;
+    const Value& after = graph.value(v);
+    if (after.hashValid) return after.hash;
+    // Constants/placeholders/variables/symbols are never stamped by
+    // graphHash(); their identity is kind + type + payload. Returning the
+    // unstamped cache slot here previously collapsed all such values to one
+    // hash (P0: cse merged mul(x,x) with mul(3,x); see structuralValueHash).
+    return structuralValueHash(after);
 }
 
 }  // namespace mlk

@@ -82,19 +82,71 @@ mlk_add_library(mlk_cost
 
 mlk_add_library(mlk_passes
     INCLUDE_DIR include
+    # Rule 26 (one component, one concern): every pass lives in its own
+    # translation unit named exactly after the pass. Adding a pass = adding
+    # one file + one declaration in passes_common.h + one call in
+    # passes.cpp. The e-graph engine (egraph.{h,cpp}) is shared support,
+    # not a pass.
     SOURCES
         src/passes/passes.cpp
-        src/passes/analysis/analysis_passes.cpp
-        src/passes/math/math_passes.cpp
+        # Analysis (spec §8.1)
+        src/passes/analysis/ir.verify.cpp
+        src/passes/analysis/type.infer.cpp
+        src/passes/analysis/shape.infer.cpp
+        src/passes/analysis/property.infer.cpp
+        src/passes/analysis/effect.infer.cpp
+        src/passes/analysis/accuracy.analyze.cpp
+        src/passes/analysis/cost.roofline.cpp
+        src/passes/analysis/workload.bucket.cpp
+        src/passes/analysis/alias.infer.cpp
+        # Math canonicalization (spec §8.2)
+        src/passes/math/math.canonicalize.cpp
+        src/passes/math/math.normalize_ops.cpp
+        src/passes/math/math.associative_flatten.cpp
+        src/passes/math/math.commutative_sort.cpp
+        src/passes/math/math.constant_fold.cpp
+        src/passes/math/math.identity_elim.cpp
+        src/passes/math/math.strength_reduce.cpp
+        src/passes/math/math.cse.cpp
+        src/passes/math/math.dce.cpp
+        src/passes/math/math.algebraic_simplify.cpp
+        src/passes/math/math.expression_balance.cpp
+        # E-graph (spec §8.3); egraph.cpp = shared engine
         src/passes/egraph/egraph.cpp
-        src/passes/egraph/egraph_passes.cpp
-        src/passes/calculus/calculus_passes.cpp
-        src/passes/tensor/tensor_passes.cpp
-        src/passes/approx/approx_passes.cpp
-        src/passes/schedule/schedule_passes.cpp
-        src/passes/physical/physical_passes.cpp
-        src/passes/lower/lower_passes.cpp
-        src/passes/backend/backend_passes.cpp
+        src/passes/egraph/egraph.build.cpp
+        src/passes/egraph/egraph.saturate.cpp
+        src/passes/egraph/egraph.extract.cpp
+        # Calculus (spec §8.4)
+        src/passes/calculus/calculus.derivative_symbolic.cpp
+        src/passes/calculus/calculus.derivative_simplify.cpp
+        src/passes/calculus/calculus.derivative_numeric.cpp
+        src/passes/calculus/calculus.integral_quadrature.cpp
+        # Tensor (spec §8.5)
+        src/passes/tensor/tensor.layout_infer.cpp
+        src/passes/tensor/tensor.transpose_elim.cpp
+        src/passes/tensor/tensor.einsum_lower.cpp
+        src/passes/tensor/tensor.contraction_path.cpp
+        src/passes/tensor/tensor.fusion_find.cpp
+        src/passes/tensor/tensor.matmul_algorithm_select.cpp
+        # Approximation (spec §8.6)
+        src/passes/approx/approx.policy_gate.cpp
+        src/passes/approx/approx.function_lower.cpp
+        src/passes/approx/approx.ulp_verify.cpp
+        # Schedule (spec §8.7)
+        src/passes/schedule/schedule.region_extract.cpp
+        src/passes/schedule/schedule.fuse.cpp
+        src/passes/schedule/schedule.tile.cpp
+        src/passes/schedule/schedule.vectorize.cpp
+        src/passes/schedule/schedule.parallelize.cpp
+        # Physical/memory (spec §8.8)
+        src/passes/physical/memory.liveness.cpp
+        src/passes/physical/memory.buffer_plan.cpp
+        src/passes/physical/memory.place.cpp
+        src/passes/physical/memory.layout_select.cpp
+        # Lowering (spec §8.11)
+        src/passes/lower/lower.to_kernel_ir.cpp
+        # Backend (spec §8.12)
+        src/passes/backend/backend.emit_binary.cpp
     PUBLIC_DEPS mlk_core mlk_ir mlk_type mlk_property mlk_effect mlk_proof
         mlk_verifier mlk_pass_core mlk_cost
 )

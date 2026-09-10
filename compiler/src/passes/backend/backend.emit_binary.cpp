@@ -1,12 +1,16 @@
-// Backend passes (spec §8.12): backend.emit_binary. The CPU backend
-// artifact = serialized KernelModule (stable JSON, Rule 24) + C++ source
-// emission for AOT packages. No machine code is generated in-process
-// (kernel_abi.md: publication is via atomically swapped realization
-// pointers; W^X rules apply to executable pages, of which MLK+ MVP has
-// none — documented in docs/kernel_abi.md).
+// backend.emit_binary — compilation artifact emission (spec §8.12): the
+// CPU backend artifact = serialized KernelModule (stable JSON, Rule 24) +
+// C++ source emission for AOT packages. No machine code is generated
+// in-process (kernel_abi.md: publication is via atomically swapped
+// realization pointers; W^X rules apply to executable pages, of which
+// MLK+ MVP has none — documented in docs/kernel_abi.md).
 #include "../passes_common.h"
 
 namespace mlk::passes {
+
+namespace {
+constexpr Tier kBackendTiers[] = {Tier::Tier1, Tier::Tier2, Tier::Tier3};
+}  // namespace
 
 class EmitBinaryPass final : public PassBase {
 public:
@@ -36,12 +40,12 @@ public:
     }
 };
 
-void registerBackendPasses(SymbolTable& symbols) {
-    static EmitBinaryPass emit(symbols, "backend.emit_binary",
+void register_backend_emit_binary_pass(SymbolTable& symbols) {
+    static EmitBinaryPass pass(symbols, "backend.emit_binary",
                                PassKind::Lowering);
-    registerPass(symbols, emit, PassKind::Lowering, {"kernel.built"},
+    registerPass(symbols, pass, PassKind::Lowering, {"kernel.built"},
                  {"kernel.emitted"}, {},
-                 {Tier::Tier1, Tier::Tier2, Tier::Tier3});
+                 {kBackendTiers[0], kBackendTiers[1], kBackendTiers[2]});
 }
 
 }  // namespace mlk::passes

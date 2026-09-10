@@ -78,4 +78,28 @@ struct Value {
     [[nodiscard]] bool isSymbol() const { return kind == ValueKind::Symbol; }
 };
 
+/// Structural hash of a value WITHOUT a producer node (constants, variables,
+/// placeholders, symbols): kind + type + payload. Constants mix their payload
+/// and named atoms mix their symbol id, so distinct mathematical atoms never
+/// collide (Rule 24: content-derived hashes).
+///
+/// P0 regression guard: MathGraph::hash() stamps per-value hashes only for
+/// NodeResult values; every other value must go through this function. Reads
+/// of an unstamped `Value::hash` slot previously collapsed all such values to
+/// the same hash, which let math.cse merge mul(x,x) with mul(3,x) — silent
+/// wrong results (severity P0 per Rule 73). Covered by the cse_* regression
+/// tests in tests/unit/unit_passes_math.cpp (Rule 41).
+[[nodiscard]] inline HashValue structuralValueHash(const Value& v) noexcept {
+    HashValue h = hashU64(static_cast<uint64_t>(v.kind));
+    h = hashCombine(h, v.type.hash());
+    if (v.kind == ValueKind::Constant) {
+        h = hashCombine(h, v.constant.hash());
+    } else if (v.kind == ValueKind::Variable ||
+               v.kind == ValueKind::Placeholder ||
+               v.kind == ValueKind::Symbol) {
+        h = hashCombine(h, hashU64(static_cast<uint64_t>(v.name)));
+    }
+    return h;
+}
+
 }  // namespace mlk

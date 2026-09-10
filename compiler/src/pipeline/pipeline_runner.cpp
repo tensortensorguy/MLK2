@@ -2,6 +2,7 @@
 #include "mlk/pipeline/pipeline_runner.h"
 
 #include "mlk/core/event_sink.h"
+#include "mlk/cost/cost_model.h"
 #include "mlk/verifier/graph_verifier.h"
 
 namespace mlk {
@@ -124,6 +125,15 @@ Result<PassResult> PipelineRunner::run(Tier tier, PassContext& baseCtx,
                                        MathGraph& graph,
                                        KernelModule* kernelOut,
                                        const PipelineRunOptions& opts) {
+    // Analysis passes in the Tier 2/3 pipelines (cost.roofline) require a
+    // cost model. When the embedding tool provides none, the runner installs
+    // its own deterministic table-driven model instead of failing the whole
+    // compilation (Rule 139: compiler config gaps degrade, never crash;
+    // Rule 27: model internals are named constants). Callers that set
+    // ctx.costModel explicitly keep full control.
+    if (baseCtx.costModel == nullptr) {
+        baseCtx.costModel = &defaultCostModel_;
+    }
     PassResult total;
     total.nodesBefore = graph.liveNodeCount();
     const auto passNames = tierPipeline(tier, symbols_);

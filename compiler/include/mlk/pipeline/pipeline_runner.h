@@ -4,6 +4,7 @@
 #include "mlk/core/cancellation.h"
 #include "mlk/core/result.h"
 #include "mlk/core/symbol_table.h"
+#include "mlk/cost/cost_model.h"
 #include "mlk/ir/math_graph.h"
 #include "mlk/pass/pass.h"
 #include "mlk/pass/pass_registry.h"
@@ -38,6 +39,9 @@ public:
 private:
     SymbolTable& symbols_;
     IEventSink* telemetry_;
+    /// Deterministic fallback model installed when the caller leaves
+    /// PassContext::costModel null (cost.roofline requires one).
+    BasicCostModel defaultCostModel_;
 };
 
 }  // namespace mlk

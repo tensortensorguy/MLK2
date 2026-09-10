@@ -1,62 +1,14 @@
-// E-graph passes (spec §8.3): egraph.build, egraph.saturate, egraph.extract.
+// egraph.extract — saturate then extract the cheapest equivalent form
+// (spec §8.3; Rule 21: the original expression stays in the graph and the
+// output repointing is the versioned, documented lowering decision).
 #include "../passes_common.h"
-#include "../egraph/egraph.h"
-#include "mlk/core/cancellation.h"
+#include "egraph.h"
 
 namespace mlk::passes {
 
 namespace {
 constexpr Tier kEgraphTiers[] = {Tier::Tier2, Tier::Tier3};
 }  // namespace
-
-class EgraphBuildPass final : public PassBase {
-public:
-    using PassBase::PassBase;
-
-    Result<PassResult> run(PassContext& ctx, MathGraph& graph) override {
-        PassResult r;
-        // The e-graph is per-compilation state; building here validates that
-        // import succeeds and reports class statistics (the saturate pass
-        // constructs its own instance over the same graph deterministically).
-        EGraphConfig cfg;
-        cfg.maxNodes = constants::kEgraphDefaultMaxNodes;
-        const MathDomainProfile& profile = *ctx.domainProfile;
-        EGraph eg(profile, cfg);
-        if (graph.outputs().empty()) {
-            return err(ErrorCode::InvalidGraph,
-                       "egraph.build requires at least one output", 47);
-        }
-        MLK_TRY_VAR(rootClass, eg.importGraph(graph, graph.outputs()[0]));
-        (void)rootClass;
-        r.changed = false;
-        return r;
-    }
-};
-
-class EgraphSaturatePass final : public PassBase {
-public:
-    using PassBase::PassBase;
-
-    Result<PassResult> run(PassContext& ctx, MathGraph& graph) override {
-        PassResult r;
-        EGraphConfig cfg;
-        cfg.maxNodes = constants::kEgraphDefaultMaxNodes;
-        cfg.maxIterations = ctx.budget.fixpointIterations;
-        EGraph eg(*ctx.domainProfile, cfg);
-        MLK_TRY_VAR(rootClass, eg.importGraph(graph, graph.outputs()[0]));
-        (void)rootClass;
-        // Budgeted fixpoint (Rule 10): saturate until no growth or budget.
-        for (uint32_t iter = 0; iter < cfg.maxIterations; ++iter) {
-            if (ctx.cancel != nullptr && ctx.cancel->cancelled()) {
-                return err(ErrorCode::Cancelled, "saturate cancelled", 132);
-            }
-            MLK_TRY_VAR(grew, eg.saturateOnce(*ctx.symbols));
-            if (!grew) break;
-        }
-        r.changed = false;  // non-destructive: e-graph keeps all forms
-        return r;
-    }
-};
 
 class EgraphExtractPass final : public PassBase {
 public:
@@ -142,17 +94,10 @@ public:
     }
 };
 
-void registerEgraphPasses(SymbolTable& symbols) {
-    static EgraphBuildPass build(symbols, "egraph.build", PassKind::Transform);
-    static EgraphSaturatePass saturate(symbols, "egraph.saturate",
-                                       PassKind::Transform);
-    static EgraphExtractPass extract(symbols, "egraph.extract",
-                                     PassKind::Transform);
-    registerPass(symbols, build, PassKind::Transform, {"ir.verified"},
-                 {"egraph.built"}, {}, {kEgraphTiers[0], kEgraphTiers[1]});
-    registerPass(symbols, saturate, PassKind::Transform, {"egraph.built"},
-                 {"egraph.saturated"}, {}, {kEgraphTiers[0], kEgraphTiers[1]});
-    registerPass(symbols, extract, PassKind::Transform, {"egraph.saturated"},
+void register_egraph_extract_pass(SymbolTable& symbols) {
+    static EgraphExtractPass pass(symbols, "egraph.extract",
+                                  PassKind::Transform);
+    registerPass(symbols, pass, PassKind::Transform, {"egraph.saturated"},
                  {"math.extracted"}, {"analysis.cse", "analysis.cost"},
                  {kEgraphTiers[0], kEgraphTiers[1]});
 }

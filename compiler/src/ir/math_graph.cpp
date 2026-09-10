@@ -124,8 +124,7 @@ HashValue MathGraph::hash() const {
             const Value& v = values_[in];
             HashValue vh = v.hashValid
                                ? v.hash
-                               : hashCombine(hashU64(static_cast<uint64_t>(v.kind)),
-                                             v.type.hash());
+                               : structuralValueHash(v);
             nh = hashCombine(nh, vh);
         }
         const_cast<Value&>(values_[n.results[0]]).hash = nh;

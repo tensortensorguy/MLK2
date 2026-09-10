@@ -1,9 +1,15 @@
-// Lowering passes (spec §8.11): lower.to_kernel_ir. Math IR -> KernelIR
-// (spec §12: "Do not emit machine code directly from the mathematical
-// graph").
+// lower.to_kernel_ir — Math IR -> Kernel IR (spec §8.11/§12: "Do not emit
+// machine code directly from the mathematical graph"). Buffers, fused
+// elementwise loops, blocked GEMM calls, and declarative schedule params
+// are emitted into the KernelModule sink.
 #include "../passes_common.h"
+#include "mlk/ir/attrs.h"
 
 namespace mlk::passes {
+
+namespace {
+constexpr Tier kLowerTiers[] = {Tier::Tier1, Tier::Tier2, Tier::Tier3};
+}  // namespace
 
 class ToKernelIrPass final : public PassBase {
 public:
@@ -197,12 +203,12 @@ public:
     }
 };
 
-void registerLowerPasses(SymbolTable& symbols) {
-    static ToKernelIrPass toKernelIr(symbols, "lower.to_kernel_ir",
-                                     PassKind::Lowering);
-    registerPass(symbols, toKernelIr, PassKind::Lowering,
-                 {"memory.placed"}, {"kernel.built"}, {},
-                 {Tier::Tier1, Tier::Tier2, Tier::Tier3});
+void register_lower_to_kernel_ir_pass(SymbolTable& symbols) {
+    static ToKernelIrPass pass(symbols, "lower.to_kernel_ir",
+                               PassKind::Lowering);
+    registerPass(symbols, pass, PassKind::Lowering, {"memory.placed"},
+                 {"kernel.built"}, {},
+                 {kLowerTiers[0], kLowerTiers[1], kLowerTiers[2]});
 }
 
 }  // namespace mlk::passes
