@@ -1,6 +1,8 @@
 // Pipeline implementation: tier pipelines per spec §9.
 #include "mlk/pipeline/pipeline_runner.h"
 
+
+
 #include "mlk/core/event_sink.h"
 #include "mlk/cost/cost_model.h"
 #include "mlk/verifier/graph_verifier.h"
@@ -64,6 +66,11 @@ SmallVector<SymbolId, 16> tierPipeline(Tier tier, SymbolTable& symbols) {
             add("approx.ulp_verify");
             add("calculus.derivative_symbolic");
             add("calculus.derivative_simplify");
+            // The calculus lowerings append nodes whose result types are
+            // not yet inferred; re-run inference (idempotent, Rule 10) so
+            // downstream tensor passes and the kernel lowering see typed
+            // values and materialize output buffers with correct shapes.
+            add("type.infer");
             add("tensor.einsum_lower");
             add("tensor.transpose_elim");
             add("tensor.matmul_algorithm_select");
@@ -99,6 +106,12 @@ SmallVector<SymbolId, 16> tierPipeline(Tier tier, SymbolTable& symbols) {
             add("approx.ulp_verify");
             add("calculus.derivative_symbolic");
             add("calculus.derivative_simplify");
+            // egraph.extract and the calculus lowerings append nodes whose
+            // result types are not yet inferred; re-run inference
+            // (idempotent, Rule 10) so downstream tensor passes and the
+            // kernel lowering see typed values and materialize buffers
+            // with correct shapes.
+            add("type.infer");
             add("tensor.einsum_lower");
             add("tensor.transpose_elim");
             add("tensor.contraction_path");
@@ -114,6 +127,13 @@ SmallVector<SymbolId, 16> tierPipeline(Tier tier, SymbolTable& symbols) {
             add("lower.to_kernel_ir");
             add("backend.emit_binary");
             break;
+    }
+    if (std::getenv("MLK_LOWER_DEBUG") != nullptr) {
+        std::fprintf(stderr, "[pipeline] tier=%d entries=%zu\n",
+                     static_cast<int>(tier), out.size());
+        for (const SymbolId id : out) {
+            std::fprintf(stderr, "[pipeline] %s\n", symbols.text(id).c_str());
+        }
     }
     return out;
 }
@@ -180,6 +200,14 @@ Result<PassResult> PipelineRunner::run(Tier tier, PassContext& baseCtx,
         total.changed = total.changed || result.changed;
         for (const auto& inv : result.invalidatedAnalyses) {
             total.invalidatedAnalyses.push_back(inv);
+        }
+        // Rewrite passes may append replacement nodes and rewire earlier
+        // consumers, which temporarily breaks the "node id order is
+        // topological" invariant that topoOrder(), the Tier-0 interpreter,
+        // and the verifier rely on. Renumber once, here, in ONE place
+        // (Rule 77: no duplicated bookkeeping in individual passes).
+        if (result.changed) {
+            static_cast<void>(graph.renumberTopological());
         }
         // Rule 47: verifier runs between passes (all builds here; debug
         // builds enforce via verifyBetweenPasses default true).

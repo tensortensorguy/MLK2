@@ -22,3 +22,5 @@ compile_commands.json
 # Sanitizer build trees
 build-asan/
 build-*/
+bench/results/*.json
+bench/results/*.md

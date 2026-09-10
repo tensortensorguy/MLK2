@@ -145,6 +145,12 @@ void MathGraph::replaceOperandUses(ValueId oldV, ValueId newV) {
             if (in == oldV) in = newV;
         }
     }
+    // Graph outputs are uses too: a rewrite that kills the output's
+    // producer must keep the output list consistent (Rule 47: use-def
+    // consistency includes graph outputs).
+    for (ValueId& out : outputs_) {
+        if (out == oldV) out = newV;
+    }
     rebuildUsers();
     hashCache_.reset();
     ++version_;
@@ -187,6 +193,110 @@ SmallVector<NodeId, 16> MathGraph::topoOrder() const {
         if (!n.flags.test(NodeFlag::Dead)) order.push_back(n.id);
     }
     return order;
+}
+
+uint32_t MathGraph::renumberTopological() {
+    // Kahn's algorithm over live nodes. A node is ready when every
+    // NodeResult operand's producer has been placed. Dead nodes keep their
+    // relative order and follow the live ones (they are unreachable from
+    // live dataflow; their ids are remapped consistently anyway).
+    const std::size_t count = nodes_.size();
+    std::vector<uint32_t> pendingDeps(count, 0);
+    std::vector<uint32_t> newState(count, 0);  // 0 = unplaced, 1 = placed
+    SmallVector<NodeId, 16> ready;
+    for (std::size_t i = 0; i < count; ++i) {
+        const Node& n = nodes_[i];
+        if (n.flags.test(NodeFlag::Dead)) continue;
+        uint32_t deps = 0;
+        for (const ValueId in : n.inputs) {
+            const Value& v = values_[assertIndex(in, values_.size())];
+            if (v.kind == ValueKind::NodeResult) {
+                const NodeId prod = v.producer;
+                if (prod < count && !nodes_[prod].flags.test(NodeFlag::Dead)) {
+                    ++deps;
+                }
+            }
+        }
+        pendingDeps[i] = deps;
+        if (deps == 0) ready.push_back(static_cast<NodeId>(i));
+    }
+
+    std::vector<NodeId> order;
+    order.reserve(count);
+    for (std::size_t head = 0; head < ready.size(); ++head) {
+        const NodeId cur = ready[head];
+        order.push_back(cur);
+        newState[cur] = 1;
+        for (const ValueId res : nodes_[cur].results) {
+            if (res >= users_.size()) continue;
+            for (const NodeId user : users_[res]) {
+                if (user >= count) continue;
+                if (nodes_[user].flags.test(NodeFlag::Dead)) continue;
+                if (newState[user] == 1) continue;
+                if (pendingDeps[user] > 0) {
+                    --pendingDeps[user];
+                    if (pendingDeps[user] == 0) ready.push_back(user);
+                }
+            }
+        }
+    }
+    // Dead nodes trail in original order.
+    for (std::size_t i = 0; i < count; ++i) {
+        if (nodes_[i].flags.test(NodeFlag::Dead)) order.push_back(
+            static_cast<NodeId>(i));
+    }
+    // Any live node left (cycle) also trails; the verifier reports it.
+    for (std::size_t i = 0; i < count; ++i) {
+        if (newState[i] == 0) order.push_back(static_cast<NodeId>(i));
+    }
+
+    // Old id -> new id.
+    std::vector<NodeId> remap(count, kInvalidNodeId);
+    for (std::size_t pos = 0; pos < order.size(); ++pos) {
+        remap[static_cast<std::size_t>(order[pos])] =
+            static_cast<NodeId>(pos);
+    }
+    uint32_t moved = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (remap[i] != static_cast<NodeId>(i)) ++moved;
+    }
+    if (moved == 0) return 0;
+
+    // Rebuild the nodes vector in the new order.
+    std::vector<Node> placed;
+    placed.reserve(count);
+    for (const NodeId oldId : order) {
+        Node n = nodes_[static_cast<std::size_t>(oldId)];
+        n.id = remap[static_cast<std::size_t>(oldId)];
+        placed.push_back(std::move(n));
+    }
+    nodes_ = std::move(placed);
+
+    // Remap producer fields (value ids are stable).
+    for (auto& v : values_) {
+        if (v.kind == ValueKind::NodeResult &&
+            v.producer < count) {
+            v.producer = remap[v.producer];
+        }
+    }
+    // Remap users_ lists (node ids only; value ids untouched).
+    for (auto& list : users_) {
+        for (NodeId& u : list) {
+            if (u < count) u = remap[u];
+        }
+    }
+    // Rebuild the effect chain in the new relative order.
+    {
+        SmallVector<NodeId, 16> chained;
+        for (const NodeId n : effects_.order()) {
+            if (n < count) chained.push_back(remap[n]);
+        }
+        effects_ = EffectChain{};
+        for (const NodeId n : chained) effects_.append(n);
+    }
+    hashCache_.reset();
+    ++version_;
+    return moved;
 }
 
 }  // namespace mlk

@@ -2,6 +2,8 @@
 // approximation, algebraic e-graph optimizer (spec §6; Rules 50-53).
 #include "mlk/superopt/enumerator.h"
 
+#include "mlk/support/math_families.h"
+
 #include <cmath>
 
 #include "mlk/ir/graph_hash.h"
@@ -9,81 +11,6 @@
 namespace mlk {
 
 namespace {
-/// Degree-13 minimax coefficients for sin on [-pi/4, pi/4] (Cephes-class,
-/// correctly rounded to double). With Payne-Hanek-free quadrant reduction
-/// this family measures at single-digit ULP error against libm over
-/// [-pi, pi]; the certificate records the MEASURED bound (Rule 29/34: no
-/// invented numbers).
-/// Cody-Waite constants: pi/2 split into hi/lo parts so that quadrant
-/// reduction preserves the residual at multiples of pi/2 (this is what
-/// makes the candidate match libm to single-digit ULPs at x = +-pi/2, +-pi).
-constexpr double kPi = 3.14159265358979323846;
-constexpr double kPiHalf = 1.57079632679489661923;
-constexpr double kPiTwo = 6.28318530717958647692;
-constexpr double kPiTwoInv = 6.36619772367581382433e-1;  // 2/pi
-constexpr double kPio2Hi = 1.5707963267948965580e+00;
-constexpr double kPio2Lo = 6.1232339957367660359e-17;
-
-/// Degree-13 minimax sin residual polynomial on [-pi/4, pi/4]
-/// (Cephes-class, correctly rounded doubles; Horner/FMA-friendly form).
-constexpr double kSinC0 = 1.58962301576546568060e-10;
-constexpr double kSinC1 = -2.50507477628578072866e-8;
-constexpr double kSinC2 = 2.75573136213857245213e-6;
-constexpr double kSinC3 = -1.98412698295895385996e-4;
-constexpr double kSinC4 = 8.33333333332211858878e-3;
-constexpr double kSinC5 = -1.66666666666666307295e-1;
-
-[[nodiscard]] double polySinReduced(double x) {
-    const double r2 = x * x;
-    double p = kSinC0;
-    p = p * r2 + kSinC1;
-    p = p * r2 + kSinC2;
-    p = p * r2 + kSinC3;
-    p = p * r2 + kSinC4;
-    p = p * r2 + kSinC5;
-    return x + x * r2 * p;
-}
-
-/// Degree-12 minimax cos residual polynomial on [-pi/4, pi/4].
-constexpr double kCosC0 = -1.13585365213876817300e-11;
-constexpr double kCosC1 = 2.08757530072652689750e-9;
-constexpr double kCosC2 = -2.75573142103085808917e-7;
-constexpr double kCosC3 = 2.48015872890001867312e-5;
-constexpr double kCosC4 = -1.38888888888783992457e-3;
-constexpr double kCosC5 = 4.16666666666666435770e-2;
-
-[[nodiscard]] double polyCosReduced(double x) {
-    const double r2 = x * x;
-    double p = kCosC0;
-    p = p * r2 + kCosC1;
-    p = p * r2 + kCosC2;
-    p = p * r2 + kCosC3;
-    p = p * r2 + kCosC4;
-    p = p * r2 + kCosC5;
-    return 1.0 - r2 * 0.5 + r2 * r2 * p;
-}
-
-/// Cody-Waite quadrant reduction: n = round(x / (pi/2)),
-/// r = x - n*(pi/2_hi) - n*(pi/2_lo) in [-pi/4, pi/4].
-[[nodiscard]] double reduceSinQuadrant(double x, int& quadrant) {
-    const double n = std::floor(x / kPiHalf + 0.5);
-    double r = (x - n * kPio2Hi) - n * kPio2Lo;
-    const int q = static_cast<int>(std::fmod(n, 4.0));
-    quadrant = q < 0 ? q + 4 : q;
-    return r;
-}
-
-[[nodiscard]] double reduceSin(double x) {
-    int q = 0;
-    const double r = reduceSinQuadrant(x, q);
-    switch (q) {  // Rule 78: exhaustive over quadrants
-        case 0: return polySinReduced(r);
-        case 1: return polyCosReduced(r);
-        case 2: return -polySinReduced(r);
-        default: return -polyCosReduced(r);
-    }
-}
-
 /// True ULP distance between two doubles (Rule 34: real error bounds).
 [[nodiscard]] double ulpDistance(double ref, double got) {
     if (ref == got) return 0.0;
@@ -197,7 +124,7 @@ MathFunctionApproximator::generate(const MathGraph& graph,
                 x = kEdges[(i - constants::kUlpVerifySamples) % 7];
             }
             const double ref = std::sin(x);
-            const double got = reduceSin(x);
+            const double got = families::polySin(x);
             const double ulps = ulpDistance(ref, got);
             if (ulps >= 1e18) {
                 withinDomain = false;

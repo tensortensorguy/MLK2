@@ -39,6 +39,41 @@ const char* kernelOpName(KernelOp op) noexcept;
 /// a scalar realization in the CPU backend).
 [[nodiscard]] bool isScalarRealizable(MathOp op) noexcept;
 
+/// Operand of a KernelExpr: a compile-time constant, the current element
+/// of input buffer A/B, a runtime scalar parameter, or the result of a
+/// prior expression in the same Compute chain (SSA over temps).
+struct KernelOperand {
+    enum class Kind : uint8_t {
+        Const = 0,   // value = constValue
+        ElemA,       // bufferA[i]  (loop element)
+        ElemB,       // bufferB[i]  (loop element)
+        ScalarParam, // runtime scalar, index = scalarIndex
+        Temp,        // exprs[tempIndex] result (tempIndex < self)
+    };
+    Kind kind{Kind::Const};
+    int64_t index{0};        // Temp: expr index; ScalarParam: param index
+    double constValue{0.0};  // Kind::Const payload
+
+    [[nodiscard]] bool operator==(const KernelOperand& o) const noexcept {
+        return kind == o.kind && index == o.index &&
+               constValue == o.constValue;
+    }
+};
+
+/// One scalar math operation in a fused per-element Compute chain.
+/// A Compute node evaluates exprs[] in order; unary ops use only `a`.
+/// The last expression's value is the Compute result (Rule 24: the chain
+/// is part of the serializable, hashable KernelModule).
+struct KernelExpr {
+    MathOp op{MathOp::Add};
+    KernelOperand a{};
+    KernelOperand b{};  // ignored for unary ops
+
+    [[nodiscard]] bool operator==(const KernelExpr& o) const noexcept {
+        return op == o.op && a == o.a && b == o.b;
+    }
+};
+
 struct KernelNode {
     KernelOp op{KernelOp::Loop};
     MathOp math{MathOp::Add};          // for Compute
@@ -54,6 +89,9 @@ struct KernelNode {
     /// Implementation family for math functions (libm / poly7; Rule 34:
     /// carries the verified accuracy contract reference).
     SymbolId family{kInvalidSymbolId};
+    /// Fused per-element expression chain (Compute). Empty => legacy single
+    /// op semantics (compute.math over ElemA/ElemB).
+    SmallVector<KernelExpr, 8> exprs{};
     SmallVector<uint32_t, 4> children{};      // loop body / region nodes
 
     [[nodiscard]] bool isLoop() const { return op == KernelOp::Loop; }
@@ -67,6 +105,9 @@ struct KernelBuffer {
     int64_t elements{constants::kKernelLoopDynamicBound};
     uint32_t alignment{static_cast<uint32_t>(
         constants::kDefaultAlignmentBytes)};
+    /// Logical dimensions (row-major; empty for 1-D/dynamic buffers).
+    /// Required by structured kernels (GEMM: A=[M,K], B=[K,N], C=[M,N]).
+    SmallVector<int64_t, 4> dims{};
 };
 
 struct KernelModule {

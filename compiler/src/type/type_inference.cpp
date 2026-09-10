@@ -175,7 +175,20 @@ std::optional<MathType> inferResultType(const MathGraph& graph, NodeId nodeId,
             out.dtype = Dtype::C128;
             return out;
         }
-        case MathOp::ScalarToTensor: case MathOp::TensorToScalar:
+        case MathOp::ScalarToTensor: {
+            // Rule 39 explicit lift: the frontend annotates the broadcast
+            // target type on the result value; inference preserves the
+            // annotation when it is a well-formed tensor of the same
+            // dtype, otherwise the node stays scalar-shaped (t0).
+            const MathType& tin = graph.value(n.inputs[0]).type;
+            const MathType annotated = graph.value(n.results[0]).type;
+            if (annotated.tensor.has_value() && tin.isScalarLike() &&
+                annotated.tensor->element == tin.dtype) {
+                return annotated;
+            }
+            return t0;
+        }
+        case MathOp::TensorToScalar:
         case MathOp::LayoutTransform: case MathOp::Reinterpret:
         case MathOp::BitCast: case MathOp::Box: case MathOp::Unbox:
             return t0;

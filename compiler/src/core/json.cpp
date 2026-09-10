@@ -299,7 +299,7 @@ void escapeInto(const std::string& s, std::string& out) {
 }
 
 void serializeDouble(double d, std::string& out) {
-    if (d != d) {  // JSON has no NaN; canonical deterministic substitute
+    if (std::isnan(d)) {  // JSON has no NaN; canonical deterministic substitute
         out += "null";
         return;
     }
@@ -322,18 +322,18 @@ void serializeImpl(const Value& v, std::string& out, int indent, int depth) {
     };
     if (depth > kMaxDepth) return;  // defensive: cannot occur on parsed trees
     switch (v.type()) {
-        case Type::Null: out += "null"; break;
-        case Type::Bool: out += v.asBool() ? "true" : "false"; break;
-        case Type::Int: {
+        case Kind::Null: out += "null"; break;
+        case Kind::Bool: out += v.asBool() ? "true" : "false"; break;
+        case Kind::Int: {
             char buf[32];
             std::snprintf(buf, sizeof(buf), "%lld",
                           static_cast<long long>(v.asInt()));
             out += buf;
             break;
         }
-        case Type::Double: serializeDouble(v.asDouble(), out); break;
-        case Type::String: escapeInto(v.asString(), out); break;
-        case Type::Array: {
+        case Kind::Double: serializeDouble(v.asDouble(), out); break;
+        case Kind::String: escapeInto(v.asString(), out); break;
+        case Kind::Array: {
             const auto& arr = v.asArray();
             if (arr.empty()) {
                 out += "[]";
@@ -349,7 +349,7 @@ void serializeImpl(const Value& v, std::string& out, int indent, int depth) {
             out.push_back(']');
             break;
         }
-        case Type::Object: {
+        case Kind::Object: {
             const auto& obj = v.asObject();
             if (obj.empty()) {
                 out += "{}";

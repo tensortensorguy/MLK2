@@ -40,6 +40,7 @@ HashValue KernelModule::hash() const noexcept {
         h = hashCombine(h, hashU64(b.name));
         h = hashCombine(h, hashU64(static_cast<uint64_t>(b.dtype)));
         h = hashCombine(h, hashI64(b.elements));
+        for (const int64_t d : b.dims) h = hashCombine(h, hashI64(d));
     }
     for (const auto& n : nodes) {
         h = hashCombine(h, hashU64(static_cast<uint64_t>(n.op)));
@@ -47,6 +48,26 @@ HashValue KernelModule::hash() const noexcept {
         h = hashCombine(h, hashI64(n.begin));
         h = hashCombine(h, hashI64(n.end));
         h = hashCombine(h, hashI64(n.step));
+        h = hashCombine(h, hashU64(n.family));
+        for (const auto& e : n.exprs) {
+            h = hashCombine(h, hashU64(static_cast<uint64_t>(e.op)));
+            h = hashCombine(h, hashU64(static_cast<uint64_t>(e.a.kind)));
+            h = hashCombine(h, hashI64(e.a.index));
+            h = hashCombine(h, hashU64(static_cast<uint64_t>(e.b.kind)));
+            h = hashCombine(h, hashI64(e.b.index));
+            // Const payloads hash their bit pattern (Rule 24: stable).
+            std::uint64_t abits = 0, bbits = 0;
+            if (e.a.kind == KernelOperand::Kind::Const) {
+                double ad = e.a.constValue;
+                __builtin_memcpy(&abits, &ad, sizeof(abits));
+            }
+            if (e.b.kind == KernelOperand::Kind::Const) {
+                double bd = e.b.constValue;
+                __builtin_memcpy(&bbits, &bd, sizeof(bbits));
+            }
+            h = hashCombine(h, abits);
+            h = hashCombine(h, bbits);
+        }
     }
     return h;
 }
@@ -68,6 +89,13 @@ json::Value KernelModule::toJson(SymbolTable& symbols) const {
         bo.set("input", json::Value{b.isInput});
         bo.set("output", json::Value{b.isOutput});
         bo.set("elements", json::Value{b.elements});
+        if (!b.dims.empty()) {
+            json::Value ds = json::Array{};
+            for (const int64_t d : b.dims) {
+                ds.push(json::Value{d});
+            }
+            bo.set("dims", std::move(ds));
+        }
         bufs.push(std::move(bo));
     }
     doc.set("buffers", std::move(bufs));
@@ -78,6 +106,9 @@ json::Value KernelModule::toJson(SymbolTable& symbols) const {
         no.set("op", json::Value{kernelOpName(n.op)});
         if (n.op == KernelOp::Compute) {
             no.set("math", json::Value{opName(n.math)});
+            if (n.family != kInvalidSymbolId) {
+                no.set("family", json::Value{symbols.text(n.family)});
+            }
         }
         if (n.var != kInvalidSymbolId) {
             no.set("var", json::Value{symbols.text(n.var)});
@@ -93,6 +124,40 @@ json::Value KernelModule::toJson(SymbolTable& symbols) const {
         }
         if (n.bufferOut != constants::kInvalidId) {
             no.set("out", json::Value{static_cast<int64_t>(n.bufferOut)});
+        }
+        if (!n.exprs.empty()) {
+            json::Value xs = json::Array{};
+            for (const auto& e : n.exprs) {
+                json::Value eo = json::Object{};
+                eo.set("op", json::Value{opName(e.op)});
+                auto operandJson = [&](const KernelOperand& o,
+                                       const char* slot) {
+                    json::Value oo = json::Object{};
+                    const char* k = "const";
+                    switch (o.kind) {  // Rule 78: exhaustive
+                        case KernelOperand::Kind::Const: k = "const"; break;
+                        case KernelOperand::Kind::ElemA: k = "elem_a"; break;
+                        case KernelOperand::Kind::ElemB: k = "elem_b"; break;
+                        case KernelOperand::Kind::ScalarParam:
+                            k = "scalar_param";
+                            break;
+                        case KernelOperand::Kind::Temp: k = "temp"; break;
+                    }
+                    oo.set("kind", json::Value{k});
+                    if (o.kind == KernelOperand::Kind::Const) {
+                        oo.set("value", json::Value{o.constValue});
+                    }
+                    if (o.kind == KernelOperand::Kind::Temp ||
+                        o.kind == KernelOperand::Kind::ScalarParam) {
+                        oo.set("index", json::Value{o.index});
+                    }
+                    eo.set(slot, std::move(oo));
+                };
+                operandJson(e.a, "a");
+                operandJson(e.b, "b");
+                xs.push(std::move(eo));
+            }
+            no.set("exprs", std::move(xs));
         }
         json::Value kids = json::Array{};
         for (const uint32_t c : n.children) {

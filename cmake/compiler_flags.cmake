@@ -36,9 +36,23 @@ else()
         # suppression; -Wall -Wextra remain fully active.
         target_compile_options(mlk_cxx_flags INTERFACE -Wno-maybe-uninitialized)
     endif()
-    if(MLK_WARNINGS_AS_ERRORS)
-        target_compile_options(mlk_cxx_flags INTERFACE -Werror)
-    endif()
+    # ALL WARNINGS ARE ERRORS — unconditional project law. There is no
+    # opt-out: a build that emits any diagnostic is a broken build.
+    # (Previous releases gated this behind MLK_WARNINGS_AS_ERRORS; the gate
+    # was removed so warnings can never silently accumulate.)
+    target_compile_options(mlk_cxx_flags INTERFACE
+        -Werror
+        -Wshadow            # shadowed locals hide use-def mistakes
+        # (-Wswitch-enum deliberately NOT used: Rule 78 mandates the
+        #  exhaustive-default + MLK_UNREACHABLE() pattern, which -Wswitch-enum
+        #  punishes; -Wall's -Wswitch already flags missing cases.)
+        # (-Wfloat-equal deliberately NOT used: a mathematical IR compares
+        #  floating-point values INTENTIONALLY in type-identity, hash-consing,
+        #  and interval-endpoint contexts. Numeric-semantics hazards are
+        #  governed by Rules 33/90 and the property system, not by a
+        #  syntactic equality ban.)
+        -Wold-style-cast    # C-style casts bypass type checking
+    )
 endif()
 
 # Rule 81: release builds are optimized hard.

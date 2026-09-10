@@ -28,10 +28,20 @@ public:
             if (!isElementwiseMath(n.op)) continue;
             if (findAttr(n.attrs, groupAttr) != nullptr) continue;
             const Value& result = graph.value(n.results[0]);
+            // LIVE users only: killNode() splices the effect chain but
+            // users_ entries for dead nodes are reclaimed lazily, so a raw
+            // users().size() over-counts after rewrites and would split
+            // trivially fusible chains into different groups.
+            SmallVector<NodeId, 4> liveUsers;
+            for (const NodeId u : graph.users(n.results[0])) {
+                if (!graph.node(u).flags.test(NodeFlag::Dead)) {
+                    liveUsers.push_back(u);
+                }
+            }
             // Only fuse chains whose result has exactly one elementwise user.
             bool fuseWithUser = false;
-            if (graph.users(n.results[0]).size() == 1) {
-                const NodeId user = graph.users(n.results[0])[0];
+            if (liveUsers.size() == 1) {
+                const NodeId user = liveUsers[0];
                 if (isElementwiseMath(graph.node(user).op) &&
                     !graph.node(user).flags.test(NodeFlag::Dead)) {
                     fuseWithUser = true;
@@ -44,7 +54,7 @@ public:
                 n.attrs.push_back(a);
                 r.changed = true;
             }
-            if (graph.users(n.results[0]).size() != 1) ++groupId;
+            if (liveUsers.size() != 1) ++groupId;
         }
         return r;
     }

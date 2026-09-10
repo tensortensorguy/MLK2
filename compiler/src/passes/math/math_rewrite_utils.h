@@ -35,6 +35,14 @@ namespace mlk::passes {
 [[nodiscard]] inline Result<ValueId> replaceResult(MathGraph& g, NodeId nid,
                                                    ValueId newV) {
     const Node& n = g.node(nid);
+    // Rewrite results are rebuilt without an inferred type; transfer the
+    // original's type so downstream inference/verification stays sound
+    // (the rewrite is equivalence-preserving, so the type carries over).
+    const Value& oldVal = g.value(n.results[0]);
+    Value& newVal = g.value(newV);
+    if (newVal.type.domain == Domain::Unknown) {
+        newVal.type = oldVal.type;
+    }
     // Rewire consumers FIRST so the graph stays use-def consistent after
     // the kill (Rule 47/145), then record the equivalence for provenance
     // (Rule 21: original form recoverable).

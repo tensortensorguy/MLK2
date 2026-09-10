@@ -101,4 +101,26 @@ private:
     const SmallVector<double, 8>& inputScalars,
     CancellationToken* cancel);
 
+/// --- Buffer-level kernel ABI (docs/kernel_abi.md) -------------------------
+/// Raw element-buffer bindings for tensor kernels. Inputs are bound in
+/// graph placeholder/variable value-id order; outputs in graph output
+/// order; scalar params in the kernel's ScalarParam first-touch order.
+/// All buffers are dense contiguous f64 rows (row-major for 2-D).
+struct KernelBufferBindings {
+    SmallVector<double*, 8> inputs{};
+    SmallVector<double*, 8> outputs{};
+    SmallVector<double, 8> scalars{};
+    /// Element count for dynamic loop bounds (kKernelLoopDynamicBound).
+    int64_t elements{0};
+};
+
+/// Executes a KernelModule directly over dense f64 buffers: fused
+/// elementwise compute chains (with implementation-family dispatch:
+/// libm / verified poly7 sin), threaded loops per the schedule params,
+/// and blocked GEMM Call nodes with declarative tile params. Cancellation
+/// is polled per parallel chunk (Rule 107/130: bounded latency).
+[[nodiscard]] Result<void> executeKernelOnBuffers(
+    const KernelModule& kernel, SymbolTable& symbols,
+    const KernelBufferBindings& io, CancellationToken* cancel);
+
 }  // namespace mlk

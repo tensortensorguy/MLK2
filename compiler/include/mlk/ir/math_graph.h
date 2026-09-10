@@ -194,6 +194,15 @@ public:
     /// Topological order of all nodes (producers before consumers).
     [[nodiscard]] SmallVector<NodeId, 16> topoOrder() const;
 
+    /// Renumbers live nodes into dataflow order (producers before
+    /// consumers), remapping value.producer, users_ lists, and the effect
+    /// chain. Value ids are NOT renumbered — only node ids move.
+    /// Restores the "node id order is topological" invariant after rewrite
+    /// passes that append replacement nodes and rewire earlier consumers
+    /// (Rule 47: the verifier and the Tier-0 interpreter both rely on the
+    /// invariant). Returns the number of nodes whose id changed.
+    [[nodiscard]] uint32_t renumberTopological();
+
     [[nodiscard]] SmallVector<NodeId, 4> valueUsers(ValueId v) const {
         SmallVector<NodeId, 4> out;
         if (v < users_.size()) out = users_[v];
