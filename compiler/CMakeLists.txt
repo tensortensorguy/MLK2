@@ -145,10 +145,12 @@ mlk_add_library(mlk_passes
         src/passes/physical/memory.layout_select.cpp
         # Lowering (spec §8.11)
         src/passes/lower/lower.to_kernel_ir.cpp
+        # Polyhedral (spec §8.13: docs/polyhedral_spec.md) — passes are
+        # added one per iteration as they land (1:1 pass->file, Rule 26).
         # Backend (spec §8.12)
         src/passes/backend/backend.emit_binary.cpp
     PUBLIC_DEPS mlk_core mlk_ir mlk_type mlk_property mlk_effect mlk_proof
-        mlk_verifier mlk_pass_core mlk_cost
+        mlk_verifier mlk_pass_core mlk_cost mlk_poly
 )
 
 mlk_add_library(mlk_pipeline

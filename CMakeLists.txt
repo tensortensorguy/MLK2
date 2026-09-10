@@ -44,6 +44,12 @@ mlk_apply_global_flags()
 add_subdirectory(compiler)
 
 # ---------------------------------------------------------------------------
+# Polyhedral engine (mlk_poly): hermetic Presburger/affine toolkit consumed
+# by mlk_passes; sits directly above mlk_ir in the dependency flow.
+# ---------------------------------------------------------------------------
+add_subdirectory(polyhedral)
+
+# ---------------------------------------------------------------------------
 # Runtime, autotuner, superoptimizer, backends
 # ---------------------------------------------------------------------------
 add_subdirectory(runtime)

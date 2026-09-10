@@ -92,6 +92,23 @@ inline constexpr std::array<int64_t, 3> kVectorWidthChoices{4, 8, 16};
 inline constexpr int64_t kKernelLoopDynamicBound = -1;
 inline constexpr std::size_t kKernelMaxFusionDepth = 32;
 
+// --- Polyhedral engine (mlk_poly; see docs/polyhedral_spec.md) ---------------
+/// Maximum loop dimensions per SCoP statement (Rule 10: bounded passes).
+inline constexpr uint32_t kPolyMaxDims = 8;
+/// Maximum statements per SCoP.
+inline constexpr uint32_t kPolyMaxStatements = 8;
+/// Maximum memory accesses per statement.
+inline constexpr uint32_t kPolyMaxAccessesPerStatement = 8;
+/// Schedule rows synthesized by the Pluto-style scheduler per SCoP.
+inline constexpr uint32_t kPolyMaxScheduleRows = 12;
+/// |coefficient| ceiling for schedule matrices (keeps LP exact in int64).
+inline constexpr int64_t kPolyMaxScheduleCoeff = 1024;
+/// Default rectangular tile edge applied by poly.tile (Rule 29 heuristic,
+/// overridable via the poly_tile_size knob; tuned by the autotuner).
+inline constexpr int64_t kPolyDefaultTileSize = 32;
+/// Default SIMD width recorded by poly.schedule for innermost vector dims.
+inline constexpr int64_t kPolyDefaultVectorWidth = 8;
+
 // --- Runtime / telemetry (Rule 130, Rule 157) -------------------------------
 inline constexpr uint32_t kSafepointPollIntervalIterations = 4096;
 inline constexpr std::size_t kTelemetryRingCapacity = 1024;
