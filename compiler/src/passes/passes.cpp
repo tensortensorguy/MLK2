@@ -74,6 +74,7 @@ void registerAllPasses(SymbolTable& symbols) {
     // Polyhedral (spec §8.13 — docs/polyhedral_spec.md)
     register_poly_scop_detect_pass(symbols);
     register_poly_dependence_pass(symbols);
+    register_poly_schedule_pass(symbols);
     // Backend (spec §8.12)
     register_backend_emit_binary_pass(symbols);
 }

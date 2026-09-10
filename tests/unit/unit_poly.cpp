@@ -1060,4 +1060,156 @@ MLK_TEST(poly, dependence_reduction_chain) {
     MLK_CHECK_EQ(war, 1);
 }
 
+
+MLK_TEST(poly, lp_simple_bounded) {
+    // minimize x1 + 2*x2 s.t. x1 + x2 == 6, -x1 >= -3 → x1 = 3, x2 = 3.
+    mlk::poly::LinearProgram lp;
+    lp.nVars = 2;
+    SmallVector<mlk::poly::Rational, 8> eq;
+    eq.push_back(mlk::poly::Rational{1, 1});
+    eq.push_back(mlk::poly::Rational{1, 1});
+    lp.eqRows.push_back(std::move(eq));
+    lp.eqRhs.push_back(mlk::poly::Rational{6, 1});
+    SmallVector<mlk::poly::Rational, 8> ge;
+    ge.push_back(mlk::poly::Rational{-1, 1});
+    ge.push_back(mlk::poly::Rational{0, 1});
+    lp.geRows.push_back(std::move(ge));
+    lp.geRhs.push_back(mlk::poly::Rational{-3, 1});
+    lp.objective.push_back(mlk::poly::Rational{1, 1});
+    lp.objective.push_back(mlk::poly::Rational{2, 1});
+    auto sol = mlk::poly::solveLp(lp);
+    MLK_CHECK(sol.has_value());
+    if (!sol.has_value()) return;
+    MLK_CHECK(sol->status == mlk::poly::LpStatus::Optimal);
+    MLK_CHECK(sol->objective.num == 9);
+    MLK_CHECK(sol->x.size() == 2);
+    if (sol->x.size() == 2) {
+        MLK_CHECK(sol->x[0].num == 3 && sol->x[0].den == 1);
+        MLK_CHECK(sol->x[1].num == 3 && sol->x[1].den == 1);
+    }
+}
+
+MLK_TEST(poly, lp_infeasible_and_rational) {
+    // Infeasible: x >= 1 and x <= 0.
+    mlk::poly::LinearProgram bad;
+    bad.nVars = 1;
+    {
+        SmallVector<mlk::poly::Rational, 8> g1;
+        g1.push_back(mlk::poly::Rational{1, 1});
+        bad.geRows.push_back(std::move(g1));
+        bad.geRhs.push_back(mlk::poly::Rational{1, 1});
+        SmallVector<mlk::poly::Rational, 8> g2;
+        g2.push_back(mlk::poly::Rational{-1, 1});
+        bad.geRows.push_back(std::move(g2));
+        bad.geRhs.push_back(mlk::poly::Rational{0, 1});
+    }
+    auto s1 = mlk::poly::solveLp(bad);
+    MLK_CHECK(s1.has_value());
+    MLK_CHECK(s1->status == mlk::poly::LpStatus::Infeasible);
+
+    // Rational optimum: minimize x/2 s.t. 2x >= 1 → 1/4.
+    mlk::poly::LinearProgram lp;
+    lp.nVars = 1;
+    SmallVector<mlk::poly::Rational, 8> g;
+    g.push_back(mlk::poly::Rational{2, 1});
+    lp.geRows.push_back(std::move(g));
+    lp.geRhs.push_back(mlk::poly::Rational{1, 1});
+    lp.objective.push_back(mlk::poly::Rational{1, 2});
+    auto s2 = mlk::poly::solveLp(lp);
+    MLK_CHECK(s2.has_value());
+    MLK_CHECK(s2->status == mlk::poly::LpStatus::Optimal);
+    MLK_CHECK(s2->objective.num == 1 && s2->objective.den == 4);
+}
+
+MLK_TEST(poly, pluto_gemm_legal_schedule) {
+    SymbolTable symbols;
+    KernelModule km = buildGemmKernel(symbols);
+    auto scop = mlk::poly::extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    auto deps = mlk::poly::computeDependences(*scop);
+    MLK_CHECK(deps.has_value());
+    if (!deps.has_value()) return;
+    auto sched = mlk::poly::computePlutoSchedule(*scop, *deps);
+    MLK_CHECK(sched.has_value());
+    if (!sched.has_value()) return;
+    MLK_CHECK_EQ(sched->nStmts, 2);
+    MLK_CHECK_EQ(sched->depth, 3);
+    MLK_CHECK(sched->rows.size() >= 1);
+    MLK_CHECK_EQ(sched->parallel.size(), sched->rows.size());
+    // Legality: every dependence preserved (the core contract).
+    auto legal = mlk::poly::verifyScheduleLegality(*scop, *deps, *sched);
+    MLK_CHECK(legal.has_value());
+    MLK_CHECK(legal.has_value() && *legal);
+    // Determinism (Rule 53): same input → identical schedule.
+    auto sched2 = mlk::poly::computePlutoSchedule(*scop, *deps);
+    MLK_CHECK(sched2.has_value());
+    if (sched2.has_value()) {
+        MLK_CHECK_EQ(sched2->rows.size(), sched->rows.size());
+        for (std::size_t r = 0; r < sched->rows.size(); ++r) {
+            MLK_CHECK(sched2->rows[r].stmtCoeffs == sched->rows[r].stmtCoeffs);
+        }
+    }
+    // The k-reduction must be carried (not parallel) somewhere or the
+    // schedule must resolve it strictly; the innermost REDUCTION dim can
+    // never be parallel-marked while the accumulator chain is unresolved
+    // at earlier rows. Verify at least one row exists that carries the
+    // chain (parallel=false) OR all rows already resolve it.
+    bool anyNonParallel = false;
+    for (const bool p : sched->parallel) anyNonParallel |= !p;
+    MLK_CHECK(anyNonParallel || sched->rows.empty());
+}
+
+MLK_TEST(poly, pluto_no_deps_zero_rows) {
+    // y[i] = 2*x[i]: no dependences → zero schedule rows (all statements
+    // at time 0, codegen orders by origOrder).
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer x;
+    x.name = symbols.intern("x");
+    x.dims = SmallVector<int64_t, 4>{8};
+    x.isInput = true;
+    KernelBuffer y;
+    y.name = symbols.intern("y");
+    y.dims = SmallVector<int64_t, 4>{8};
+    y.isOutput = true;
+    const uint32_t bx = km.addBuffer(x);
+    const uint32_t by = km.addBuffer(y);
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    KernelExpr e;
+    e.op = mlk::MathOp::Mul;
+    e.a.kind = mlk::KernelOperand::Kind::ElemA;
+    compute.exprs.push_back(e);
+    compute.bufferA = bx;
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = by;
+    KernelNode loop;
+    loop.op = mlk::KernelOp::Loop;
+    loop.var = symbols.intern("i");
+    loop.begin = 0;
+    loop.end = 8;
+    {
+        uint32_t cid = km.addNode(compute);
+        uint32_t sid = km.addNode(store);
+        loop.children.push_back(cid);
+        loop.children.push_back(sid);
+    }
+    (void)km.addNode(loop);
+    auto scop = mlk::poly::extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    auto deps = mlk::poly::computeDependences(*scop);
+    MLK_CHECK(deps.has_value());
+    MLK_CHECK_EQ(deps->size(), 0);
+    auto sched = mlk::poly::computePlutoSchedule(*scop, *deps);
+    MLK_CHECK(sched.has_value());
+    if (sched.has_value()) {
+        MLK_CHECK_EQ(sched->rows.size(), 0);
+        auto legal = mlk::poly::verifyScheduleLegality(*scop, *deps, *sched);
+        MLK_CHECK(legal.has_value() && *legal);
+    }
+}
+
 MLK_TEST_MAIN("poly")

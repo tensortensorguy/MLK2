@@ -11,6 +11,8 @@
 #include "mlk/poly/affine_map.h"
 #include "mlk/poly/dependence.h"
 #include "mlk/poly/int_set.h"
+#include "mlk/poly/lp.h"
+#include "mlk/poly/pluto.h"
 #include "mlk/poly/rational.h"
 #include "mlk/poly/scop.h"
 #include "mlk/poly/workspace.h"

@@ -67,4 +67,27 @@ namespace mlk::poly::checked {
     return r;
 }
 
+/// a / b into out; false on int64 overflow (b == 0 handled by callers).
+[[nodiscard]] inline bool div(int64_t a, int64_t b, int64_t* out) noexcept {
+    if (b == 0) return false;
+    if (a == INT64_MIN && b == -1) return false;
+    *out = a / b;
+    return true;
+}
+
+/// Checked + magnitude-limited div (b != 0).
+[[nodiscard]] inline Result<int64_t> divLimited(int64_t a,
+                                                int64_t b) noexcept {
+    if (b == 0) {
+        return err(ErrorCode::InvalidArgument, "checked division by zero");
+    }
+    int64_t r = 0;
+    if (!div(a, b, &r) || r > kRationalMagnitudeLimit ||
+        r < -kRationalMagnitudeLimit) {
+        return err(ErrorCode::ResourceExhausted,
+                   "checked div exceeds engine magnitude limit");
+    }
+    return r;
+}
+
 }  // namespace mlk::poly::checked

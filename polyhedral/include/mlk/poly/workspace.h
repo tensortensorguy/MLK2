@@ -7,6 +7,7 @@
 #pragma once
 
 #include "mlk/poly/dependence.h"
+#include "mlk/poly/pluto.h"
 #include "mlk/poly/scop.h"
 
 namespace mlk::poly {
@@ -18,6 +19,7 @@ struct PolyWorkspace {
     bool scopValid{false};
     SmallVector<Dependence, 16> dependences{};
     bool dependencesValid{false};
+    PolySchedule schedule{};
     bool scheduleValid{false};
     bool tileValid{false};
     bool codegenValid{false};

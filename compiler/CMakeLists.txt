@@ -148,6 +148,7 @@ mlk_add_library(mlk_passes
         # Polyhedral (spec §8.13 — docs/polyhedral_spec.md; 1:1 pass->file)
         src/passes/poly/poly.scop_detect.cpp
         src/passes/poly/poly.dependence.cpp
+        src/passes/poly/poly.schedule.cpp
         # Backend (spec §8.12)
         src/passes/backend/backend.emit_binary.cpp
     PUBLIC_DEPS mlk_core mlk_ir mlk_type mlk_property mlk_effect mlk_proof
