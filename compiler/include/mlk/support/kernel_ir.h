@@ -40,8 +40,10 @@ const char* kernelOpName(KernelOp op) noexcept;
 [[nodiscard]] bool isScalarRealizable(MathOp op) noexcept;
 
 /// Operand of a KernelExpr: a compile-time constant, the current element
-/// of input buffer A/B, a runtime scalar parameter, or the result of a
-/// prior expression in the same Compute chain (SSA over temps).
+/// of input buffer A/B, a runtime scalar parameter, the result of a prior
+/// expression in the same Compute chain (SSA over temps), or an AFFINE
+/// multi-index element of any buffer (polyhedral codegen; see
+/// docs/polyhedral_spec.md §kernel-ir-extension).
 struct KernelOperand {
     enum class Kind : uint8_t {
         Const = 0,   // value = constValue
@@ -49,14 +51,23 @@ struct KernelOperand {
         ElemB,       // bufferB[i]  (loop element)
         ScalarParam, // runtime scalar, index = scalarIndex
         Temp,        // exprs[tempIndex] result (tempIndex < self)
+        ElemIdx,     // buffer[index]: flat = sum idxCoeffs[d]*var[d] +
+                     // idxOffset (row-major dense element address)
     };
     Kind kind{Kind::Const};
-    int64_t index{0};        // Temp: expr index; ScalarParam: param index
+    int64_t index{0};        // Temp: expr index; ScalarParam: param index;
+                             // ElemIdx: buffer id
     double constValue{0.0};  // Kind::Const payload
+    /// Kind::ElemIdx only: coefficient per enclosing loop var (stack order,
+    /// outermost first) and constant offset. Strides are baked by the
+    /// emitter from the buffer's row-major dims.
+    SmallVector<int64_t, 4> idxCoeffs{};
+    int64_t idxOffset{0};
 
     [[nodiscard]] bool operator==(const KernelOperand& o) const noexcept {
         return kind == o.kind && index == o.index &&
-               constValue == o.constValue;
+               constValue == o.constValue && idxCoeffs == o.idxCoeffs &&
+               idxOffset == o.idxOffset;
     }
 };
 
@@ -81,10 +92,24 @@ struct KernelNode {
     int64_t begin{0};
     int64_t end{constants::kKernelLoopDynamicBound};
     int64_t step{1};
+    /// Polyhedral extension: when end == kKernelLoopDynamicBound and
+    /// endBuf is valid, the bound is buffers[endBuf].dims[endDim] resolved
+    /// at execution (multi-dim nests from poly.synth/poly.codegen).
+    uint32_t endBuf{constants::kInvalidId};
+    int32_t endDim{-1};
     /// Buffer/param references (indices into KernelModule arrays).
     uint32_t bufferA{constants::kInvalidId};
     uint32_t bufferB{constants::kInvalidId};
     uint32_t bufferOut{constants::kInvalidId};
+    /// Polyhedral extension (Store): affine flat target
+    /// out[sum outIndexCoeffs[d]*var[d] + outIndexOffset]. Empty coeffs =>
+    /// legacy 1-D semantics (out[i]).
+    SmallVector<int64_t, 4> outIndexCoeffs{};
+    int64_t outIndexOffset{0};
+    /// Polyhedral extension (Store): accumulate instead of overwrite
+    /// (out[flat] += value) — the reduction primitive for polyhedral
+    /// statements (Rule 90: same accumulation order as the reference).
+    bool accumulate{false};
     uint32_t guardId{constants::kInvalidId};  // GraphState ref (Rule 5)
     /// Implementation family for math functions (libm / poly7; Rule 34:
     /// carries the verified accuracy contract reference).
@@ -95,6 +120,10 @@ struct KernelNode {
     SmallVector<uint32_t, 4> children{};      // loop body / region nodes
 
     [[nodiscard]] bool isLoop() const { return op == KernelOp::Loop; }
+    /// True when the Store target is the polyhedral affine form.
+    [[nodiscard]] bool hasAffineStore() const noexcept {
+        return !outIndexCoeffs.empty();
+    }
 };
 
 struct KernelBuffer {

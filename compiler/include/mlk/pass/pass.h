@@ -46,6 +46,9 @@ struct PassBudget {
 class CostModel;
 class CancellationToken;  // see mlk/core/cancellation.h
 class IEventSink;         // see mlk/core/event_sink.h (telemetry face)
+namespace poly {
+struct PolyWorkspace;  // polyhedral pass workspace (mlk/poly/scop.h)
+}  // namespace poly
 
 /// PassContext (spec §6): everything a pass may see. No hidden globals
 /// (Rule 144).
@@ -66,6 +69,10 @@ struct PassContext {
     /// Lowering output sink: lower.to_kernel_ir / backend.emit_binary write
     /// their artifacts here (spec §12: kernel IR between math and backend).
     KernelModule* kernelOut{nullptr};
+    /// Polyhedral pipeline workspace (poly.* passes only; owned by the
+    /// embedding runner, never deallocated inside passes — Rule 144:
+    /// explicit context, no hidden globals).
+    poly::PolyWorkspace* polyWorkspace{nullptr};
 
     [[nodiscard]] bool killed(SymbolId passName) const {
         if (killSwitches == nullptr) return false;

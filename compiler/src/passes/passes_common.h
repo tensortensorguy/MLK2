@@ -108,6 +108,8 @@ void register_memory_place_pass(SymbolTable& symbols);
 void register_memory_layout_select_pass(SymbolTable& symbols);
 // Lowering (lower/)
 void register_lower_to_kernel_ir_pass(SymbolTable& symbols);
+// Polyhedral (poly/; spec §8.13 — docs/polyhedral_spec.md)
+void register_poly_scop_detect_pass(SymbolTable& symbols);
 // Backend (backend/)
 void register_backend_emit_binary_pass(SymbolTable& symbols);
 

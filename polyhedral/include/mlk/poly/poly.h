@@ -11,3 +11,4 @@
 #include "mlk/poly/affine_map.h"
 #include "mlk/poly/int_set.h"
 #include "mlk/poly/rational.h"
+#include "mlk/poly/scop.h"

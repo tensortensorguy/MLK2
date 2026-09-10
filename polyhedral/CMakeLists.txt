@@ -13,6 +13,7 @@ mlk_add_library(mlk_poly
         src/affine_expr.cpp
         src/int_set.cpp
         src/affine_map.cpp
+        src/scop.cpp
     PUBLIC_DEPS mlk_core mlk_ir
 )
 

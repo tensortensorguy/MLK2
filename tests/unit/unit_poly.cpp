@@ -565,4 +565,303 @@ MLK_TEST(poly, set_with_symbols_emptiness_parametric) {
 
 }  // namespace
 
+// --- SCoP extraction (iteration 2) -------------------------------------------
+
+using mlk::KernelBuffer;
+using mlk::KernelExpr;
+using mlk::KernelModule;
+using mlk::KernelNode;
+using mlk::KernelOperand;
+using mlk::SymbolId;
+using mlk::SymbolTable;
+using mlk::poly::extractScop;
+using mlk::poly::Scop;
+using mlk::poly::Statement;
+
+/// Test constants (Rule 27): gemm shapes M=4, K=3, N=5.
+constexpr int64_t kTestM = 4;
+constexpr int64_t kTestK = 3;
+constexpr int64_t kTestN = 5;
+
+/// Builds the init+accumulate GEMM nest:
+///   S0 (depth 2): C[i][j] = 0                       over i,j
+///   S1 (depth 3): C[i][j] += A[i][k] * B[k][j]      over i,j,k
+[[nodiscard]] KernelModule buildGemmKernel(SymbolTable& symbols) {
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{kTestM, kTestK};
+    a.isInput = true;
+    KernelBuffer b;
+    b.name = symbols.intern("B");
+    b.dims = SmallVector<int64_t, 4>{kTestK, kTestN};
+    b.isInput = true;
+    KernelBuffer c;
+    c.name = symbols.intern("C");
+    c.dims = SmallVector<int64_t, 4>{kTestM, kTestN};
+    c.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufB = km.addBuffer(b);
+    const uint32_t bufC = km.addBuffer(c);
+    const SymbolId vi = symbols.intern("i");
+    const SymbolId vj = symbols.intern("j");
+    const SymbolId vk = symbols.intern("k");
+
+    // S0: compute chain [Const 0], store C[i][j] (flat i*N + j).
+    KernelNode compute0;
+    compute0.op = mlk::KernelOp::Compute;
+    KernelExpr zero;
+    zero.op = mlk::MathOp::Add;  // unary ignored; operand is the value
+    zero.a.kind = KernelOperand::Kind::Const;
+    zero.a.constValue = 0.0;
+    compute0.exprs.push_back(zero);
+    KernelNode store0;
+    store0.op = mlk::KernelOp::Store;
+    store0.bufferOut = bufC;
+    store0.outIndexCoeffs = SmallVector<int64_t, 4>{kTestN, 1};
+    store0.outIndexOffset = 0;
+
+    // S1: compute chain [t0 = A[i,k], t1 = B[k,j], t2 = t0*t1], store
+    // C[i][j] with accumulate = true.
+    KernelNode compute1;
+    compute1.op = mlk::KernelOp::Compute;
+    KernelExpr ea;
+    ea.op = mlk::MathOp::Add;
+    ea.a.kind = KernelOperand::Kind::ElemIdx;
+    ea.a.index = static_cast<int64_t>(bufA);
+    ea.a.idxCoeffs = SmallVector<int64_t, 4>{kTestK, 0, 1};  // i*K + k
+    KernelExpr eb;
+    eb.op = mlk::MathOp::Add;
+    eb.a.kind = KernelOperand::Kind::ElemIdx;
+    eb.a.index = static_cast<int64_t>(bufB);
+    eb.a.idxCoeffs = SmallVector<int64_t, 4>{0, 1, kTestN};  // k*N + j
+    KernelExpr mul;
+    mul.op = mlk::MathOp::Mul;
+    mul.a.kind = KernelOperand::Kind::Temp;
+    mul.a.index = 0;
+    mul.b.kind = KernelOperand::Kind::Temp;
+    mul.b.index = 1;
+    compute1.exprs.push_back(ea);
+    compute1.exprs.push_back(eb);
+    compute1.exprs.push_back(mul);
+    KernelNode store1;
+    store1.op = mlk::KernelOp::Store;
+    store1.bufferOut = bufC;
+    store1.outIndexCoeffs = SmallVector<int64_t, 4>{kTestN, 1, 0};
+    store1.accumulate = true;
+
+    // Loop tree: i { j { [S0 pair] , k { [S1 pair] } } }.
+    KernelNode kLoop;
+    kLoop.op = mlk::KernelOp::Loop;
+    kLoop.var = vk;
+    kLoop.begin = 0;
+    kLoop.end = kTestK;
+    {
+        uint32_t c1 = km.addNode(compute1);
+        uint32_t s1 = km.addNode(store1);
+        kLoop.children.push_back(c1);
+        kLoop.children.push_back(s1);
+    }
+    KernelNode jLoop;
+    jLoop.op = mlk::KernelOp::Loop;
+    jLoop.var = vj;
+    jLoop.begin = 0;
+    jLoop.end = kTestN;
+    {
+        uint32_t c0 = km.addNode(compute0);
+        uint32_t s0 = km.addNode(store0);
+        uint32_t kId = km.addNode(kLoop);
+        jLoop.children.push_back(c0);
+        jLoop.children.push_back(s0);
+        jLoop.children.push_back(kId);
+    }
+    KernelNode iLoop;
+    iLoop.op = mlk::KernelOp::Loop;
+    iLoop.var = vi;
+    iLoop.begin = 0;
+    iLoop.end = kTestM;
+    {
+        uint32_t jId = km.addNode(jLoop);
+        iLoop.children.push_back(jId);
+    }
+    (void)km.addNode(iLoop);
+    return km;
+}
+
+MLK_TEST(poly, scop_extract_gemm) {
+    SymbolTable symbols;
+    KernelModule km = buildGemmKernel(symbols);
+    auto scop = extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    MLK_CHECK_EQ(scop->depth, 3);
+    MLK_CHECK_EQ(scop->space.nDims, 3);
+    MLK_CHECK_EQ(scop->space.nSyms, 0);
+    MLK_CHECK_EQ(scop->statements.size(), 2);
+
+    const Statement& s0 = scop->statements[0];
+    const Statement& s1 = scop->statements[1];
+    MLK_CHECK_EQ(s0.depth, 2);  // init: i,j only
+    MLK_CHECK_EQ(s1.depth, 3);  // accumulate: i,j,k
+    MLK_CHECK_EQ(s0.accesses.size(), 1);
+    MLK_CHECK_EQ(s1.accesses.size(), 3);  // A, B, C
+    MLK_CHECK(s0.accesses[0].isWrite);
+    MLK_CHECK(!s1.accesses[0].isWrite);
+    MLK_CHECK(!s1.accesses[1].isWrite);
+    MLK_CHECK(s1.accesses[2].isWrite);
+    MLK_CHECK(s1.accumulate);
+
+    // Domain spot checks (full rank; deeper dims pinned to 0 for S0).
+    SmallVector<int64_t, 8> p0;
+    p0.push_back(1);
+    p0.push_back(2);
+    p0.push_back(0);
+    MLK_CHECK(s0.domain.containsPoint(p0));
+    SmallVector<int64_t, 8> p0bad;
+    p0bad.push_back(1);
+    p0bad.push_back(2);
+    p0bad.push_back(1);
+    MLK_CHECK(!s0.domain.containsPoint(p0bad));
+    SmallVector<int64_t, 8> p1;
+    p1.push_back(3);
+    p1.push_back(4);
+    p1.push_back(2);
+    MLK_CHECK(s1.domain.containsPoint(p1));
+
+    // Access map: A[i,k] at (i=1, j=2, k=2) → flat = 1*K + 2 = 5.
+    SmallVector<int64_t, 8> at;
+    at.push_back(1);
+    at.push_back(2);
+    at.push_back(2);
+    auto flatA = s1.accesses[0].flatIndex.evalAt(at);
+    MLK_CHECK(flatA.has_value());
+    MLK_CHECK_EQ((*flatA)[0], kTestK * 1 + 2);
+    // B[k,j] at the same point → 2*N + 2 = 12.
+    auto flatB = s1.accesses[1].flatIndex.evalAt(at);
+    MLK_CHECK(flatB.has_value());
+    MLK_CHECK_EQ((*flatB)[0], kTestN * 2 + 2);
+    // C[i,j] → N + 2 = 7.
+    auto flatC = s1.accesses[2].flatIndex.evalAt(at);
+    MLK_CHECK(flatC.has_value());
+    MLK_CHECK_EQ((*flatC)[0], kTestN * 1 + 2);
+}
+
+MLK_TEST(poly, scop_extract_rejects_call) {
+    SymbolTable symbols;
+    KernelModule km = buildGemmKernel(symbols);
+    KernelNode call;
+    call.op = mlk::KernelOp::Call;
+    (void)km.addNode(call);
+    auto scop = extractScop(km, symbols);
+    MLK_CHECK(!scop.has_value());
+    if (!scop.has_value()) {
+        MLK_CHECK(scop.error().code == mlk::ErrorCode::UnsupportedCapability);
+    }
+}
+
+MLK_TEST(poly, scop_extract_rejects_strided_loop) {
+    SymbolTable symbols;
+    KernelModule km = buildGemmKernel(symbols);
+    // Node layout: [compute1=0, store1=1, compute0=2, store0=3, kLoop=4,
+    // jLoop=5, iLoop=6] (see builder). The k loop is node id 4.
+    km.nodes[4].step = 2;
+    auto scop = extractScop(km, symbols);
+    MLK_CHECK(!scop.has_value());
+}
+
+MLK_TEST(poly, scop_extract_legacy_1d) {
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer x;
+    x.name = symbols.intern("x");
+    x.dims = SmallVector<int64_t, 4>{8};
+    x.isInput = true;
+    KernelBuffer y;
+    y.name = symbols.intern("y");
+    y.dims = SmallVector<int64_t, 4>{8};
+    y.isOutput = true;
+    const uint32_t bx = km.addBuffer(x);
+    const uint32_t by = km.addBuffer(y);
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    KernelExpr e;
+    e.op = mlk::MathOp::Mul;
+    e.a.kind = KernelOperand::Kind::ElemA;
+    e.b.kind = KernelOperand::Kind::ElemA;  // x[i]^2 via same buffer
+    compute.exprs.push_back(e);
+    compute.bufferA = bx;
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = by;
+    KernelNode loop;
+    loop.op = mlk::KernelOp::Loop;
+    loop.var = symbols.intern("i");
+    loop.begin = 0;
+    loop.end = 8;
+    {
+        uint32_t cid = km.addNode(compute);
+        uint32_t sid = km.addNode(store);
+        loop.children.push_back(cid);
+        loop.children.push_back(sid);
+    }
+    (void)km.addNode(loop);
+
+    auto scop = extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    MLK_CHECK_EQ(scop->depth, 1);
+    MLK_CHECK_EQ(scop->statements.size(), 1);
+    const Statement& s = scop->statements[0];
+    // Both operand slots reference x[i] (ElemA twice): two reads + write.
+    MLK_CHECK_EQ(s.accesses.size(), 3);
+    MLK_CHECK(!s.accesses[0].isWrite);
+    MLK_CHECK(!s.accesses[1].isWrite);
+    MLK_CHECK(s.accesses[2].isWrite);
+    // Read map: flat = i.
+    SmallVector<int64_t, 8> pt;
+    pt.push_back(3);
+    auto flat = s.accesses[0].flatIndex.evalAt(pt);
+    MLK_CHECK(flat.has_value());
+    MLK_CHECK_EQ((*flat)[0], 3);
+    // Write map: flat = i.
+    auto wflat = s.accesses[2].flatIndex.evalAt(pt);
+    MLK_CHECK(wflat.has_value());
+    MLK_CHECK_EQ((*wflat)[0], 3);
+}
+
+MLK_TEST(poly, scop_extract_rejects_unpaired_compute) {
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer y;
+    y.name = symbols.intern("y");
+    y.dims = SmallVector<int64_t, 4>{8};
+    y.isOutput = true;
+    const uint32_t by = km.addBuffer(y);
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    KernelExpr e;
+    e.op = mlk::MathOp::Neg;
+    e.a.kind = KernelOperand::Kind::Const;
+    e.a.constValue = 1.0;
+    compute.exprs.push_back(e);
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = by;
+    KernelNode loop;
+    loop.op = mlk::KernelOp::Loop;
+    loop.var = symbols.intern("i");
+    loop.begin = 0;
+    loop.end = 8;
+    {
+        uint32_t cid = km.addNode(compute);
+        uint32_t sid = km.addNode(store);
+        // Wrong order: Store BEFORE Compute → pairing fails.
+        loop.children.push_back(sid);
+        loop.children.push_back(cid);
+    }
+    (void)km.addNode(loop);
+    auto scop = extractScop(km, symbols);
+    MLK_CHECK(!scop.has_value());
+}
+
 MLK_TEST_MAIN("poly")

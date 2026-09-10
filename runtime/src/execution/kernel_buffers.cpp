@@ -72,6 +72,15 @@ struct ExprEvaluator {
                 const auto idx = static_cast<std::size_t>(o.index);
                 return idx < kMaxTempSlots ? temps[idx] : 0.0;
             }
+            case KernelOperand::Kind::ElemIdx:
+                // Affine multi-index operands are produced only by the
+                // polyhedral codegen and executed by the multi-dim tree
+                // walker (see docs/polyhedral_spec.md §executor); the
+                // 1-D executor never receives them. Reaching here means
+                // a poly kernel hit the legacy path — the documented
+                // behavior is the same neutral element the other
+                // unbound cases use, never a crash (Rule 115).
+                return 0.0;
         }
         return 0.0;
     }

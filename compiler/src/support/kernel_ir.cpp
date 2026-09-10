@@ -48,13 +48,26 @@ HashValue KernelModule::hash() const noexcept {
         h = hashCombine(h, hashI64(n.begin));
         h = hashCombine(h, hashI64(n.end));
         h = hashCombine(h, hashI64(n.step));
+        h = hashCombine(h, hashU64(n.endBuf));
+        h = hashCombine(h, hashI64(n.endDim));
         h = hashCombine(h, hashU64(n.family));
+        for (const int64_t c : n.outIndexCoeffs) h = hashCombine(h, hashI64(c));
+        h = hashCombine(h, hashI64(n.outIndexOffset));
+        h = hashCombine(h, n.accumulate ? 0x9E3779B97F4A7C15ULL : 0ULL);
         for (const auto& e : n.exprs) {
             h = hashCombine(h, hashU64(static_cast<uint64_t>(e.op)));
             h = hashCombine(h, hashU64(static_cast<uint64_t>(e.a.kind)));
             h = hashCombine(h, hashI64(e.a.index));
+            for (const int64_t c : e.a.idxCoeffs) {
+                h = hashCombine(h, hashI64(c));
+            }
+            h = hashCombine(h, hashI64(e.a.idxOffset));
             h = hashCombine(h, hashU64(static_cast<uint64_t>(e.b.kind)));
             h = hashCombine(h, hashI64(e.b.index));
+            for (const int64_t c : e.b.idxCoeffs) {
+                h = hashCombine(h, hashI64(c));
+            }
+            h = hashCombine(h, hashI64(e.b.idxOffset));
             // Const payloads hash their bit pattern (Rule 24: stable).
             std::uint64_t abits = 0, bbits = 0;
             if (e.a.kind == KernelOperand::Kind::Const) {
@@ -116,6 +129,19 @@ json::Value KernelModule::toJson(SymbolTable& symbols) const {
         no.set("begin", json::Value{n.begin});
         no.set("end", json::Value{n.end});
         no.set("step", json::Value{n.step});
+        if (n.endBuf != constants::kInvalidId) {
+            no.set("end_buf", json::Value{static_cast<int64_t>(n.endBuf)});
+            no.set("end_dim", json::Value{static_cast<int64_t>(n.endDim)});
+        }
+        if (n.hasAffineStore()) {
+            json::Value cs = json::Array{};
+            for (const int64_t c : n.outIndexCoeffs) {
+                cs.push(json::Value{c});
+            }
+            no.set("out_index_coeffs", std::move(cs));
+            no.set("out_index_offset", json::Value{n.outIndexOffset});
+            if (n.accumulate) no.set("accumulate", json::Value{true});
+        }
         if (n.bufferA != constants::kInvalidId) {
             no.set("a", json::Value{static_cast<int64_t>(n.bufferA)});
         }
@@ -142,6 +168,9 @@ json::Value KernelModule::toJson(SymbolTable& symbols) const {
                             k = "scalar_param";
                             break;
                         case KernelOperand::Kind::Temp: k = "temp"; break;
+                        case KernelOperand::Kind::ElemIdx:
+                            k = "elem_idx";
+                            break;
                     }
                     oo.set("kind", json::Value{k});
                     if (o.kind == KernelOperand::Kind::Const) {
@@ -150,6 +179,15 @@ json::Value KernelModule::toJson(SymbolTable& symbols) const {
                     if (o.kind == KernelOperand::Kind::Temp ||
                         o.kind == KernelOperand::Kind::ScalarParam) {
                         oo.set("index", json::Value{o.index});
+                    }
+                    if (o.kind == KernelOperand::Kind::ElemIdx) {
+                        oo.set("buffer", json::Value{o.index});
+                        json::Value cs = json::Array{};
+                        for (const int64_t c : o.idxCoeffs) {
+                            cs.push(json::Value{c});
+                        }
+                        oo.set("coeffs", std::move(cs));
+                        oo.set("offset", json::Value{o.idxOffset});
                     }
                     eo.set(slot, std::move(oo));
                 };
