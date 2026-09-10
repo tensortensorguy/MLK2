@@ -13,10 +13,6 @@
 
 namespace mlk::poly {
 
-PolyWorkspace* createPolyWorkspace() { return new PolyWorkspace{}; }
-
-void destroyPolyWorkspace(PolyWorkspace* ws) noexcept { delete ws; }
-
 namespace {
 
 struct WalkState {
@@ -160,9 +156,20 @@ struct WalkState {
         MemoryAccess w;
         w.bufferId = s.storeBuffer;
         w.isWrite = true;
-        w.flatIndex = flatMap(VarSpace{depth, 0}, wcoeffs,
-                              s.storeOffset);
+        w.flatIndex = flatMap(VarSpace{depth, 0}, wcoeffs, s.storeOffset);
         s.accesses.push_back(std::move(w));
+        if (s.accumulate) {
+            // Accumulate = read-modify-write: the implicit read feeds the
+            // accumulator chain across iterations (RAW S(k) -> S(k'))
+            // which is exactly the reduction-order legality gate for
+            // Rule 33/90 — model it as a first-class read access.
+            MemoryAccess r;
+            r.bufferId = s.storeBuffer;
+            r.isWrite = false;
+            r.flatIndex = flatMap(VarSpace{depth, 0}, wcoeffs,
+                                  s.storeOffset);
+            s.accesses.push_back(std::move(r));
+        }
     }
     st.scop.statements.push_back(std::move(s));
     return true;

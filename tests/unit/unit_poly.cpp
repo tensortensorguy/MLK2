@@ -704,11 +704,12 @@ MLK_TEST(poly, scop_extract_gemm) {
     MLK_CHECK_EQ(s0.depth, 2);  // init: i,j only
     MLK_CHECK_EQ(s1.depth, 3);  // accumulate: i,j,k
     MLK_CHECK_EQ(s0.accesses.size(), 1);
-    MLK_CHECK_EQ(s1.accesses.size(), 3);  // A, B, C
+    MLK_CHECK_EQ(s1.accesses.size(), 4);  // A, B, write C, implicit read C
     MLK_CHECK(s0.accesses[0].isWrite);
     MLK_CHECK(!s1.accesses[0].isWrite);
     MLK_CHECK(!s1.accesses[1].isWrite);
     MLK_CHECK(s1.accesses[2].isWrite);
+    MLK_CHECK(!s1.accesses[3].isWrite);  // accumulate's implicit read
     MLK_CHECK(s1.accumulate);
 
     // Domain spot checks (full rank; deeper dims pinned to 0 for S0).
@@ -862,6 +863,201 @@ MLK_TEST(poly, scop_extract_rejects_unpaired_compute) {
     (void)km.addNode(loop);
     auto scop = extractScop(km, symbols);
     MLK_CHECK(!scop.has_value());
+}
+
+
+MLK_TEST(poly, dependence_gemm_chain) {
+    SymbolTable symbols;
+    KernelModule km = buildGemmKernel(symbols);
+    auto scop = extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    auto deps = mlk::poly::computeDependences(*scop);
+    MLK_CHECK(deps.has_value());
+    if (!deps.has_value()) return;
+    // Expected dependences (accesses: S0=[write C]; S1=[A, B, write C,
+    // read C-implicit]):
+    //   S0->S1 RAW  (init feeds the accumulator chain)
+    //   S0->S1 WAW  (init vs accumulate)
+    //   S1->S1 RAW  (accumulator chain, k' > k)
+    //   S1->S1 WAW  (accumulator chain, k' > k)
+    //   S1->S1 WAR  (read at k, write at k', k' > k)
+    //   No dependences touch A or B.
+    int rawCross = 0, wawCross = 0, rawIntra = 0, wawIntra = 0, warIntra = 0;
+    for (const auto& d : *deps) {
+        MLK_CHECK(mlk::poly::dependenceLive(d));
+        if (d.srcStmt == 0 && d.dstStmt == 1) {
+            if (d.kind == mlk::poly::DepKind::Raw) ++rawCross;
+            if (d.kind == mlk::poly::DepKind::Waw) ++wawCross;
+            // Tie: same C element → i == i', j == j' (source pins k == 0).
+            SmallVector<int64_t, 8> inst;
+            // dims: (i, j, k, i', j', k')
+            const int64_t vi[6] = {1, 2, 0, 1, 2, 2};
+            for (const int64_t v : vi) inst.push_back(v);
+            MLK_CHECK(d.relation.containsPoint(inst));
+        } else if (d.srcStmt == 1 && d.dstStmt == 1) {
+            if (d.kind == mlk::poly::DepKind::Raw) ++rawIntra;
+            if (d.kind == mlk::poly::DepKind::Waw) ++wawIntra;
+            if (d.kind == mlk::poly::DepKind::War) ++warIntra;
+            // Distinct-instance gate: (k'=k) is NOT a dependence.
+            SmallVector<int64_t, 8> same;
+            const int64_t vs[6] = {1, 2, 1, 1, 2, 1};
+            for (const int64_t v : vs) same.push_back(v);
+            MLK_CHECK(!d.relation.containsPoint(same));
+            // (k'=k+1) IS a dependence.
+            SmallVector<int64_t, 8> next;
+            const int64_t vn[6] = {1, 2, 1, 1, 2, 2};
+            for (const int64_t v : vn) next.push_back(v);
+            MLK_CHECK(d.relation.containsPoint(next));
+        }
+    }
+    MLK_CHECK_EQ(rawCross, 1);
+    MLK_CHECK_EQ(wawCross, 1);
+    MLK_CHECK_EQ(rawIntra, 1);
+    MLK_CHECK_EQ(wawIntra, 1);
+    MLK_CHECK_EQ(warIntra, 1);
+}
+
+MLK_TEST(poly, dependence_free_elementwise) {
+    // y[i] = 2 * x[i]: no dependences at all.
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer x;
+    x.name = symbols.intern("x");
+    x.dims = SmallVector<int64_t, 4>{8};
+    x.isInput = true;
+    KernelBuffer y;
+    y.name = symbols.intern("y");
+    y.dims = SmallVector<int64_t, 4>{8};
+    y.isOutput = true;
+    const uint32_t bx = km.addBuffer(x);
+    const uint32_t by = km.addBuffer(y);
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    KernelExpr e;
+    e.op = mlk::MathOp::Mul;
+    e.a.kind = mlk::KernelOperand::Kind::ElemA;
+    KernelExpr two;
+    two.op = mlk::MathOp::Mul;
+    two.a.kind = mlk::KernelOperand::Kind::Const;
+    two.a.constValue = 2.0;
+    two.b.kind = mlk::KernelOperand::Kind::Temp;
+    two.b.index = 0;
+    compute.exprs.push_back(e);
+    compute.exprs.push_back(two);
+    compute.bufferA = bx;
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = by;
+    KernelNode loop;
+    loop.op = mlk::KernelOp::Loop;
+    loop.var = symbols.intern("i");
+    loop.begin = 0;
+    loop.end = 8;
+    {
+        uint32_t cid = km.addNode(compute);
+        uint32_t sid = km.addNode(store);
+        loop.children.push_back(cid);
+        loop.children.push_back(sid);
+    }
+    (void)km.addNode(loop);
+    auto scop = mlk::poly::extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    auto deps = mlk::poly::computeDependences(*scop);
+    MLK_CHECK(deps.has_value());
+    if (deps.has_value()) {
+        // x/y are distinct buffers; a[i] != a[j] for a write... the only
+        // same-buffer pairs are (read x, read x) = RAR (excluded) and
+        // (write y, write y) — same instance only → lexGreater empties it.
+        MLK_CHECK_EQ(deps->size(), 0);
+    }
+}
+
+MLK_TEST(poly, dependence_reduction_chain) {
+    // y[j] += x[i][j] (accumulate store, 2-D): the accumulator chain gives
+    // RAW/WAW/WAR S->S with j' == j and i' > i (reduction-order gate).
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer x;
+    x.name = symbols.intern("x");
+    x.dims = SmallVector<int64_t, 4>{4, 6};
+    x.isInput = true;
+    KernelBuffer y;
+    y.name = symbols.intern("y");
+    y.dims = SmallVector<int64_t, 4>{6};
+    y.isOutput = true;
+    const uint32_t bx = km.addBuffer(x);
+    const uint32_t by = km.addBuffer(y);
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    KernelExpr e;
+    e.op = mlk::MathOp::Add;
+    e.a.kind = mlk::KernelOperand::Kind::ElemIdx;
+    e.a.index = static_cast<int64_t>(bx);
+    e.a.idxCoeffs = SmallVector<int64_t, 4>{6, 1};  // x[i*K + j], K = 6
+    compute.exprs.push_back(e);
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = by;
+    // y[j]: one coefficient per enclosing loop var (i, j) → y flat = j.
+    store.outIndexCoeffs = SmallVector<int64_t, 4>{0, 1};
+    store.accumulate = true;
+    KernelNode jLoop;
+    jLoop.op = mlk::KernelOp::Loop;
+    jLoop.var = symbols.intern("j");
+    jLoop.begin = 0;
+    jLoop.end = 6;
+    {
+        uint32_t cid = km.addNode(compute);
+        uint32_t sid = km.addNode(store);
+        jLoop.children.push_back(cid);
+        jLoop.children.push_back(sid);
+    }
+    KernelNode iLoop;
+    iLoop.op = mlk::KernelOp::Loop;
+    iLoop.var = symbols.intern("i");
+    iLoop.begin = 0;
+    iLoop.end = 4;
+    {
+        uint32_t jid = km.addNode(jLoop);
+        iLoop.children.push_back(jid);
+    }
+    (void)km.addNode(iLoop);
+
+    auto scop = mlk::poly::extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    MLK_CHECK_EQ(scop->statements.size(), 1);
+    // accumulate -> implicit read: [read x, write y, read y]
+    MLK_CHECK_EQ(scop->statements[0].accesses.size(), 3);
+    auto deps = mlk::poly::computeDependences(*scop);
+    MLK_CHECK(deps.has_value());
+    if (!deps.has_value()) return;
+    int raw = 0, waw = 0, war = 0;
+    for (const auto& d : *deps) {
+        if (d.kind == mlk::poly::DepKind::Raw) ++raw;
+        if (d.kind == mlk::poly::DepKind::Waw) ++waw;
+        if (d.kind == mlk::poly::DepKind::War) ++war;
+        // Forward (i=1, j=2) -> (i=3, j=2): the accumulator chain.
+        SmallVector<int64_t, 8> fwd;
+        const int64_t vf[4] = {1, 2, 3, 2};
+        for (const int64_t v : vf) fwd.push_back(v);
+        MLK_CHECK(d.relation.containsPoint(fwd));
+        // Backward is not a dependence.
+        SmallVector<int64_t, 8> back;
+        const int64_t vb[4] = {3, 2, 1, 2};
+        for (const int64_t v : vb) back.push_back(v);
+        MLK_CHECK(!d.relation.containsPoint(back));
+        // Same j, same i (same instance) is excluded.
+        SmallVector<int64_t, 8> same;
+        const int64_t vs[4] = {1, 2, 1, 2};
+        for (const int64_t v : vs) same.push_back(v);
+        MLK_CHECK(!d.relation.containsPoint(same));
+    }
+    MLK_CHECK_EQ(raw, 1);
+    MLK_CHECK_EQ(waw, 1);
+    MLK_CHECK_EQ(war, 1);
 }
 
 MLK_TEST_MAIN("poly")

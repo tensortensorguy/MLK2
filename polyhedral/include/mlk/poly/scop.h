@@ -69,25 +69,6 @@ struct Scop {
     uint32_t depth{0};
 };
 
-/// Shared per-compilation state handed to poly.* passes through
-/// PassContext (explicit workspace, no hidden globals — Rule 144).
-struct PolyWorkspace {
-    Scop scop{};
-    bool scopValid{false};
-    bool dependencesValid{false};
-    bool scheduleValid{false};
-    bool tileValid{false};
-    bool codegenValid{false};
-    // Counters surfaced through telemetry (Rule 138).
-    uint32_t statsStatements{0};
-    uint32_t statsDependences{0};
-    uint32_t statsScheduleRows{0};
-    uint32_t statsTiledBands{0};
-};
-
-[[nodiscard]] PolyWorkspace* createPolyWorkspace();
-void destroyPolyWorkspace(PolyWorkspace* ws) noexcept;
-
 /// Extracts the SCoP of `kernel`. Errors carry an actionable reason
 /// (Rule 67); callers keep the baseline kernel on any error.
 [[nodiscard]] Result<Scop> extractScop(const KernelModule& kernel,

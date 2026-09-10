@@ -14,6 +14,8 @@ mlk_add_library(mlk_poly
         src/int_set.cpp
         src/affine_map.cpp
         src/scop.cpp
+        src/dependence.cpp
+        src/workspace.cpp
     PUBLIC_DEPS mlk_core mlk_ir
 )
 

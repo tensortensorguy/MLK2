@@ -12,7 +12,7 @@
 // invalid; downstream poly.* passes become no-ops and the baseline kernel
 // is untouched.
 #include "../passes_common.h"
-#include "mlk/poly/scop.h"
+#include "mlk/poly/workspace.h"
 
 namespace mlk::passes {
 
