@@ -21,7 +21,7 @@ public:
         // and the ulp bound to verify.
         const bool approxAllowed =
             ctx.domainProfile->has(Capability::HasApproximation) &&
-            ctx.accuracy->permitsApproximation();
+            (ctx.accuracy != nullptr && ctx.accuracy->permitsApproximation());
         const SymbolId familyAttr = ctx.symbols->intern("family");
         const SymbolId libm = ctx.symbols->intern("libm");
         const SymbolId poly = ctx.symbols->intern("poly7");

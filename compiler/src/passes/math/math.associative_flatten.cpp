@@ -19,7 +19,7 @@ public:
         // permits reassociation (accuracy contract may also allow it).
         const bool allowed =
             ctx.domainProfile->numeric.allowReassociation ||
-            ctx.accuracy->allowReassociation;
+            (ctx.accuracy != nullptr && ctx.accuracy->allowReassociation);
         if (!allowed) {
             return r;  // legal no-op: pass remains idempotent (Rule 10)
         }

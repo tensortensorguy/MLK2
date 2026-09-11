@@ -20,7 +20,7 @@ public:
         // (Rule 33). Gated identically to associative_flatten; the actual
         // tree rotation happens through the e-graph forms.
         const bool allowed = ctx.domainProfile->numeric.allowReassociation ||
-                             ctx.accuracy->allowReassociation;
+                             (ctx.accuracy != nullptr && ctx.accuracy->allowReassociation);
         (void)allowed;
         r.changed = false;
         return r;

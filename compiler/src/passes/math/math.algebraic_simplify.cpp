@@ -18,7 +18,7 @@ public:
         r.nodesBefore = graph.liveNodeCount();
         // Rule 33: sin^2 + cos^2 -> 1 is exact only in exact arithmetic; in
         // FP it is an approximation gated by the accuracy contract.
-        const bool approxAllowed = ctx.accuracy->permitsApproximation() &&
+        const bool approxAllowed = (ctx.accuracy != nullptr && ctx.accuracy->permitsApproximation()) &&
                                    ctx.domainProfile->has(
                                        Capability::HasApproximation);
         (void)approxAllowed;

@@ -14,7 +14,7 @@ public:
         // approximation decision downstream must consult it (Rule 34).
         const bool approxAllowed =
             ctx.domainProfile->has(Capability::HasApproximation) &&
-            ctx.accuracy->permitsApproximation();
+            (ctx.accuracy != nullptr && ctx.accuracy->permitsApproximation());
         for (const ValueId vid : graph.outputs()) {
             Value& v = graph.value(vid);
             v.facts.setTriState(

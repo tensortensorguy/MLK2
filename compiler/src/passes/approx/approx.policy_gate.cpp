@@ -20,7 +20,7 @@ public:
         const bool allowed =
             ctx.domainProfile->has(Capability::HasApproximation) &&
             ctx.domainProfile->approximation.allowApproximation &&
-            ctx.accuracy->permitsApproximation();
+            (ctx.accuracy != nullptr && ctx.accuracy->permitsApproximation());
         Fact f;
         f.property = PropertyId::Pure;
         f.value = allowed ? TriState::Unknown : TriState::True;

@@ -18,7 +18,7 @@ public:
         (void)graph;
         // Rule 34: finite differences REQUIRE an explicit accuracy contract;
         // without one this pass must not fire.
-        if (!ctx.accuracy->permitsApproximation()) {
+        if (!(ctx.accuracy != nullptr && ctx.accuracy->permitsApproximation())) {
             return err(ErrorCode::AccuracyViolation,
                        "numeric differentiation requires an accuracy "
                        "contract permitting approximation (Rule 34)", 34);
