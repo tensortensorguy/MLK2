@@ -1,10 +1,27 @@
 // MLK+ polyhedral engine — Pluto-style affine scheduling.
 //
-// Synthesizes a legal (dependence-preserving) affine schedule row by row
-// (Bondhugula et al., PLDI 2008, sequential formulation adapted to the
-// engine's exact Presburger relations). Every row is SELECTED by an LP
-// over the schedule coefficients — nothing is copied from the original
-// loop order:
+// Synthesizes a legal (dependence-preserving) affine schedule in two
+// layers (Bondhugula et al., PLDI 2008, sequential formulation adapted
+// to the engine's exact Presburger relations):
+//
+// ORDER SEARCH (outer layer). The scheduler does not assume the original
+// loop order: every pivot ORDER (a permutation of the varying dims) is a
+// candidate transformation. Depth <= 4 enumerates all orders; deeper
+// SCoPs extend a prefix greedily one pivot at a time. Each candidate
+// order is synthesized row by row (inner layer) and scored EXACTLY:
+//   1. parallel rows   (more is better — ML kernels want concurrency),
+//   2. innermost unit-stride fit (the last row parallel AND every active
+//      statement's accesses stride 0/1 along its pivot — SIMD-able),
+//   3. total carried distance (exact rational sum of the per-dependence
+//      minimum distances at their resolving rows — smaller skews/fuses),
+//   4. lexicographic pivot order (determinism; keeps the identity order
+//      on ties).
+// The first order with the best score wins; the identity order is always
+// synthesized (it is valid by original-order purification), so the
+// search is total: it degrades to the round-11 scheduler on ties.
+//
+// INNER LAYER (per candidate order). Every row is SELECTED by an LP over
+// the schedule coefficients — nothing is copied from the original loop:
 //
 //   For schedule row r, every not-yet-resolved dependence d contributes
 //   its SLICE polyhedron: relation_d intersected with the equality rows
@@ -39,12 +56,20 @@
 // statement is either a foldable constant (nonzero coefficients only on
 // pinned dims) or varies on the row's pivot dim with a positive
 // coefficient. The loop variable emitted by codegen IS the pivot dim
-// (box bounds); skew coefficients never reach loop bounds.
+// (box bounds); skew coefficients never reach loop bounds. With any
+// pivot SEQUENCE the nest enumerates instances in exactly the schedule's
+// lexicographic order (equal prefixes force equal spent coords by
+// induction), which is what makes arbitrary permutations codegen-safe.
+//
+// Budgets (Rule 10): the order search and every candidate LP run under
+// kPolyMaxSchedulerLps / kPolyMaxOrderLps; a tripped budget rejects the
+// candidate order, never the pass. A candidate whose synthesis errors
+// (overflow, validity trip) is skipped identically.
 //
 // Determinism (Rule 53): exact rational simplex with Bland's rule, fixed
-// pivot/anchor enumeration order, integer scaling by LCM + gcd per row.
-// Failure mode (Rule 62): any infeasibility/budget trip yields an error;
-// the baseline kernel stays untouched.
+// enumeration order, integer scaling by LCM + gcd per row, exact scores.
+// Failure mode (Rule 62): any error yields "no schedule found"; the
+// baseline kernel stays untouched.
 #pragma once
 
 #include <cstdint>

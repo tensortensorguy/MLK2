@@ -1929,4 +1929,386 @@ MLK_TEST(poly, runtime_execute_transformed_gemm) {
     mlk::poly::destroyPolyWorkspace(ws);
 }
 
+MLK_TEST(poly, pluto_interchange_by_stride_fit) {
+    // THE permutation milestone: two statements whose accesses are
+    // unit-stride along dim 0 (transposed-consistent flat indices
+    // j*N + i) and tied together (zero-distance RAW). Every pivot order
+    // is legal (nothing is carried), both rows are parallel in every
+    // order — the EXACT stride-fit criterion must pick the order with
+    // dim 0 INNERMOST (pivotDim [1, 0]): the loop INTERCHANGE the
+    // ascending-first scheduler never considered. The transformed nest
+    // then executes bit-exact.
+    SymbolTable symbols;
+    KernelModule km;
+    constexpr int64_t NI = 4, NJ = 5;
+    KernelBuffer a;
+    a.name = symbols.intern("a");
+    a.dims = SmallVector<int64_t, 4>{NI, NJ};
+    a.isInput = true;  // scratch: bound through io.inputs (read+write)
+    KernelBuffer y;
+    y.name = symbols.intern("y");
+    y.dims = SmallVector<int64_t, 4>{NI, NJ};
+    y.isOutput = true;
+    const uint32_t ba = km.addBuffer(a);
+    const uint32_t by = km.addBuffer(y);
+    const SymbolId vi = symbols.intern("i");
+    const SymbolId vj = symbols.intern("j");
+
+    // S0: a[j*N + i] = 1.0 (Const-only compute; store stride 1 along i).
+    KernelNode compute0;
+    compute0.op = mlk::KernelOp::Compute;
+    KernelExpr one;
+    one.op = mlk::MathOp::Add;
+    one.a.kind = mlk::KernelOperand::Kind::Const;
+    one.a.constValue = 1.0;
+    one.b.kind = mlk::KernelOperand::Kind::Const;
+    one.b.constValue = 0.0;
+    compute0.exprs.push_back(one);
+    KernelNode store0;
+    store0.op = mlk::KernelOp::Store;
+    store0.bufferOut = ba;
+    store0.outIndexCoeffs = SmallVector<int64_t, 4>{1, NI};  // j*N + i
+
+    // S1: y[j*N + i] = a[j*N + i] + 1 (unit stride along i everywhere).
+    KernelNode compute1;
+    compute1.op = mlk::KernelOp::Compute;
+    KernelExpr rd;
+    rd.op = mlk::MathOp::Add;
+    rd.a.kind = mlk::KernelOperand::Kind::ElemIdx;
+    rd.a.index = static_cast<int64_t>(ba);
+    rd.a.idxCoeffs = SmallVector<int64_t, 4>{1, NI};
+    rd.b.kind = mlk::KernelOperand::Kind::Const;
+    rd.b.constValue = 1.0;
+    compute1.exprs.push_back(rd);
+    compute1.bufferA = ba;
+    KernelNode store1;
+    store1.op = mlk::KernelOp::Store;
+    store1.bufferOut = by;
+    store1.outIndexCoeffs = SmallVector<int64_t, 4>{1, NI};
+
+    // Baseline nest (identity): i { j { S0; S1 } }.
+    KernelNode jLoop;
+    jLoop.op = mlk::KernelOp::Loop;
+    jLoop.var = vj;
+    jLoop.begin = 0;
+    jLoop.end = NJ;
+    KernelNode iLoop;
+    iLoop.op = mlk::KernelOp::Loop;
+    iLoop.var = vi;
+    iLoop.begin = 0;
+    iLoop.end = NI;
+    {
+        uint32_t c0 = km.addNode(compute0);
+        uint32_t s0 = km.addNode(store0);
+        uint32_t c1 = km.addNode(compute1);
+        uint32_t s1 = km.addNode(store1);
+        jLoop.children.push_back(c0);
+        jLoop.children.push_back(s0);
+        jLoop.children.push_back(c1);
+        jLoop.children.push_back(s1);
+        const uint32_t jl = km.addNode(jLoop);
+        const uint32_t il = km.addNode(iLoop);
+        km.nodes[il].children.push_back(jl);  // i outer, j inner
+    }
+
+    auto scop = mlk::poly::extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    auto deps = mlk::poly::computeDependences(*scop);
+    MLK_CHECK(deps.has_value());
+    if (!deps.has_value()) return;
+    auto sched = mlk::poly::computePlutoSchedule(*scop, *deps);
+    MLK_CHECK(sched.has_value());
+    if (!sched.has_value()) return;
+    // PERMUTED order: dim 1 (j) outermost, dim 0 (i) innermost. Row 0's
+    // parallel mark is conservatively false: the transposed tied dep is
+    // integer-exactly zero but its RATIONAL relaxation is not (the LP
+    // hull admits fractional flat-index collisions); after the row-0
+    // distance==0 refinement the relation forces i1 == i2 exactly and
+    // row 1 is proven parallel with a unit-stride SIMD fit — the fit
+    // term is what selects this order over the identity.
+    MLK_CHECK_EQ(sched->rows.size(), std::size_t{2});
+    if (sched->rows.size() == 2) {
+        MLK_CHECK_EQ(sched->pivotDim[0], 1u);
+        MLK_CHECK_EQ(sched->pivotDim[1], 0u);
+        MLK_CHECK(sched->parallel[1]);
+        MLK_CHECK(sched->vectorizable[1]);  // unit stride along i
+    }
+    auto legal = mlk::poly::verifyScheduleLegality(*scop, *deps, *sched);
+    MLK_CHECK(legal.has_value() && *legal);
+
+    // Differential runtime: the interchanged nest executes bit-exact.
+    mlk::poly::TiledInfo untiled;
+    auto out = mlk::poly::emitScheduledKernel(*scop, *sched, untiled, km,
+                                              symbols);
+    MLK_CHECK(out.has_value());
+    if (!out.has_value()) return;
+    constexpr std::size_t n = static_cast<std::size_t>(NI * NJ);
+    SmallVector<double, 8> bufA(n, 0.0), bufY(n, 0.0);
+    mlk::KernelBufferBindings io;
+    io.inputs.push_back(bufA.data());
+    io.outputs.push_back(bufY.data());
+    io.elements = n;
+    auto r = mlk::executeKernelOnBuffers(*out, symbols, io, nullptr);
+    MLK_CHECK(r.has_value());
+    if (!r.has_value()) return;
+    for (std::size_t idx = 0; idx < n; ++idx) {
+        MLK_CHECK(bufA[idx] == 1.0);  // bit-exact (Rule 43)
+        MLK_CHECK(bufY[idx] == 2.0);
+    }
+}
+
+MLK_TEST(poly, runtime_threaded_parallel_loop_determinism) {
+    // Threading milestone: a fused 2-statement kernel over a large
+    // parallel outer dim (trip >= kParallelChunkElements). The emitted
+    // outer loop carries the scheduler's parallel mark and the walker
+    // runs disjoint index chunks on threads (when hardware concurrency
+    // allows); the result must equal the sequential reference bit-exact
+    // (zero-distance rows: slab-disjoint locations, Rule 43/137).
+    SymbolTable symbols;
+    KernelModule km;
+    constexpr int64_t I = 20000, J = 3;
+    KernelBuffer x;
+    x.name = symbols.intern("x");
+    x.dims = SmallVector<int64_t, 4>{I, J};
+    x.isInput = true;
+    KernelBuffer t;
+    t.name = symbols.intern("t");
+    t.dims = SmallVector<int64_t, 4>{I, J};
+    // The runtime ABI passes inputs and outputs only (no intermediate
+    // allocation yet — roadmap), so the scratch is an output.
+    t.isOutput = true;
+    KernelBuffer y;
+    y.name = symbols.intern("y");
+    y.dims = SmallVector<int64_t, 4>{I, J};
+    y.isOutput = true;
+    const uint32_t bx = km.addBuffer(x);
+    const uint32_t bt = km.addBuffer(t);
+    const uint32_t by = km.addBuffer(y);
+    const SymbolId vi = symbols.intern("i");
+    const SymbolId vj = symbols.intern("j");
+
+    // S0: t[i][j] = 2 * x[i][j]; S1: y[i][j] = t[i][j] + 1 (tied RAW).
+    KernelNode compute0;
+    compute0.op = mlk::KernelOp::Compute;
+    KernelExpr mul;
+    mul.op = mlk::MathOp::Mul;
+    mul.a.kind = mlk::KernelOperand::Kind::ElemIdx;
+    mul.a.index = static_cast<int64_t>(bx);
+    mul.a.idxCoeffs = SmallVector<int64_t, 4>{J, 1};
+    mul.b.kind = mlk::KernelOperand::Kind::Const;
+    mul.b.constValue = 2.0;
+    compute0.exprs.push_back(mul);
+    compute0.bufferA = bx;
+    KernelNode store0;
+    store0.op = mlk::KernelOp::Store;
+    store0.bufferOut = bt;
+    store0.outIndexCoeffs = SmallVector<int64_t, 4>{J, 1};
+    KernelNode compute1;
+    compute1.op = mlk::KernelOp::Compute;
+    KernelExpr add;
+    add.op = mlk::MathOp::Add;
+    add.a.kind = mlk::KernelOperand::Kind::ElemIdx;
+    add.a.index = static_cast<int64_t>(bt);
+    add.a.idxCoeffs = SmallVector<int64_t, 4>{J, 1};
+    add.b.kind = mlk::KernelOperand::Kind::Const;
+    add.b.constValue = 1.0;
+    compute1.exprs.push_back(add);
+    compute1.bufferA = bt;
+    KernelNode store1;
+    store1.op = mlk::KernelOp::Store;
+    store1.bufferOut = by;
+    store1.outIndexCoeffs = SmallVector<int64_t, 4>{J, 1};
+
+    KernelNode jLoop;
+    jLoop.op = mlk::KernelOp::Loop;
+    jLoop.var = vj;
+    jLoop.begin = 0;
+    jLoop.end = J;
+    KernelNode iLoop;
+    iLoop.op = mlk::KernelOp::Loop;
+    iLoop.var = vi;
+    iLoop.begin = 0;
+    iLoop.end = I;
+    {
+        uint32_t c0 = km.addNode(compute0);
+        uint32_t s0 = km.addNode(store0);
+        uint32_t c1 = km.addNode(compute1);
+        uint32_t s1 = km.addNode(store1);
+        jLoop.children.push_back(c0);
+        jLoop.children.push_back(s0);
+        jLoop.children.push_back(c1);
+        jLoop.children.push_back(s1);
+        const uint32_t jl = km.addNode(jLoop);
+        const uint32_t il = km.addNode(iLoop);
+        km.nodes[il].children.push_back(jl);  // i outer, j inner
+    }
+
+    auto scop = mlk::poly::extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    auto deps = mlk::poly::computeDependences(*scop);
+    MLK_CHECK(deps.has_value());
+    if (!deps.has_value()) return;
+    auto sched = mlk::poly::computePlutoSchedule(*scop, *deps);
+    MLK_CHECK(sched.has_value());
+    if (!sched.has_value()) return;
+    mlk::poly::TiledInfo untiled;
+    auto out = mlk::poly::emitScheduledKernel(*scop, *sched, untiled, km,
+                                              symbols);
+    MLK_CHECK(out.has_value());
+    if (!out.has_value()) return;
+    // The outer loop node carries the parallel + vector marks.
+    const KernelModule& km2 = *out;
+    uint32_t root = 0xFFFFFFFFu;
+    {
+        SmallVector<bool, 8> referenced(km2.nodes.size(), false);
+        for (const KernelNode& nd : km2.nodes) {
+            for (const uint32_t c : nd.children) {
+                if (c < referenced.size()) referenced[c] = true;
+            }
+        }
+        for (uint32_t i2 = 0; i2 < km2.nodes.size(); ++i2) {
+            if (!referenced[i2]) root = i2;
+        }
+    }
+    MLK_CHECK(root != 0xFFFFFFFFu);
+    if (root == 0xFFFFFFFFu) return;
+    MLK_CHECK_EQ(km2.nodes[root].op, mlk::KernelOp::Loop);
+    MLK_CHECK(km2.nodes[root].parallel);
+    // The vector hint sits on the innermost parallel level (the j loop
+    // inside the root i loop), the row the SIMD fit was proven for.
+    bool innerVectorHint = false;
+    for (const uint32_t c : km2.nodes[root].children) {
+        if (c < km2.nodes.size() &&
+            km2.nodes[c].op == mlk::KernelOp::Loop &&
+            km2.nodes[c].vectorHint) {
+            innerVectorHint = true;
+        }
+    }
+    MLK_CHECK(innerVectorHint);
+
+    // Execute (threaded when hardware_concurrency >= 2) + reference.
+    constexpr std::size_t n = static_cast<std::size_t>(I * J);
+    SmallVector<double, 8> bufX(n), bufT(n, 0.0), bufY(n, 0.0);
+    for (std::size_t i2 = 0; i2 < n; ++i2) {
+        bufX[i2] = static_cast<double>((i2 * 7) % 13) * 0.25;
+    }
+    mlk::KernelBufferBindings io;
+    io.inputs.push_back(bufX.data());
+    io.outputs.push_back(bufT.data());
+    io.outputs.push_back(bufY.data());
+    io.elements = n;
+    auto r = mlk::executeKernelOnBuffers(km2, symbols, io, nullptr);
+    MLK_CHECK(r.has_value());
+    if (!r.has_value()) return;
+    for (std::size_t i2 = 0; i2 < n; ++i2) {
+        const double ref = 2.0 * bufX[i2] + 1.0;
+        MLK_CHECK(bufY[i2] == ref);  // bit-exact under any interleaving
+    }
+}
+
+MLK_TEST(poly, reducesum_synth_pipeline_bitexact) {
+    // ReduceSum synthesis milestone: baseline Call(ReduceSum) ->
+    // poly.synth (init + accumulate nests) -> ... -> codegen with the
+    // reduction dim carried and the outer dim parallel; both the
+    // BASELINE call path and the transformed nest accumulate k in
+    // ascending order (Rule 90) -> bit-exact equality.
+    SymbolTable symbols;
+    mlk::DiagnosticEngine diag;
+    mlk::PassContext ctx;
+    ctx.symbols = &symbols;
+    ctx.diag = &diag;
+    ctx.tier = mlk::Tier::Tier2;
+    mlk::poly::PolyWorkspace* ws = mlk::poly::createPolyWorkspace();
+    ctx.polyWorkspace = ws;
+    mlk::MathGraph graph(&symbols);
+    mlk::passes::registerAllPasses(symbols);
+
+    constexpr int64_t M = 32, K = 16;
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{M, K};
+    a.isInput = true;
+    KernelBuffer y;
+    y.name = symbols.intern("Y");
+    y.dims = SmallVector<int64_t, 4>{M};
+    y.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufY = km.addBuffer(y);
+    KernelNode call;
+    call.op = mlk::KernelOp::Call;
+    call.math = mlk::MathOp::ReduceSum;
+    call.bufferA = bufA;
+    call.bufferOut = bufY;
+    (void)km.addNode(call);
+    ctx.kernelOut = &km;
+
+    // Baseline execution first (Call path, ascending-k accumulation).
+    const std::size_t nA = static_cast<std::size_t>(M * K);
+    SmallVector<double, 8> bufInA(nA), baseY(static_cast<std::size_t>(M), 0.0);
+    for (std::size_t i = 0; i < nA; ++i) {
+        bufInA[i] = static_cast<double>((i * 11) % 17) * 0.125;
+    }
+    {
+        mlk::KernelBufferBindings io;
+        io.inputs.push_back(bufInA.data());
+        io.outputs.push_back(baseY.data());
+        io.elements = nA;
+        auto br = mlk::executeKernelOnBuffers(km, symbols, io, nullptr);
+        MLK_CHECK(br.has_value());
+        if (!br.has_value()) {
+            mlk::poly::destroyPolyWorkspace(ws);
+            return;
+        }
+    }
+
+    mlk::MathGraph g2(&symbols);
+    auto passFn = [&](const char* name) -> mlk::Pass* {
+        return mlk::PassRegistry::instance().byName(symbols.intern(name));
+    };
+    for (const char* name :
+         {"poly.synth", "poly.scop_detect", "poly.dependence",
+          "poly.schedule", "poly.tile", "poly.codegen", "poly.verify"}) {
+        auto r = passFn(name)->run(ctx, g2);
+        MLK_CHECK(r.has_value());
+    }
+    MLK_CHECK(ws->codegenValid);
+    // Schedule shape: [i(par), k(carry)] — the reduction dim carries.
+    MLK_CHECK_EQ(ws->schedule.rows.size(), std::size_t{2});
+    if (ws->schedule.rows.size() == 2) {
+        MLK_CHECK_EQ(ws->schedule.pivotDim[0], 0u);
+        MLK_CHECK(ws->schedule.parallel[0]);
+        MLK_CHECK_EQ(ws->schedule.pivotDim[1], 1u);
+        MLK_CHECK(!ws->schedule.parallel[1]);
+    }
+
+    // Transformed execution: bit-exact vs BOTH the reference loop and
+    // the baseline call.
+    SmallVector<double, 8> bufOutY(static_cast<std::size_t>(M), -1.0);
+    mlk::KernelBufferBindings io;
+    io.inputs.push_back(bufInA.data());
+    io.outputs.push_back(bufOutY.data());
+    io.elements = nA;
+    auto r = mlk::executeKernelOnBuffers(km, symbols, io, nullptr);
+    MLK_CHECK(r.has_value());
+    if (!r.has_value()) {
+        mlk::poly::destroyPolyWorkspace(ws);
+        return;
+    }
+    int mismatches = 0;
+    for (int64_t i = 0; i < M && mismatches == 0; ++i) {
+        double ref = 0.0;
+        for (int64_t k = 0; k < K; ++k) {
+            ref += bufInA[static_cast<std::size_t>(i * K + k)];
+        }
+        const double got = bufOutY[static_cast<std::size_t>(i)];
+        const double base = baseY[static_cast<std::size_t>(i)];
+        if (got != ref || base != ref) ++mismatches;  // bit-exact (Rule 43)
+    }
+    MLK_CHECK_EQ(mismatches, 0);
+    mlk::poly::destroyPolyWorkspace(ws);
+}
+
 MLK_TEST_MAIN("poly")

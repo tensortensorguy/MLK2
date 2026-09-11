@@ -110,6 +110,16 @@ inline constexpr int64_t kPolyDefaultTileSize = 32;
 inline constexpr int64_t kPolyDefaultVectorWidth = 8;
 /// Maximum inner-tree duplication across tiled levels in poly.codegen.
 inline constexpr int64_t kPolyMaxCodegenCopies = 16;
+/// Pivot-order search: exhaustive permutation enumeration below this depth
+/// (4! = 24 orders), greedy prefix extension at deeper SCoPs.
+inline constexpr uint32_t kPolyMaxOrderEnumerateDepth = 4;
+/// Global LP-solve budget for one poly.schedule invocation across all
+/// enumerated orders (Rule 10: bounded passes; tripping degrades the
+/// search to the identity order instead of failing the pass).
+inline constexpr uint32_t kPolyMaxSchedulerLps = 4096;
+/// Per-order LP budget inside the order search (one candidate order's
+/// synthesis; tripping rejects that order, never the schedule).
+inline constexpr uint32_t kPolyMaxOrderLps = 512;
 
 // --- Runtime / telemetry (Rule 130, Rule 157) -------------------------------
 inline constexpr uint32_t kSafepointPollIntervalIterations = 4096;

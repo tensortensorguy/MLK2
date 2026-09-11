@@ -32,10 +32,23 @@ arithmetic:
    purification orients every dependence forward). A per-row shape
    contract keeps codegen total: loop variables stay pivot dims with box
    bounds, skew coefficients ride the schedule only, and every varying
-   dim is spent so each instance replays exactly once. Pivot orders are
-   ascending (identity always feasible ⇒ always wins); free-coefficient
-   rows + CLAST-style codegen remain the documented roadmap to full Pluto
-   ILP; the autotuner gates adoption by measurement (Rule 32).
+   dim is spent so each instance replays exactly once. Pivot ORDERS are
+   now searched (decision 7).
+6. **Execution marks in the IR** (Loop `parallel` / `vectorHint`): the
+   scheduler's zero-distance proof travels with the emitted forest,
+   hashed/serialized per Rule 24. The walker threads `parallel` loops
+   over disjoint index chunks — sound because zero-distance rows make
+   slabs location-disjoint — and both are advisory to backends.
+7. **Order search with exact scores** (supersedes the ascending-pivot
+   enumeration of decision 5): every pivot permutation is a candidate
+   transformation, synthesized and scored exactly (parallel rows,
+   innermost unit-stride SIMD fit from the affine access maps, total
+   carried distance, lexicographic determinism). Exhaustive below 4
+   varying dims, greedy prefix extension deeper, both under explicit LP
+   budgets (Rule 10) with identity as the always-feasible fallback. A
+   whole-schedule shape contract (per statement, varying rows form a
+   suffix) rejects orders the conservative codegen cannot emit
+   (guarded/split emission remains the roadmap).
 
 ## Consequences
 
@@ -44,6 +57,9 @@ arithmetic:
 - Parametric scheduling (symbolic dims) is not supported in v1; kernels
   with dynamic bounds stay on the baseline path until workload
   specialization feeds constant bounds.
+- The order search evaluates up to 24 full schedules at compile time for
+  depth-4 SCoPs (bounded by `kPolyMaxSchedulerLps`); measured adoption
+  stays with the autotuner (Rule 32).
 - `ctx.accuracy` null guards were added to six pre-existing passes that
   the GEMM demo exposed (Tier2 with no caller-provided contract
   segfaulted); the guards preserve the previous semantics when a

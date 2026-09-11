@@ -24,3 +24,4 @@ build-asan/
 build-*/
 bench/results/*.json
 bench/results/*.md
+/Testing/

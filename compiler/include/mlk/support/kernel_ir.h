@@ -121,6 +121,16 @@ struct KernelNode {
     /// (out[flat] += value) — the reduction primitive for polyhedral
     /// statements (Rule 90: same accumulation order as the reference).
     bool accumulate{false};
+    /// Polyhedral extension (Loop): the scheduler proved every
+    /// dependence distance identically zero at this level — instances
+    /// with different induction values are independent, so the executor
+    /// may run disjoint index chunks on threads (deterministic: slabs
+    /// read/write disjoint locations at this level).
+    bool parallel{false};
+    /// Polyhedral extension (Loop): innermost parallel level whose active
+    /// statements access memory with element stride 0/1 along this dim
+    /// (SIMD-able; advisory — the executor decides, Rule 12).
+    bool vectorHint{false};
     uint32_t guardId{constants::kInvalidId};  // GraphState ref (Rule 5)
     /// Implementation family for math functions (libm / poly7; Rule 34:
     /// carries the verified accuracy contract reference).

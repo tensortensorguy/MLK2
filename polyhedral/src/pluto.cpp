@@ -1,6 +1,19 @@
 // Pluto-style scheduler implementation (see pluto.h).
 //
-// Per schedule row r the LP column layout is
+// OUTER LAYER — the pivot-order search. computePlutoSchedule enumerates
+// pivot orders (all permutations up to kPolyMaxOrderEnumerateDepth, greedy
+// prefix extension deeper), synthesizes each candidate with
+// synthesizeWithOrder, and keeps the best-scoring schedule:
+//   1. parallel rows (more is better),
+//   2. innermost unit-stride SIMD fit (innermostStrideFit),
+//   3. total carried distance (exact rational, accumulated by processRow),
+//   4. lexicographic pivot order (determinism; identity wins ties).
+// scheduleCodegenShape rejects orders whose schedules the conservative
+// emitter cannot realize (a statement that turns row-constant and then
+// varies again would need guarded/split emission).
+//
+// INNER LAYER — per-order row synthesis. Per schedule row r the LP column
+// layout is
 //   [ S0: c0..cd | S1: ... | M over live deps | multipliers... ]
 // where the c columns are free schedule coefficients and M_d are distance
 // epigraphs. Every "for all v in polyhedron: LHS(v) >= 0" is encoded via
@@ -24,10 +37,15 @@
 //      its slice) resolves deps with min >= 1 and refines the rest with
 //      "distance == 0" equalities.
 //   3. IDENTITY fallback — theta = e_pivot for every statement.
-//      Original-order purification orients every dependence forward in
-//      the original dim order, so this row is always valid and always
-//      codegen-shape compatible; it guarantees progress (one pivot dim
-//      spent per row) even when both LP searches fail or reject.
+//      Original-order purification orients every dependence forward for
+//      ANY pivot sequence (dims with zero distance refine; the first
+//      nonzero-distance pivot resolves positively), so this row is always
+//      valid and always codegen-shape compatible; it guarantees progress
+//      (one pivot dim spent per row) even when both LP searches fail or
+//      reject.
+// Candidate LPs that ERROR (budget/overflow, e.g. an LCM-realized row
+// past the coefficient bound) reject the CANDIDATE, never the order or
+// the schedule (round-11 semantics; the identity fallback absorbs them).
 // Rows are emitted until every varying dimension is spent (totality: each
 // statement instance gets a distinct schedule vector — required by
 // codegen, which replays each payload exactly once) or no pivot candidate
@@ -42,15 +60,17 @@
 // bounds); they only steer legality and statement classification.
 //
 // Determinism (Rule 53): exact rational simplex with Bland's rule, fixed
-// pivot/anchor enumeration order, integer scaling by LCM + gcd per row.
-// Failure mode (Rule 62): budget trips yield an error; the baseline kernel
-// stays untouched.
+// enumeration order, integer scaling by LCM + gcd per row, exact scores.
+// Failure mode (Rule 62): any error yields "no schedule found"; the
+// baseline kernel stays untouched.
 #include "mlk/poly/pluto.h"
 
+#include <algorithm>
 #include <optional>
 #include <utility>
 
 #include "schedule_common.h"
+#include "mlk/core/constants.h"
 #include "mlk/poly/checked.h"
 #include "mlk/poly/lp.h"
 
@@ -252,14 +272,16 @@ struct DepState {
 /// Builds the LP for one (pivot, anchor) candidate. Column layout: stmt
 /// coefficient blocks, then (sequential search only) one epigraph M
 /// column per live dependence; Farkas multiplier columns are appended per
-/// block. Returns nullopt when the LP is infeasible (candidate rejected).
+/// block. Returns nullopt when the LP is infeasible (candidate rejected)
+/// or the LP budget (Rule 10) is exhausted for the enclosing order.
 [[nodiscard]] Result<std::optional<ScheduleRow>> tryRowLp(
     const Scop& scop,
     const SmallVector<Dependence, 16>& deps,
     const SmallVector<DepState, 16>& states,
     const SmallVector<uint32_t, 16>& live,
     const SmallVector<bool, 8>& spent, uint32_t pivot, uint32_t anchor,
-    bool parallelSearch) {
+    bool parallelSearch, uint32_t* lpBudget) {
+    if (lpBudget == nullptr || *lpBudget == 0) return std::nullopt;
     const uint32_t nStmts = static_cast<uint32_t>(scop.statements.size());
     const uint32_t depth = scop.depth;
     const uint32_t coeffsPerStmt = depth + 1;
@@ -393,6 +415,7 @@ struct DepState {
         }
     }
     MLK_TRY_VAR(sol, solveLp(lp));
+    if (lpBudget != nullptr && *lpBudget > 0) --*lpBudget;
     if (sol.status != LpStatus::Optimal) return std::nullopt;
     ScheduleRow row;
     MLK_TRY_VAR(r, realizeRow(sol, nStmts, coeffsPerStmt));
@@ -403,12 +426,15 @@ struct DepState {
 /// Post-row bookkeeping shared by all stages: exact per-dependence
 /// classification on the realized integer row (resolution when the min
 /// distance reaches 1), parallel marking (every live dependence distance
-/// identically zero on its slice), and slice refinement with
-/// "distance == 0" equalities. Returns the row's parallel mark.
+/// identically zero on its slice), slice refinement with
+/// "distance == 0" equalities, and accumulation of the carried distance
+/// (the exact minimum distance of every dependence resolved at this row
+/// into *carriedSum — the order-search locality term). Returns the row's
+/// parallel mark.
 [[nodiscard]] Result<bool> processRow(
     const SmallVector<Dependence, 16>& deps,
     SmallVector<DepState, 16>& states, const ScheduleRow& row,
-    uint32_t depth) {
+    uint32_t depth, Rational* carriedSum) {
     bool rowParallel = true;
     for (uint32_t di = 0; di < states.size(); ++di) {
         DepState& st = states[di];
@@ -434,6 +460,10 @@ struct DepState {
         if (anyLive && minDist.isInt() && minDist.num >= 1) {
             st.resolved = true;  // strictly ordered at this row
             rowParallel = false;  // the row carries this dependence
+            if (carriedSum != nullptr) {
+                MLK_TRY_VAR(sum, ratAdd(*carriedSum, minDist));
+                *carriedSum = sum;
+            }
             continue;
         }
         if (anyLive) {
@@ -480,15 +510,89 @@ struct DepState {
     return rowParallel;
 }
 
-}  // namespace
+/// Exact, deterministic score of a complete candidate schedule (see
+/// pluto.h): parallel rows, innermost unit-stride fit, carried distance.
+struct OrderScore {
+    uint32_t parallelRows{0};
+    bool vectorFit{false};
+    Rational carriedTotal{};
+};
 
-Result<PolySchedule> computePlutoSchedule(
-    const Scop& scop, const SmallVector<Dependence, 16>& deps) {
+/// One synthesis outcome: the schedule plus its exact carried-distance
+/// total (accumulated by processRow during synthesis).
+struct SynthOutcome {
+    PolySchedule sched{};
+    Rational carriedTotal{};
+};
+
+/// Lexicographic order comparison over pivot-order vectors (determinism
+/// tie-break; SmallVector has no operator<).
+[[nodiscard]] bool orderLexLess(const SmallVector<uint32_t, 8>& a,
+                                const SmallVector<uint32_t, 8>& b) {
+    const std::size_t n = a.size() < b.size() ? a.size() : b.size();
+    for (std::size_t i = 0; i < n; ++i) {
+        if (a[i] != b[i]) return a[i] < b[i];
+    }
+    return a.size() < b.size();
+}
+
+/// True when `a` is strictly better than `b` under the fixed criterion
+/// order (parallelism, SIMD fit, carrying, lexicographic order). Exact
+/// comparisons only — the search stays deterministic (Rule 53).
+[[nodiscard]] bool scoreBetter(const OrderScore& a, const OrderScore& b,
+                               const SmallVector<uint32_t, 8>& orderA,
+                               const SmallVector<uint32_t, 8>& orderB) {
+    if (a.parallelRows != b.parallelRows) {
+        return a.parallelRows > b.parallelRows;
+    }
+    if (a.vectorFit != b.vectorFit) return a.vectorFit;
+    if (!ratEqual(a.carriedTotal, b.carriedTotal)) {
+        return ratLess(a.carriedTotal, b.carriedTotal);
+    }
+    return orderLexLess(orderA, orderB);
+}
+
+/// Innermost SIMD fit: the last schedule row is parallel AND every
+/// statement active on it (not foldable-constant) reads/writes with
+/// element stride 0 (broadcast) or 1 (contiguous) along the row's pivot.
+/// Computed exactly from the SCoP's affine access maps.
+[[nodiscard]] bool innermostStrideFit(const Scop& scop,
+                                      const PolySchedule& sched) {
+    if (sched.rows.empty() || sched.parallel.empty()) return false;
+    const uint32_t last = static_cast<uint32_t>(sched.rows.size()) - 1;
+    if (!sched.parallel[last]) return false;
+    const uint32_t pivot = sched.pivotDim[last];
+    for (const Statement& s : scop.statements) {
+        int64_t folded = 0;
+        if (detail::rowEffectiveConst(s, sched.rows[last], &folded)) {
+            continue;  // not active on this row
+        }
+        for (const MemoryAccess& acc : s.accesses) {
+            if (acc.flatIndex.outputs.empty()) return false;
+            const int64_t stride =
+                acc.flatIndex.outputs[0].coeffOf(pivot);
+            if (stride != 0 && stride != 1) return false;
+        }
+        if (pivot < s.storeCoeffs.size()) {
+            const int64_t stride = s.storeCoeffs[pivot];
+            if (stride != 0 && stride != 1) return false;
+        }
+    }
+    return true;
+}
+
+/// Synthesizes one complete schedule under a FIXED pivot order (the
+/// order lists the varying dims, most-outer first). The per-row LP
+/// search (parallel-first, distance-minimal sequential, identity
+/// fallback) is unchanged; only the pivot sequence is prescribed.
+/// Returns nullopt when the order is rejected: budget trips (Rule 10),
+/// overflow, or a validity trip — the order search skips such orders
+/// and keeps searching (Rules 62/102: never a broken schedule).
+[[nodiscard]] Result<std::optional<SynthOutcome>> synthesizeWithOrder(
+    const Scop& scop, const SmallVector<Dependence, 16>& deps,
+    const SmallVector<uint32_t, 8>& order, uint32_t* lpBudget) {
     const uint32_t depth = scop.depth;
     const uint32_t nStmts = static_cast<uint32_t>(scop.statements.size());
-    if (depth == 0 || nStmts == 0) {
-        return err(ErrorCode::InvalidArgument, "empty SCoP");
-    }
     const uint32_t coeffsPerStmt = depth + 1;
 
     PolySchedule out;
@@ -502,22 +606,31 @@ Result<PolySchedule> computePlutoSchedule(
         st.resolved = false;
         states.push_back(std::move(st));
     }
+    Rational carriedTotal{};
     SmallVector<bool, 8> spent(depth, false);
 
-    while (out.rows.size() < constants::kPolyMaxScheduleRows) {
-        // Pivot candidates: unspent dims that vary for at least one
-        // statement (a pivot nobody varies on would emit an empty loop).
-        SmallVector<uint32_t, 8> candidates;
-        for (uint32_t d = 0; d < depth; ++d) {
-            if (spent[d]) continue;
+    // Next pivot: the first not-yet-spent dim of the prescribed order
+    // (skipping dims that nobody varies on — they never need rows; the
+    // order was generated over the varying dims only).
+    const auto nextPivot = [&]() -> std::optional<uint32_t> {
+        for (const uint32_t p : order) {
+            if (spent[p]) continue;
+            bool varies = false;
             for (const Statement& s : scop.statements) {
-                if (detail::dimVaries(s, d)) {
-                    candidates.push_back(d);
+                if (detail::dimVaries(s, p)) {
+                    varies = true;
                     break;
                 }
             }
+            if (varies) return p;
+            spent[p] = true;  // pinned everywhere: spend without a row
         }
-        if (candidates.empty()) break;  // totality reached
+        return std::nullopt;
+    };
+
+    while (out.rows.size() < constants::kPolyMaxScheduleRows) {
+        std::optional<uint32_t> pivot = nextPivot();
+        if (!pivot.has_value()) break;  // totality reached
 
         SmallVector<uint32_t, 16> live;
         for (uint32_t di = 0; di < states.size(); ++di) {
@@ -525,83 +638,79 @@ Result<PolySchedule> computePlutoSchedule(
         }
 
         // Totality rows (no dependences left to order): the plain
-        // identity row on the first candidate pivot. Deterministic and
+        // identity row on the prescribed pivot. Deterministic and
         // minimal — with nothing to carry there is nothing to optimize.
         if (live.empty()) {
-            const uint32_t p = candidates[0];
             ScheduleRow row;
             for (uint32_t s = 0; s < nStmts; ++s) {
                 SmallVector<int64_t, 8> cs(coeffsPerStmt, 0);
-                cs[p + 1] = 1;
+                cs[*pivot + 1] = 1;
                 row.stmtCoeffs.push_back(std::move(cs));
             }
-            MLK_TRY_VAR(par, processRow(deps, states, row, depth));
+            Result<bool> par = processRow(deps, states, row, depth,
+                                          &carriedTotal);
+            if (!par.has_value()) return std::nullopt;
             out.rows.push_back(std::move(row));
-            out.pivotDim.push_back(p);
-            out.parallel.push_back(par);
-            spent[p] = true;
+            out.pivotDim.push_back(*pivot);
+            out.parallel.push_back(*par);
+            spent[*pivot] = true;
             continue;
         }
 
-        // Stage 1 — parallel rows: every live dependence distance
-        // identically zero (feasibility). Tried for every (pivot,
-        // anchor) pair before any sequential row: Pluto's parallelism
-        // preference.
+        // Stage 1 — parallel rows at the prescribed pivot (every live
+        // dependence distance identically zero): feasibility LPs over
+        // the anchors, ascending. An LP that errors (budget/overflow —
+        // e.g., an LCM-realized row past the coefficient bound) skips
+        // the candidate, never the order (Rule 10/62 round-11 semantics).
         std::optional<ScheduleRow> realized;
-        uint32_t pivotUsed = candidates[0];
-        for (const uint32_t p : candidates) {
-            for (uint32_t a = 0; a < nStmts && !realized.has_value(); ++a) {
-                if (!detail::dimVaries(scop.statements[a], p)) continue;
-                auto par = tryRowLp(scop, deps, states, live, spent,
-                                    p, a, true);
-                // Budget/overflow trips on a candidate LP reject the
-                // candidate (Rule 10); the identity fallback below keeps
-                // the scheduler total, and processRow validates whatever
-                // row is realized.
-                if (par.has_value() && par->has_value() &&
-                    rowCodegenCompatible(scop, **par, p)) {
-                    realized = std::move(*par);
-                    pivotUsed = p;
-                }
+        for (uint32_t a = 0; a < nStmts && !realized.has_value(); ++a) {
+            if (!detail::dimVaries(scop.statements[a], *pivot)) continue;
+            auto par = tryRowLp(scop, deps, states, live, spent, *pivot,
+                                a, true, lpBudget);
+            if (!par.has_value()) continue;  // candidate rejected
+            if (par->has_value() &&
+                rowCodegenCompatible(scop, **par, *pivot)) {
+                realized = std::move(*par);
             }
-            if (realized.has_value()) break;
         }
         // Stage 2 — sequential rows: validity + progress, minimizing the
         // epigraph sum (distance-minimal carrying).
         if (!realized.has_value()) {
-            for (const uint32_t p : candidates) {
-                for (uint32_t a = 0; a < nStmts && !realized.has_value();
-                     ++a) {
-                    if (!detail::dimVaries(scop.statements[a], p)) continue;
-                    auto seq = tryRowLp(scop, deps, states, live,
-                                        spent, p, a, false);
-                    if (seq.has_value() && seq->has_value() &&
-                        rowCodegenCompatible(scop, **seq, p)) {
-                        realized = std::move(*seq);
-                        pivotUsed = p;
-                    }
+            for (uint32_t a = 0; a < nStmts && !realized.has_value(); ++a) {
+                if (!detail::dimVaries(scop.statements[a], *pivot)) {
+                    continue;
                 }
-                if (realized.has_value()) break;
+                auto seq = tryRowLp(scop, deps, states, live, spent,
+                                    *pivot, a, false, lpBudget);
+                if (!seq.has_value()) continue;  // candidate rejected
+                if (seq->has_value() &&
+                    rowCodegenCompatible(scop, **seq, *pivot)) {
+                    realized = std::move(*seq);
+                }
             }
         }
-        // Stage 3 — identity fallback (always valid, always compatible).
+        // Stage 3 — identity fallback at the prescribed pivot. Always
+        // valid for any pivot sequence (original-order purification makes
+        // every dependence lexicographically forward: dims with zero
+        // distance refine, the first nonzero-distance pivot resolves it
+        // positively) and always codegen-compatible.
         if (!realized.has_value()) {
-            const uint32_t p = candidates[0];
             ScheduleRow row;
             for (uint32_t s = 0; s < nStmts; ++s) {
                 SmallVector<int64_t, 8> cs(coeffsPerStmt, 0);
-                cs[p + 1] = 1;
+                cs[*pivot + 1] = 1;
                 row.stmtCoeffs.push_back(std::move(cs));
             }
             realized = std::move(row);
-            pivotUsed = p;
         }
 
-        MLK_TRY_VAR(par, processRow(deps, states, *realized, depth));
+        Result<bool> par = processRow(deps, states, *realized, depth,
+                                      &carriedTotal);
+        if (!par.has_value()) return std::nullopt;
         out.rows.push_back(std::move(*realized));
-        out.pivotDim.push_back(pivotUsed);
-        out.parallel.push_back(par);
-        spent[pivotUsed] = true;
+        out.pivotDim.push_back(*pivot);
+        out.parallel.push_back(*par);
+        spent[*pivot] = true;
     }
 
     // Vectorizable: the innermost (last) parallel row, if any.
@@ -613,7 +722,151 @@ Result<PolySchedule> computePlutoSchedule(
             break;
         }
     }
-    return out;
+    SynthOutcome outcome;
+    outcome.sched = std::move(out);
+    outcome.carriedTotal = carriedTotal;
+    return outcome;
+}
+
+/// Scores one synthesized schedule (exact terms only).
+[[nodiscard]] OrderScore scoreSchedule(const Scop& scop,
+                                       const SynthOutcome& cand) {
+    OrderScore sc;
+    for (const bool p : cand.sched.parallel) {
+        if (p) ++sc.parallelRows;
+    }
+    sc.vectorFit = innermostStrideFit(scop, cand.sched);
+    sc.carriedTotal = cand.carriedTotal;
+    return sc;
+}
+
+/// Codegen shape compatibility of a WHOLE schedule (see pluto.h): for
+/// every statement the rows on which it varies (pivot varies and the row
+/// is not foldable-constant for it) must form a SUFFIX of the row
+/// sequence. A statement that turns row-constant and then varies again
+/// would need its payload inside a loop iteration slice it is pinned out
+/// of (guarded/split emission — codegen bails conservatively today, so
+/// such orders are rejected by the search instead of at emission time).
+[[nodiscard]] bool scheduleCodegenShape(const Scop& scop,
+                                        const PolySchedule& sched) {
+    for (const Statement& s : scop.statements) {
+        bool seenConst = false;
+        for (uint32_t r = 0; r < sched.rows.size(); ++r) {
+            int64_t folded = 0;
+            if (detail::rowEffectiveConst(s, sched.rows[r], &folded)) {
+                seenConst = true;
+                continue;
+            }
+            if (seenConst) return false;  // const row before a varying row
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+Result<PolySchedule> computePlutoSchedule(
+    const Scop& scop, const SmallVector<Dependence, 16>& deps) {
+    const uint32_t depth = scop.depth;
+    const uint32_t nStmts = static_cast<uint32_t>(scop.statements.size());
+    if (depth == 0 || nStmts == 0) {
+        return err(ErrorCode::InvalidArgument, "empty SCoP");
+    }
+
+    // Varying dims (ascending): the only dims that need schedule rows;
+    // pinned-only dims never become pivots (their coefficients fold in
+    // codegen).
+    SmallVector<uint32_t, 8> varying;
+    for (uint32_t d = 0; d < depth; ++d) {
+        for (const Statement& s : scop.statements) {
+            if (detail::dimVaries(s, d)) {
+                varying.push_back(d);
+                break;
+            }
+        }
+    }
+    if (varying.empty()) {
+        return err(ErrorCode::InvalidArgument,
+                   "SCoP has no varying dimension");
+    }
+
+    uint32_t globalLps = constants::kPolyMaxSchedulerLps;
+    std::optional<SynthOutcome> best;
+    OrderScore bestScore;
+    SmallVector<uint32_t, 8> bestOrder;
+
+    const auto consider = [&](const SmallVector<uint32_t, 8>& order)
+        -> Result<void> {
+        uint32_t orderLps = globalLps < constants::kPolyMaxOrderLps
+                                ? globalLps
+                                : constants::kPolyMaxOrderLps;
+        MLK_TRY_VAR(cand, synthesizeWithOrder(scop, deps, order,
+                                              &orderLps));
+        globalLps -= (constants::kPolyMaxOrderLps - orderLps);
+        if (!cand.has_value()) return {};
+        if (!scheduleCodegenShape(scop, cand->sched)) return {};
+        const OrderScore sc = scoreSchedule(scop, *cand);
+        if (!best.has_value() ||
+            scoreBetter(sc, bestScore, order, bestOrder)) {
+            best = std::move(*cand);
+            bestScore = sc;
+            bestOrder = order;
+        }
+        return {};
+    };
+
+    if (varying.size() <= constants::kPolyMaxOrderEnumerateDepth) {
+        // Exhaustive: every permutation, lexicographic (identity first).
+        SmallVector<uint32_t, 8> perm = varying;
+        const SmallVector<uint32_t, 8> first = varying;
+        do {
+            MLK_TRYV(consider(perm));
+            if (globalLps == 0) break;
+            std::next_permutation(perm.begin(), perm.end());
+        } while (perm != first);
+    } else {
+        // Greedy prefix extension: at each row position, try every
+        // unspent varying dim as the next pivot (the rest ascending),
+        // keep the best-scoring extension.
+        SmallVector<uint32_t, 8> prefix;
+        SmallVector<bool, 8> used(depth, false);
+        for (uint32_t r = 0; r < varying.size(); ++r) {
+            for (const uint32_t c : varying) {
+                if (used[c]) continue;
+                SmallVector<uint32_t, 8> order = prefix;
+                order.push_back(c);
+                for (const uint32_t d2 : varying) {
+                    if (!used[d2] && d2 != c) order.push_back(d2);
+                }
+                MLK_TRYV(consider(order));
+                if (globalLps == 0) break;
+            }
+            // Fix the chosen pivot for this position (the best order so
+            // far carries it at position r; fall back to the first
+            // unused dim when the budget skipped every candidate).
+            uint32_t chosen = depth;
+            if (bestOrder.size() > r && !used[bestOrder[r]]) {
+                chosen = bestOrder[r];
+            } else {
+                for (const uint32_t c : varying) {
+                    if (!used[c]) {
+                        chosen = c;
+                        break;
+                    }
+                }
+            }
+            if (chosen == depth) break;  // no pivot left to fix
+            prefix.push_back(chosen);
+            used[chosen] = true;
+        }
+        // The greedy winner is already `best` (consider keeps it fresh).
+    }
+
+    if (!best.has_value()) {
+        return err(ErrorCode::UnsupportedCapability,
+                   "pluto: no legal schedule within the LP budget");
+    }
+    return std::move(best->sched);
 }
 
 Result<bool> verifyScheduleLegality(

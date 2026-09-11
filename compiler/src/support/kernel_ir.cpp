@@ -58,6 +58,8 @@ HashValue KernelModule::hash() const noexcept {
         for (const int64_t c : n.outIndexCoeffs) h = hashCombine(h, hashI64(c));
         h = hashCombine(h, hashI64(n.outIndexOffset));
         h = hashCombine(h, n.accumulate ? 0x9E3779B97F4A7C15ULL : 0ULL);
+        h = hashCombine(h, n.parallel ? 0xA5A5A5A5A5A5A5A5ULL : 0ULL);
+        h = hashCombine(h, n.vectorHint ? 0x5C5C5C5C5C5C5C5CULL : 0ULL);
         for (const auto& e : n.exprs) {
             h = hashCombine(h, hashU64(static_cast<uint64_t>(e.op)));
             h = hashCombine(h, hashU64(static_cast<uint64_t>(e.a.kind)));
@@ -155,6 +157,12 @@ json::Value KernelModule::toJson(SymbolTable& symbols) const {
             no.set("out_index_coeffs", std::move(cs));
             no.set("out_index_offset", json::Value{n.outIndexOffset});
             if (n.accumulate) no.set("accumulate", json::Value{true});
+        }
+        if (n.op == KernelOp::Loop && n.parallel) {
+            no.set("parallel", json::Value{true});
+        }
+        if (n.op == KernelOp::Loop && n.vectorHint) {
+            no.set("vector_hint", json::Value{true});
         }
         if (n.bufferA != constants::kInvalidId) {
             no.set("a", json::Value{static_cast<int64_t>(n.bufferA)});

@@ -83,12 +83,34 @@ the baseline kernel (Rules 62/102/115).
 
 ## Scheduling
 
-Every row is SELECTED by an LP over the schedule coefficients — nothing is
-copied from the original loop order. Per row, each live dependence d
-contributes its SLICE (relation refined by all earlier rows' `dist == 0`
-equalities); Farkas' lemma turns "dist_r(v) >= 0 for all v in slice" into
-linear constraints over the coefficients. Three deterministic stages,
-first feasible wins:
+Two layers: an ORDER SEARCH over pivot permutations, and per-order row
+synthesis by LP — nothing is copied from the original loop order.
+
+**Order search.** Every pivot ORDER (a permutation of the varying dims) is
+a candidate transformation. Depth <= `kPolyMaxOrderEnumerateDepth` (4)
+enumerates ALL orders; deeper SCoPs extend a prefix greedily one pivot at
+a time. Each candidate order is synthesized (below) and scored exactly:
+
+1. parallel rows (more is better),
+2. innermost unit-stride fit — the LAST row parallel AND every active
+   statement's accesses stride 0/1 along its pivot, computed from the
+   affine access maps (SIMD-able innermost loop),
+3. total carried distance — the exact rational sum of per-dependence
+   minimum distances at their resolving rows,
+4. lexicographic pivot order (determinism; identity wins ties).
+
+The first best order wins (`pluto_interchange_by_stride_fit`: a kernel
+whose accesses are unit-stride along dim 0 schedules dim 0 INNERMOST — a
+loop interchange the ascending-first scheduler never considered). Budgets
+(Rule 10): `kPolyMaxSchedulerLps` globally, `kPolyMaxOrderLps` per order;
+a tripped budget rejects the candidate order, never the pass. A candidate
+whose synthesis errors is skipped identically; the identity order is
+always synthesized, so the search is total.
+
+**Per-order row synthesis.** Each live dependence d contributes its SLICE
+(relation refined by all earlier rows' `dist == 0` equalities); Farkas'
+lemma turns "dist_r(v) >= 0 for all v in slice" into linear constraints
+over the coefficients. Three deterministic stages, first feasible wins:
 
 1. **Parallel search** — a feasibility LP with BOTH `dist >= 0` and
    `-dist >= 0` blocks per live dependence: a row under which every live
@@ -100,8 +122,10 @@ first feasible wins:
    carrying rows, the fusion/skewing driver. Stencil time rows fall out
    here, with the space row parallel (`pluto_sor_time_space_parallel`).
 3. **Identity fallback** — `theta = e_pivot`. Original-order purification
-   orients every dependence forward, so this row is always valid; it
-   guarantees termination even when both LP searches reject.
+   orients every dependence forward for ANY pivot sequence (dims with
+   zero distance refine; the first nonzero-distance pivot resolves
+   positively), so this row is always valid; it guarantees termination
+   even when both LP searches reject.
 
 Shape contract (checked per realized row, codegen compatibility): every
 statement is either a foldable constant (nonzero coefficients only on
@@ -109,28 +133,33 @@ pinned dims) or varies on the row's PIVOT dim with a positive coefficient.
 Spent-dim (outer-loop) coefficients stay free in the LP — skew terms —
 and never reach loop bounds: with the loop variable kept as the pivot dim
 and box bounds, the nest enumerates instances in exactly the schedule's
-lexicographic order. Rows are emitted until every varying dim is spent
-(TOTALITY: each instance maps to a distinct schedule vector, so codegen
-replays each payload exactly once — this also fixes the instance collapse
-zero-row schedules used to inflict on no-dependence kernels).
-Dependences still live at that point are schedule-tied and resolve by
-statement order (`origOrder`); `verifyScheduleLegality` proves exactly
-that tie-break rule. Candidate LPs that trip size budgets reject the
-candidate (Rule 10) rather than failing the schedule.
+lexicographic order (equal prefixes force equal spent coords by
+induction — valid for arbitrary pivot SEQUENCES, which is what makes the
+order search codegen-safe). Rows are emitted until every varying dim is
+spent (TOTALITY: each instance maps to a distinct schedule vector, so
+codegen replays each payload exactly once). Dependences still live at
+that point are schedule-tied and resolve by statement order
+(`origOrder`); `verifyScheduleLegality` proves exactly that tie-break
+rule. Candidate LPs that error (budget/overflow, e.g. an LCM-realized row
+past the coefficient bound) reject the CANDIDATE (Rule 10), never the
+order or the schedule.
+
+Whole-schedule shape contract (order-search rejection): for every
+statement, the rows on which it varies must form a SUFFIX of the row
+sequence. A statement that turns row-constant and then varies again would
+need its payload inside a loop iteration slice it is pinned out of
+(guarded/split emission — codegen bails conservatively), so the search
+rejects such orders up front instead of failing at emission time.
 
 Parallel marking: a row is parallel iff every live dependence distance is
 identically zero on its refined slice (a row that *carries* a dependence —
-strictly positive distance — is sequential). The innermost parallel row is
-the vectorizable one. `verifyScheduleLegality` re-proves the final
-schedule lexicographically; `poly.verify` runs it before the backend.
-
-Known quality limitation: the pivot enumeration is ascending by dim index
-(identity pivot order is always feasible, so it always wins) — loop
-PERMUTATION orders and skew-driven reorders are therefore not synthesized
-yet; schedules are legal, deterministic, fusion-capable and
-parallelism-preferring, but not always locality-optimal. The autotuner
-gates adoption by measurement (Rule 32); free-coefficient rows plus
-CLAST-style codegen (if/while/guards) are the roadmap items.
+strictly positive distance — is sequential). The mark is conservative
+under the rational hull: a dependence that is integer-exactly zero but
+fractionally nonzero (transposed flat-index collisions) marks the row
+sequential; the `dist == 0` refinement restores exactness on later rows.
+The innermost parallel row is the vectorizable one. `verifyScheduleLegality`
+re-proves the final schedule lexicographically; `poly.verify` runs it
+before the backend.
 
 ## Codegen
 
@@ -160,8 +189,10 @@ Emission walks schedule levels over the statement group:
 Kernel IR extensions (all backward compatible, hashed and serialized per
 Rule 24): `KernelOperand::Kind::ElemIdx` (buffer + per-stack-position
 coefficients + offset), affine loop bounds (`beginCoeffs/endCoeffs` over
-the enclosing var stack), buffer-dim loop bounds (`endBuf/endDim`), and
-`Store::accumulate`.
+the enclosing var stack), buffer-dim loop bounds (`endBuf/endDim`),
+`Store::accumulate`, and the Loop execution marks `parallel`/
+`vectorHint` (set by codegen from the scheduler's row marks; the walker
+threads `parallel` loops, `vectorHint` is advisory — see Executor).
 
 Bail conditions (conservative, baseline preserved): statements neither
 pin-foldable nor pivot-varying (scheduler shape contract violation),
@@ -173,17 +204,31 @@ accesses referencing unpinned unspent dims.
 `executeKernelOnBuffers` routes any module containing multi-dim features
 through a recursive tree walker (loop-var stack, affine bounds, ElemIdx
 resolution, accumulate stores); the legacy 1-D fast path keeps its
-chunked threading. Multi-dim execution is single-threaded in v1 (Rule 12
-roadmap).
+chunked threading. Multi-dim loops marked `parallel` (zero-distance rows
+proven by the scheduler) run disjoint index chunks on threads — same
+executor-owned thread decision as the 1-D path (`kKernelExecMaxThreads`,
+the `threads` schedule param, the `kParallelChunkElements` amortization
+threshold), withheld for subtrees containing `Call` nodes (symbol
+interning is not hot-path-safe under threading). Zero-distance rows mean
+slabs read/write disjoint locations at that level, so any interleaving
+produces the sequential result bit-exact (Rule 43) — no locks
+(Rule 137). Each worker records its terminal state in a slot; the parent
+joins and returns the first failure deterministically.
+`Call(ReduceSum)` executes as a row-wise trailing-dim sum in ascending-k
+order — exactly the order the transformed accumulate chain preserves.
 
 ## Verification story
 
-- Unit: 40 tests in `tests/unit/unit_poly.cpp` covering the engine
+- Unit: 43 tests in `tests/unit/unit_poly.cpp` covering the engine
   (rationals, sets, FM, lexmin, maps), extraction, dependences, LP,
   scheduling legality + determinism, FUSION EMERGENCE (producer/consumer
   single parallel row + bit-exact fused execution), wavefront dependences,
   SOR time/space parallel marking, tiling, codegen structure, the full
-  pass chain, and differential execution.
+  pass chain, differential execution, LOOP INTERCHANGE emergence
+  (stride-fit order search + bit-exact permuted execution), THREADED
+  parallel-loop determinism (parallel/vector marks + bit-exact under
+  chunked threads), and the ReduceSum synthesis class (baseline Call
+  path vs transformed accumulate chain, bit-exact both ways).
 - Differential (Rules 43/85/90): the transformed GEMM executes over dense
   buffers and matches a straightforward reference (bit-exact for the
   no-reassociation class; accumulation order per output cell preserved).
@@ -192,13 +237,19 @@ roadmap).
 
 ## Roadmap
 
-- Free-coefficient schedule rows + CLAST-style codegen (unlocks loop
-  permutation orders, skew-driven locality reordering, and the full Pluto
-  ILP fusion objective; the current shape contract pins loop variables to
-  pivot dims with box bounds).
+- Full CLAST-style codegen (guarded/split loops) — unlocks orders where a
+  statement is pinned out of interior iteration slices (the whole-schedule
+  shape contract rejects them today) and piecewise bounds.
+- Full Pluto ILP locality objective over all rows simultaneously (the
+  order search composes exact per-row scores; an ILP with memory-reuse
+  terms could weight fusion across nests beyond the carried-distance
+  proxy).
 - Parametric SCoPs (symbolic dims with runtime guards) — currently
   requires constant bounds after workload specialization.
-- ReduceSum/softmax synthesis classes; >2-input elementwise (needs the
-  baseline buffer-materialization limit lifted).
-- Multi-threaded multi-dim execution (Rule 12).
+- Softmax/multi-input elementwise synthesis classes; >2-input elementwise
+  (needs the baseline buffer-materialization limit lifted).
+- Integer-exact parallel marking (the rational-hull conservativeness on
+  transposed tied dependences costs one parallel row).
 - Multiple SCoP regions per kernel.
+- `poly_tile_size` autotuner integration over the order dimension (the
+  search is compile-time exact; tile sizes remain the measured knob).

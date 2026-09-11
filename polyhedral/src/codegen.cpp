@@ -201,10 +201,20 @@ struct Emitter {
     }
 
     /// Emits a loop over dim `varDim` (tiled when in the band) whose body
-    /// is the recursion at level r+1 for `varStmts`.
+    /// is the recursion at level r+1 for `varStmts`. The loop carries the
+    /// scheduler's parallel/vector marks for its row: `parallel` means
+    /// every dependence distance is identically zero at this level (the
+    /// executor may thread disjoint index chunks); `vectorHint` marks the
+    /// innermost enumeration of a SIMD-able parallel row.
     [[nodiscard]] Result<void> emitLoop(SmallVector<uint32_t, 8> varStmts,
                                         uint32_t varDim, int64_t lo,
                                         int64_t hi, uint32_t r) {
+        const bool rowParallel = r < sched->parallel.size()
+                                     ? sched->parallel[r]
+                                     : false;
+        const bool rowVector = r < sched->vectorizable.size()
+                                   ? sched->vectorizable[r]
+                                   : false;
         const bool tiledHere = tiled->tiled && r < tiled->bandEnd;
         const int64_t tileSize = tiledHere ? tiled->tileSizes[r] : 0;
         SymbolId varName =
@@ -220,6 +230,8 @@ struct Emitter {
             loop.var = varName;
             loop.begin = lo;
             loop.end = hi + 1;  // executor form: var < end
+            loop.parallel = rowParallel;
+            loop.vectorHint = rowVector;
             dimAtStack.push_back(static_cast<int32_t>(varDim));
             const SmallVector<uint32_t, 8> saved = body;
             body.clear();
@@ -262,10 +274,11 @@ struct Emitter {
                 std::string(symbols->text(varName)) + std::string("_t"));
             tile.begin = firstTile;
             tile.end = fullLast + 1;
+            tile.parallel = rowParallel;  // dist-0 rows: tiles are disjoint
             const uint32_t tileId = out.addNode(tile);
             dimAtStack.push_back(-1);  // tile index: not a scop dim
             MLK_TRYV(emitPointBody(varStmts, varDim, r, tileSize, -1,
-                                   tileId));
+                                   tileId, rowParallel, rowVector));
         }
         if (hasPartial) {
             KernelNode tile;
@@ -274,10 +287,11 @@ struct Emitter {
                 std::string(symbols->text(varName)) + std::string("_t"));
             tile.begin = lastTile;
             tile.end = lastTile + 1;
+            tile.parallel = rowParallel;
             const uint32_t tileId = out.addNode(tile);
             dimAtStack.push_back(-1);
             MLK_TRYV(emitPointBody(varStmts, varDim, r, tileSize, hi,
-                                   tileId));
+                                   tileId, rowParallel, rowVector));
         }
         return {};
     }
@@ -286,10 +300,13 @@ struct Emitter {
     /// it under the tile node `tileId` (which is already in `out`, with
     /// its stack slot pushed). `partialEnd >= 0` selects the constant
     /// inclusive end (partial tile); otherwise the affine end
-    /// t*ti + t - 1 is used.
+    /// t*ti + t - 1 is used. `rowParallel`/`rowVector` are the schedule
+    /// row's marks (tile and point loops share the row's parallelism;
+    /// the SIMD hint applies to the point enumeration).
     [[nodiscard]] Result<void> emitPointBody(
         SmallVector<uint32_t, 8>& varStmts, uint32_t varDim, uint32_t r,
-        int64_t tileSize, int64_t partialEnd, uint32_t tileId) {
+        int64_t tileSize, int64_t partialEnd, uint32_t tileId,
+        bool rowParallel, bool rowVector) {
         SymbolId varName =
             static_cast<std::size_t>(varDim) < scop->dimVars.size()
                 ? scop->dimVars[varDim]
@@ -302,6 +319,8 @@ struct Emitter {
         point.var = varName;
         point.beginCoeffs = SmallVector<int64_t, 4>(1, tileSize);
         point.beginOffset = 0;
+        point.parallel = rowParallel;
+        point.vectorHint = rowVector;  // SIMD-able innermost enumeration
         if (partialEnd >= 0) {
             point.end = partialEnd + 1;  // executor form: var < end
         } else {

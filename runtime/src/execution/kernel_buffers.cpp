@@ -222,6 +222,52 @@ struct ExprEvaluator {
     return bid < io.inputs.size() ? io.inputs[bid] : nullptr;
 }
 
+/// Row-wise ReduceSum for Call(ReduceSum) nodes (shared by the 1-D path
+/// and the multi-dim walker): Y[i] = sum_k A[i*K + k], accumulated in
+/// ascending k — the exact order the polyhedral accumulate chain
+/// preserves (Rule 90: bit-exact vs the transformed kernel).
+[[nodiscard]] Result<void> execReduceSumCall(const KernelModule& kernel,
+                                             const KernelBufferBindings& io,
+                                             CancellationToken* cancel,
+                                             const KernelNode& top) {
+    if (top.bufferA >= kernel.buffers.size() ||
+        top.bufferOut >= kernel.buffers.size()) {
+        return err(ErrorCode::InvalidGraph,
+                   "reducesum buffer id out of range");
+    }
+    const KernelBuffer& ba = kernel.buffers[top.bufferA];
+    const KernelBuffer& by = kernel.buffers[top.bufferOut];
+    if (ba.dims.size() != 2 || by.dims.size() != 1) {
+        return err(ErrorCode::InvalidGraph,
+                   "reducesum requires rank-2 input over rank-1 output");
+    }
+    const double* a = resolveInput(kernel, io, top.bufferA);
+    double* y = resolveOutput(kernel, io, top.bufferOut);
+    if (a == nullptr || y == nullptr) {
+        return err(ErrorCode::InvalidArgument,
+                   "reducesum buffers not bound by the caller");
+    }
+    const int64_t m = ba.dims[0];
+    const int64_t k = ba.dims[1];
+    if (by.dims[0] != m || k <= 0 || m <= 0) {
+        return err(ErrorCode::InvalidGraph,
+                   "reducesum operand shapes incompatible");
+    }
+    for (int64_t i = 0; i < m; ++i) {
+        if (cancel != nullptr && cancel->cancelled()) {
+            return err(ErrorCode::Cancelled,
+                       "kernel execution cancelled", 130);
+        }
+        const double* row = a + i * k;
+        double acc = 0.0;
+        for (int64_t p = 0; p < k; ++p) {
+            acc += row[p];
+        }
+        y[i] = acc;
+    }
+    return {};
+}
+
 void runElementwiseRange(const KernelNode& compute, const KernelNode& store,
                          const KernelModule& kernel, SymbolTable& symbols,
                          const KernelBufferBindings& io,
@@ -304,14 +350,119 @@ void gemmRowBlock(const double* a, const double* b, double* c,
 //     and forwards the last temp to the paired Store,
 //   - Store: writes (or accumulates into) the affine target,
 //   - Call: delegated to the legacy blocked GEMM path.
-// Single-threaded by design for v1 (Rule 12 roadmap; the legacy 1-D fast
-// path above keeps its chunked threading).
+// Parallel loops (KernelNode::parallel, set by poly.codegen from the
+// scheduler's zero-distance rows) run disjoint index chunks on threads:
+// the scheduler proved every dependence distance identically zero at
+// that level, so slabs read/write disjoint locations and any interleaving
+// produces the sequential result bit-exact (deterministic execution,
+// Rule 43). Threads are bounded by the same executor-owned decision as
+// the 1-D path (Rule 12/137); the chunking needs no locks.
 struct MultiDimWalker {
     const KernelModule& kernel;
     SymbolTable& symbols;
     const KernelBufferBindings& io;
     CancellationToken* cancel;
     SmallVector<int64_t, 8> vars{};
+
+    /// Thread outcome slot: without exceptions, each worker records its
+    /// terminal state here; the parent joins and returns the first
+    /// failure (deterministic diagnostics).
+    struct Slot {
+        bool failed{false};
+        ErrorCode code{ErrorCode::Ok};
+        uint32_t rule{0};
+        std::string msg{};
+    };
+
+    /// True when every child subtree of the loop contains only Loop/
+    /// Compute/Store nodes (the poly.codegen emission alphabet). Parallel
+    /// chunking is withheld otherwise (Call nodes intern symbols — not a
+    /// hot-path-safe operation under threading).
+    [[nodiscard]] bool loopBodyThreadSafe(const KernelNode& loop) const {
+        for (const uint32_t c : loop.children) {
+            if (!subtreeThreadSafe(c)) return false;
+        }
+        return true;
+    }
+
+    /// True when the subtree rooted at nodeId contains only Loop/Compute/
+    /// Store nodes (the poly.codegen emission alphabet). Parallel chunking
+    /// is withheld for anything else (Call interns symbols — not a hot-
+    /// path-safe operation under threading).
+    [[nodiscard]] bool subtreeThreadSafe(uint32_t nodeId) const {
+        if (nodeId >= kernel.nodes.size()) return false;
+        const KernelNode& n = kernel.nodes[nodeId];
+        switch (n.op) {  // Rule 78: exhaustive
+            case KernelOp::Loop:
+            case KernelOp::Compute:
+            case KernelOp::Store:
+                break;
+            default:
+                return false;
+        }
+        for (const uint32_t c : n.children) {
+            if (!subtreeThreadSafe(c)) return false;
+        }
+        return true;
+    }
+
+    /// Iterates one loop's body over the INCLUSIVE range [b, e], pushing
+    /// each induction value onto the local var stack (the thread entry
+    /// point for parallel chunks and the sequential path alike).
+    [[nodiscard]] Result<void> execLoopRange(const KernelNode& n,
+                                             const int64_t b,
+                                             const int64_t e) {
+        for (int64_t v = b; v <= e; ++v) {
+            if (cancel != nullptr && cancel->cancelled()) {
+                return err(ErrorCode::Cancelled,
+                           "kernel execution cancelled", 130);
+            }
+            vars.push_back(v);
+            // Children with Compute+Store pairing by sibling order.
+            for (std::size_t ci = 0; ci < n.children.size(); ++ci) {
+                const uint32_t cid = n.children[ci];
+                if (cid >= kernel.nodes.size()) {
+                    return err(ErrorCode::InvalidGraph,
+                               "walker: child id out of range");
+                }
+                const KernelNode& c = kernel.nodes[cid];
+                if (c.op == KernelOp::Compute) {
+                    const KernelNode* store = nullptr;
+                    if (ci + 1 < n.children.size() &&
+                        n.children[ci + 1] <
+                            kernel.nodes.size() &&
+                        kernel.nodes[n.children[ci + 1]].op ==
+                            KernelOp::Store) {
+                        store = &kernel.nodes[n.children[ci + 1]];
+                    }
+                    MLK_TRYV(execNode(cid, store));
+                    if (store != nullptr) ++ci;  // consume Store
+                    continue;
+                }
+                MLK_TRYV(execNode(cid, nullptr));
+            }
+            vars.pop_back();
+        }
+        return {};
+    }
+
+    /// Runs one parallel chunk on a fresh walker (own var stack seeded
+    /// with the enclosing dims) and records the terminal state.
+    static void runChunk(const KernelModule& kernel, SymbolTable& symbols,
+                         const KernelBufferBindings& io,
+                         CancellationToken* cancel,
+                         const SmallVector<int64_t, 8>& outerVars,
+                         const KernelNode& loop, const int64_t b,
+                         const int64_t e, Slot& slot) {
+        MultiDimWalker child{kernel, symbols, io, cancel, outerVars};
+        auto r = child.execLoopRange(loop, b, e);
+        if (!r.has_value()) {
+            slot.failed = true;
+            slot.code = r.error().code;
+            slot.rule = r.error().rule;
+            slot.msg = r.error().message;
+        }
+    }
 
     [[nodiscard]] Result<void> execNode(uint32_t nodeId,
                                         const KernelNode* pairedStore) {
@@ -353,38 +504,52 @@ struct MultiDimWalker {
                 } else if (n.end == constants::kKernelLoopDynamicBound) {
                     endInclusive = io.elements - 1;  // legacy dynamic form
                 }
-                for (int64_t v = begin; v <= endInclusive; ++v) {
-                    if (cancel != nullptr && cancel->cancelled()) {
-                        return err(ErrorCode::Cancelled,
-                                   "kernel execution cancelled", 130);
-                    }
-                    vars.push_back(v);
-                    // Children with Compute+Store pairing by sibling order.
-                    for (std::size_t ci = 0; ci < n.children.size(); ++ci) {
-                        const uint32_t cid = n.children[ci];
-                        if (cid >= kernel.nodes.size()) {
-                            return err(ErrorCode::InvalidGraph,
-                                       "walker: child id out of range");
-                        }
-                        const KernelNode& c = kernel.nodes[cid];
-                        if (c.op == KernelOp::Compute) {
-                            const KernelNode* store = nullptr;
-                            if (ci + 1 < n.children.size() &&
-                                n.children[ci + 1] <
-                                    kernel.nodes.size() &&
-                                kernel.nodes[n.children[ci + 1]].op ==
-                                    KernelOp::Store) {
-                                store = &kernel.nodes[n.children[ci + 1]];
+                if (endInclusive < begin) return {};  // empty loop
+                // Parallel-marked loop: disjoint chunks on threads when
+                // the trip is large enough to amortize the spawn and the
+                // subtree is in the thread-safe emission alphabet.
+                if (n.parallel && loopBodyThreadSafe(n)) {
+                    const std::size_t threads =
+                        decideThreads(kernel, symbols,
+                                      endInclusive - begin + 1);
+                    if (threads > 1) {
+                        std::vector<Slot> slots(threads);
+                        {
+                            std::vector<std::thread> pool;
+                            pool.reserve(threads);
+                            const int64_t total =
+                                endInclusive - begin + 1;
+                            const int64_t chunk =
+                                (total + static_cast<int64_t>(threads) -
+                                 1) /
+                                static_cast<int64_t>(threads);
+                            for (std::size_t t = 0; t < threads; ++t) {
+                                const int64_t b = begin +
+                                    static_cast<int64_t>(t) * chunk;
+                                const int64_t e =
+                                    std::min(b + chunk - 1, endInclusive);
+                                if (b > endInclusive) break;
+                                pool.emplace_back(
+                                    [this, &n, b, e, t, &slots]() {
+                                        runChunk(kernel, symbols, io,
+                                                 cancel, vars, n, b, e,
+                                                 slots[t]);
+                                    });
                             }
-                            MLK_TRYV(execNode(cid, store));
-                            if (store != nullptr) ++ci;  // consume Store
-                            continue;
+                            // joinPending is implicit: the destructor
+                            // joins; explicit join keeps error flow clear.
+                            for (auto& th : pool) th.join();
                         }
-                        MLK_TRYV(execNode(cid, nullptr));
+                        for (const Slot& s : slots) {
+                            if (s.failed) {
+                                return err(s.code, s.msg, s.rule);
+                            }
+                        }
+                        return {};
                     }
-                    vars.pop_back();
                 }
-                break;
+                MLK_TRYV(execLoopRange(n, begin, endInclusive));
+                return {};
             }
             case KernelOp::Compute: {
                 if (pairedStore == nullptr) {
@@ -459,7 +624,10 @@ struct MultiDimWalker {
             return err(ErrorCode::InvalidGraph,
                        "walker: negative store address");
         }
-        const double value = ev.run(-1);
+        // The legacy ElemA/ElemB operand kinds are rejected above, so the
+        // per-element index of the 1-D fast path is dead here; 0 keeps the
+        // shared evaluator's array accesses trivially in-bounds.
+        const double value = ev.run(0);
         double& slot = outP[flat];
         if (store.accumulate) {
             slot += value;
@@ -470,8 +638,11 @@ struct MultiDimWalker {
     }
 
     /// Legacy blocked GEMM for Call(MatMul) nodes (shared with the 1-D
-    /// executor).
+    /// executor); ReduceSum calls delegate to the shared free function.
     [[nodiscard]] Result<void> execGemm(const KernelNode& top) {
+        if (top.math == MathOp::ReduceSum) {
+            return execReduceSumCall(kernel, io, cancel, top);
+        }
         if (top.math != MathOp::MatMul) {
             return err(ErrorCode::UnsupportedCapability,
                        "no executor for call target", 121);
@@ -649,6 +820,10 @@ Result<void> executeKernelOnBuffers(const KernelModule& kernel,
                 break;
             }
             case KernelOp::Call: {
+                if (top.math == MathOp::ReduceSum) {
+                    MLK_TRYV(execReduceSumCall(kernel, io, cancel, top));
+                    break;
+                }
                 if (top.math != MathOp::MatMul) {
                     return err(ErrorCode::UnsupportedCapability,
                                "no executor for call target", 121);

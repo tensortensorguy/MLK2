@@ -10,11 +10,14 @@
 //   - Call(MathOp::MatMul) over rank-2 buffers:
 //       C[M,N] = A[M,K] * B[K,N]  →  init nest (i,j) + accumulate nest
 //       (i,j,k) with row-major flat operands,
+//   - Call(MathOp::ReduceSum) over rank-2 input / rank-1 output:
+//       Y[M] = sum_k A[M,K]  →  init nest (i) + accumulate nest (i,k)
+//       (the reduction dim becomes the carried inner dim; i is parallel),
 //   - 1-D fused elementwise loops whose output buffer has rank >= 2:
 //       rebuilt as an R-dim nest with broadcast-aware flat operand
 //       coefficients (numpy-style trailing-dim alignment; a dim of size 1
 //       in the input contributes coefficient 0),
-//   - ReduceSum/elementwise accumulate patterns are roadmap items.
+//   - softmax/elementwise multi-input classes are roadmap items.
 //
 // Contract (Rule 142):
 //   required  : kernel.built
@@ -128,6 +131,85 @@ constexpr Tier kPolyTiers[] = {Tier::Tier2, Tier::Tier3};
     out.push_back(store0);
     out.push_back(kLoop);
     out.push_back(jLoop);
+    out.push_back(iLoop);
+    return true;
+}
+
+/// Builds the ReduceSum init+accumulate nest for Call(ReduceSum) nodes:
+/// Y[M] = sum_k A[M,K]. S0: Y[i] = 0 (depth-1 nest); S1: Y[i] += A[i*K+k]
+/// (depth-2 nest). The reduction dim is the carried inner dim by the
+/// scheduler's dependence analysis (i carries nothing).
+[[nodiscard]] bool buildReduceSumNodes(const KernelModule& km,
+                                       const KernelNode& call,
+                                       SymbolTable& symbols,
+                                       SmallVector<KernelNode, 8>& out) {
+    if (call.bufferA >= km.buffers.size() ||
+        call.bufferOut >= km.buffers.size()) {
+        return false;
+    }
+    const auto& da = km.buffers[call.bufferA].dims;
+    const auto& dy = km.buffers[call.bufferOut].dims;
+    if (da.size() != 2 || dy.size() != 1) return false;
+    const int64_t M = da[0];
+    const int64_t K = da[1];
+    if (M <= 0 || K <= 0 || dy[0] != M) return false;
+
+    // S1 (accumulate): t0 = A[i][k]; Y[i] += t0. Coefficients are over
+    // this statement's own nest dims (i, k).
+    KernelNode compute1;
+    compute1.op = KernelOp::Compute;
+    KernelExpr ea;
+    ea.op = MathOp::Add;  // value carried by the ElemIdx operand
+    ea.a.kind = KernelOperand::Kind::ElemIdx;
+    ea.a.index = static_cast<int64_t>(call.bufferA);
+    ea.a.idxCoeffs = SmallVector<int64_t, 4>{K, 1};  // i*K + k
+    ea.b.kind = KernelOperand::Kind::Const;
+    ea.b.constValue = 0.0;
+    compute1.exprs.push_back(ea);
+    compute1.bufferA = call.bufferA;
+    KernelNode store1;
+    store1.op = KernelOp::Store;
+    store1.bufferOut = call.bufferOut;
+    store1.outIndexCoeffs = SmallVector<int64_t, 4>{1, 0};  // Y[i]
+    store1.accumulate = true;
+
+    // S0 (init): Y[i] = 0 over the depth-1 nest (i).
+    KernelNode compute0;
+    compute0.op = KernelOp::Compute;
+    KernelExpr zero;
+    zero.op = MathOp::Add;
+    zero.a.kind = KernelOperand::Kind::Const;
+    zero.a.constValue = 0.0;
+    zero.b.kind = KernelOperand::Kind::Const;
+    zero.b.constValue = 0.0;
+    compute0.exprs.push_back(zero);
+    KernelNode store0;
+    store0.op = KernelOp::Store;
+    store0.bufferOut = call.bufferOut;
+    store0.outIndexCoeffs = SmallVector<int64_t, 4>{1};  // Y[i]
+
+    // Nest: i { [S0]; k { [S1] } }.
+    KernelNode kLoop;
+    kLoop.op = KernelOp::Loop;
+    kLoop.var = symbols.intern("rk");
+    kLoop.begin = 0;
+    kLoop.end = K;
+    kLoop.children.push_back(out.size() + 0);  // compute1
+    kLoop.children.push_back(out.size() + 1);  // store1
+    KernelNode iLoop;
+    iLoop.op = KernelOp::Loop;
+    iLoop.var = symbols.intern("ri");
+    iLoop.begin = 0;
+    iLoop.end = M;
+    iLoop.children.push_back(out.size() + 3);  // compute0
+    iLoop.children.push_back(out.size() + 4);  // store0
+    iLoop.children.push_back(out.size() + 2);  // kLoop
+
+    out.push_back(compute1);
+    out.push_back(store1);
+    out.push_back(kLoop);
+    out.push_back(compute0);
+    out.push_back(store0);
     out.push_back(iLoop);
     return true;
 }
@@ -291,6 +373,9 @@ public:
         bool ok = false;
         if (root.op == KernelOp::Call && root.math == MathOp::MatMul) {
             ok = buildGemmNodes(km, root, *ctx.symbols, rebuilt);
+        } else if (root.op == KernelOp::Call &&
+                   root.math == MathOp::ReduceSum) {
+            ok = buildReduceSumNodes(km, root, *ctx.symbols, rebuilt);
         } else if (root.op == KernelOp::Loop) {
             // Locate the first Compute+Store pair in the children.
             const KernelNode* compute = nullptr;
