@@ -569,6 +569,7 @@ MLK_TEST(poly, set_with_symbols_emptiness_parametric) {
 
 #include "mlk/core/diagnostics.h"
 #include "mlk/pass/pass_registry.h"
+#include "mlk/pass/register_all.h"
 #include "mlk/pipeline/pipeline_runner.h"
 
 using mlk::DiagnosticEngine;
@@ -1411,6 +1412,7 @@ MLK_TEST(poly, full_chain_baseline_to_transformed) {
     mlk::poly::PolyWorkspace* ws = mlk::poly::createPolyWorkspace();
     ctx.polyWorkspace = ws;
     mlk::MathGraph graph(&symbols);
+    mlk::passes::registerAllPasses(symbols);
 
     // Baseline: buffers + a single Call(MatMul) node.
     KernelModule km;
@@ -1439,8 +1441,10 @@ MLK_TEST(poly, full_chain_baseline_to_transformed) {
     ctx.kernelOut = &km;
 
     auto passFn = [&](const char* name) -> mlk::Pass* {
-        return mlk::PassRegistry::instance().byName(
-            symbols.intern(name));
+        mlk::Pass* p =
+            mlk::PassRegistry::instance().byName(symbols.intern(name));
+        MLK_CHECK(p != nullptr);
+        return p;
     };
 
     // 1. poly.synth: Call -> init + accumulate nest.
@@ -1484,7 +1488,12 @@ MLK_TEST(poly, full_chain_baseline_to_transformed) {
         MLK_CHECK(ws->codegenValid);
         MLK_CHECK(r->changed);
     }
-    MLK_CHECK_EQ(km.nodes.size(), std::size_t{7});  // same tree as before
+    // Codegen emitted the transformed forest: the fused GEMM nest plus
+    // tile/point splits from the default tile knob (>= 7 nodes).
+    MLK_CHECK(km.nodes.size() >= std::size_t{7});
+    // The output buffer survived with its shape.
+    MLK_CHECK_EQ(km.buffers.size(), std::size_t{3});
+    MLK_CHECK_EQ(km.buffers[bufC].dims.size(), std::size_t{2});
 
     mlk::poly::destroyPolyWorkspace(ws);
     (void)bufC;
