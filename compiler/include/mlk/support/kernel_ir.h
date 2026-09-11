@@ -132,6 +132,15 @@ struct KernelNode {
     /// (SIMD-able; advisory — the executor decides, Rule 12).
     bool vectorHint{false};
     uint32_t guardId{constants::kInvalidId};  // GraphState ref (Rule 5)
+    /// Polyhedral extension (Guard): affine equality condition over the
+    /// ENCLOSING loop-var stack (outermost first). When guardCoeffs is
+    /// non-empty the node is a CLAST-style predicate: its children run
+    /// only where
+    ///   sum guardCoeffs[p]*var[p] + guardOffset == 0
+    /// (poly.codegen guarded statement re-entry; see docs/polyhedral_spec.md
+    /// §codegen). Empty => legacy speculative guard semantics (Rule 5).
+    SmallVector<int64_t, 4> guardCoeffs{};
+    int64_t guardOffset{0};
     /// Implementation family for math functions (libm / poly7; Rule 34:
     /// carries the verified accuracy contract reference).
     SymbolId family{kInvalidSymbolId};
@@ -144,6 +153,10 @@ struct KernelNode {
     /// True when the Store target is the polyhedral affine form.
     [[nodiscard]] bool hasAffineStore() const noexcept {
         return !outIndexCoeffs.empty();
+    }
+    /// True when the Guard carries the polyhedral affine-equality form.
+    [[nodiscard]] bool hasAffineGuard() const noexcept {
+        return !guardCoeffs.empty();
     }
 };
 

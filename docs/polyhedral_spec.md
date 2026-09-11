@@ -144,26 +144,44 @@ rule. Candidate LPs that error (budget/overflow, e.g. an LCM-realized row
 past the coefficient bound) reject the CANDIDATE (Rule 10), never the
 order or the schedule.
 
-Whole-schedule shape contract (order-search rejection): for every
-statement, the rows on which it varies must form a SUFFIX of the row
-sequence. A statement that turns row-constant and then varies again would
-need its payload inside a loop iteration slice it is pinned out of
-(guarded/split emission — codegen bails conservatively), so the search
-rejects such orders up front instead of failing at emission time.
+Whole-schedule shape contract (order-search rejection): every statement
+is either a foldable constant (all nonzero coefficients on pinned dims —
+its instances occupy exactly one pivot coordinate) or varies on the
+row's pivot with a positive coefficient. Row-constant statements MAY
+vary again at later rows: the emitter re-enters them under an
+affine-equality `Guard` at their folded value inside the loop (CLAST-
+style guarded re-entry — see §codegen). Two conditions keep the
+realized nest order equal to the schedule order:
 
-Parallel marking: a row is parallel iff every live dependence distance is
-identically zero on its refined slice (a row that *carries* a dependence —
-strictly positive distance — is sequential). The mark is conservative
-under the rational hull: a dependence that is integer-exactly zero but
-fractionally nonzero (transposed flat-index collisions) marks the row
-sequential; the `dist == 0` refinement restores exactness on later rows.
-The innermost parallel row is the vectorizable one. `verifyScheduleLegality`
-re-proves the final schedule lexicographically; `poly.verify` runs it
-before the backend.
+1. **Const-slot normalization** — every pivot-varying statement's
+   constant slot is zero in the LP, so the emitted loop position
+   realizes the schedule value exactly; over box domains containing the
+   origin this also forces all row coefficients non-negative (skew
+   terms stay forward everywhere).
+2. **Realizability gate** — for every live dependence, an integer-exact
+   check (lexmin witness over `{slice ∧ v_p(dst) - v_p(src) <= -1}`)
+   proves no instance pair runs BACKWARD in pivot-coordinate order; a
+   witness or a budget trip rejects the row (the stage falls through).
+   The identity fallback is gate-free — its unit coefficients and zero
+   slots make the distance form equal the coordinate form.
+
+Parallel marking: a row is parallel iff every live dependence distance
+is IDENTICALLY ZERO on the slice's INTEGER points (the instances that
+execute). The rational hull is a pre-filter only: `dist` is integer-
+affine over integer points, so "nonzero somewhere" is the union
+`dist >= 1 ∨ dist <= -1`, decided by `integerLeFormFeasible` (rational
+pre-filter + witness-verified lexmin; a budget trip marks sequential —
+Rule 22). A dependence that is integer-exactly zero but fractionally
+nonzero on the hull (transposed flat-index collisions, parity-tight
+relations) therefore KEEPS its parallel row — the rational-hull
+conservatism that cost one parallel row in earlier rounds is closed.
+The innermost parallel row is the vectorizable one.
+`verifyScheduleLegality` re-proves the final schedule lexicographically;
+`poly.verify` runs it before the backend.
 
 ## Codegen
 
-Emission walks schedule levels over the statement group:
+Emission walks schedule levels over the statement group (CLAST-lite):
 
 - **Separator levels** (all-constant rows) emit statements in
   (time, origOrder) order.
@@ -177,11 +195,29 @@ Emission walks schedule levels over the statement group:
   (`canEmitBefore`, conservative box check). Pin-folding also applies to
   payload re-indexing: coefficients on pinned dims fold into the ElemIdx
   / store offset.
+- **Guarded re-entry** — a row-constant statement whose folded value
+  falls INSIDE the loop range (or whose hoisting is unsafe) re-enters
+  the loop: a `Guard` node with the affine-equality form
+  `1*var - value == 0` wraps its payload, and its remaining schedule
+  rows continue in the fused deeper loops (`for k { for i { for j {
+  if (k == 0) init; acc } } }` — the vectorized fused GEMM the suffix
+  shape contract used to reject). Guards accumulate per statement and
+  materialize as nested Guard nodes at every payload emission (tile
+  part duplication replays them). Soundness: the pivot is PINNED for
+  every row-constant statement (its instances occupy exactly one
+  coordinate), and the realizability gate (§scheduling) keeps every
+  live pair's pivot-coordinate order forward, so the guard fires at the
+  statement's schedule position and the exhaust-level emission replays
+  statement pairs in origOrder (the tie-break the schedule proves).
 - **Tiled band levels** emit a TILE loop (constant bounds
   `floor(lo/t)`, `floor(hi/t)`) plus a POINT loop with affine bounds
   `t*ti … t*ti + t - 1`; a trailing partial tile (when `(hi+1) % t != 0`)
-  carries a constant clipped end. Inner-tree duplication per split is
-  bounded by `kPolyMaxCodegenCopies`.
+  carries a constant clipped end. Tile parts are SIBLING instance
+  ranges: the emission marks and guard state restore between parts so
+  the partial part replays the same statements for its own point range
+  (bounded by `kPolyMaxCodegenCopies`). The point loop's affine bounds
+  are STACK-ABSOLUTE coefficient vectors with the tile coefficient at
+  the tile-index slot.
 - Payloads replay the statement Compute chain and Store (accumulate
   preserved) with ElemIdx operands re-indexed from scop-dim to
   stack-position coefficients; store targets map the same way.
@@ -189,15 +225,20 @@ Emission walks schedule levels over the statement group:
 Kernel IR extensions (all backward compatible, hashed and serialized per
 Rule 24): `KernelOperand::Kind::ElemIdx` (buffer + per-stack-position
 coefficients + offset), affine loop bounds (`beginCoeffs/endCoeffs` over
-the enclosing var stack), buffer-dim loop bounds (`endBuf/endDim`),
-`Store::accumulate`, and the Loop execution marks `parallel`/
-`vectorHint` (set by codegen from the scheduler's row marks; the walker
-threads `parallel` loops, `vectorHint` is advisory — see Executor).
+the enclosing var stack, STACK-ABSOLUTE — coeffs[p] multiplies vars[p]),
+buffer-dim loop bounds (`endBuf/endDim`), `Store::accumulate`, the Loop
+execution marks `parallel`/`vectorHint` (set by codegen from the
+scheduler's row marks; the walker threads `parallel` loops, `vectorHint`
+is advisory — see Executor), and the Guard affine-equality form
+(`guardCoeffs/guardOffset`: children run only where the form over the
+enclosing var stack evaluates to zero; empty coeffs keep the legacy
+speculative-guard semantics, Rule 5).
 
 Bail conditions (conservative, baseline preserved): statements neither
-pin-foldable nor pivot-varying (scheduler shape contract violation),
-unaligned tile lower bounds, copy-budget exhaustion, unbounded levels,
-accesses referencing unpinned unspent dims.
+pin-foldable-with-pinned-pivot nor pivot-varying (scheduler shape
+contract violation), unaligned tile lower bounds, copy-budget
+exhaustion, unbounded levels, accesses referencing unpinned unspent
+dims, guard dims unbound at emission.
 
 ## Executor
 
@@ -214,12 +255,16 @@ slabs read/write disjoint locations at that level, so any interleaving
 produces the sequential result bit-exact (Rule 43) — no locks
 (Rule 137). Each worker records its terminal state in a slot; the parent
 joins and returns the first failure deterministically.
+Affine-equality `Guard` nodes evaluate their form on the thread-local
+var stack (overflow-checked builtins) and skip their children when it is
+nonzero; Guard belongs to the thread-safe emission alphabet (the
+predicate reads only the var stack).
 `Call(ReduceSum)` executes as a row-wise trailing-dim sum in ascending-k
 order — exactly the order the transformed accumulate chain preserves.
 
 ## Verification story
 
-- Unit: 43 tests in `tests/unit/unit_poly.cpp` covering the engine
+- Unit: 46 tests in `tests/unit/unit_poly.cpp` covering the engine
   (rationals, sets, FM, lexmin, maps), extraction, dependences, LP,
   scheduling legality + determinism, FUSION EMERGENCE (producer/consumer
   single parallel row + bit-exact fused execution), wavefront dependences,
@@ -227,8 +272,13 @@ order — exactly the order the transformed accumulate chain preserves.
   pass chain, differential execution, LOOP INTERCHANGE emergence
   (stride-fit order search + bit-exact permuted execution), THREADED
   parallel-loop determinism (parallel/vector marks + bit-exact under
-  chunked threads), and the ReduceSum synthesis class (baseline Call
-  path vs transformed accumulate chain, bit-exact both ways).
+  chunked threads), the ReduceSum synthesis class, INTEGER-EXACT
+  parallel marking (a parity-tight slice keeps its parallel row where
+  the rational hull marks it sequential), GUARD predicate execution
+  (the affine-equality form filters children), and the TILED GUARDED
+  GEMM (full tiles + partial tails across two levels, bit-exact vs the
+  untiled schedule — the tile-part replay and stack-absolute point
+  bounds).
 - Differential (Rules 43/85/90): the transformed GEMM executes over dense
   buffers and matches a straightforward reference (bit-exact for the
   no-reassociation class; accumulation order per output cell preserved).
@@ -237,9 +287,6 @@ order — exactly the order the transformed accumulate chain preserves.
 
 ## Roadmap
 
-- Full CLAST-style codegen (guarded/split loops) — unlocks orders where a
-  statement is pinned out of interior iteration slices (the whole-schedule
-  shape contract rejects them today) and piecewise bounds.
 - Full Pluto ILP locality objective over all rows simultaneously (the
   order search composes exact per-row scores; an ILP with memory-reuse
   terms could weight fusion across nests beyond the carried-distance
@@ -248,8 +295,12 @@ order — exactly the order the transformed accumulate chain preserves.
   requires constant bounds after workload specialization.
 - Softmax/multi-input elementwise synthesis classes; >2-input elementwise
   (needs the baseline buffer-materialization limit lifted).
-- Integer-exact parallel marking (the rational-hull conservativeness on
-  transposed tied dependences costs one parallel row).
 - Multiple SCoP regions per kernel.
+- Piecewise (split) codegen for guarded bands: the guard predicate is
+  correct but runs per iteration; splitting the separator iteration out
+  of the loop range removes the branch from hot loops.
+- Per-statement loop-bound generalization: fused statements currently
+  share the intersection of their pivot bounds (the synth classes agree;
+  disagreeing domains bail via the shape contract).
 - `poly_tile_size` autotuner integration over the order dimension (the
   search is compile-time exact; tile sizes remain the measured knob).

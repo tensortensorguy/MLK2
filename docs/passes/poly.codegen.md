@@ -2,7 +2,7 @@
 
 **Kind**: Lowering (Tier 2/3, kill switch: `poly.codegen`)
 
-regenerate the kernel loop forest: fused loops, hoisted pinned statements, tile/point pairs with affine bounds, re-indexed ElemIdx payloads
+regenerate the kernel loop forest (CLAST-lite): fused loops, hoisted pinned statements, GUARDED re-entry (an affine-equality Guard node fires a row-constant statement at its folded value inside the loop while its remaining rows continue in the fused deeper loops), tile/point pairs with stack-absolute affine bounds (tile parts are sibling instance ranges — the partial part replays the same statements), re-indexed ElemIdx payloads
 
 ## Contract (Rule 142)
 

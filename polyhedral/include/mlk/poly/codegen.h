@@ -3,14 +3,26 @@
 // Emits a new KernelModule node tree from the Scop, the affine schedule
 // and the tiling record (see docs/polyhedral_spec.md §codegen).
 //
-// Supported schedule class (documented; conservative bail otherwise):
-//   each schedule row used by a statement group is either CONSTANT for
-//   every statement in the group (a separator level: statement-order
-//   emission) or a pure permutation ±e_d of one dimension (a loop level).
-// This covers fusion, fission, interchange, tiling and the parallel /
-// vector markings produced by the scheduler for the poly.synth kernel
-// class. Non-unimodular rows (skewed schedules) bail — the baseline
-// kernel stays in place (Rules 62/102).
+// Supported schedule class (CLAST-lite; conservative bail otherwise):
+//   - levels where every alive statement is CONSTANT for the level are
+//     separators or hoisting/guard points: statements emit before/after
+//     the level's loop when their folded value falls outside the range,
+//     and RE-ENTER the loop under an affine-equality Guard node when it
+//     falls inside (the statement's remaining rows continue in the
+//     fused deeper loops — the guarded init in a fused GEMM),
+//   - levels where statements vary emit ONE shared loop over the row's
+//     pivot dim (fusion); every statement is either pivot-varying or
+//     row-constant with the pivot PINNED for it (its instances occupy
+//     exactly one coordinate — anything else bails),
+//   - tiled band rows emit a TILE loop over floor(value / t) and a
+//     POINT loop with bounds clipped to the statement box (affine in
+//     the tile index through KernelNode's affine-bounds extension).
+// This covers fusion, fission, interchange, skew-shaped schedules, the
+// parallel / vector markings produced by the scheduler, and guarded
+// statement re-entry for the poly.synth kernel class. Non-realizable
+// rows (a live pair whose pivot-coordinate order runs backward) are
+// rejected by the scheduler's realizability gate — the baseline kernel
+// stays in place otherwise (Rules 62/102).
 //
 // Emission is level-by-level over the statement group:
 //   - constant statements (domain fully pinned at this level) with value

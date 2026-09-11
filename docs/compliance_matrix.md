@@ -171,6 +171,8 @@ expiry).
 | 160 | Governance/ADRs/compliance/hermetic | doc (this matrix + ADRs), build (hermetic default) |
 | 161 | Polyhedral schedules are legal (dependences preserved) or the baseline kernel is kept | test (unit_poly legality + differential execution), poly.verify in-pipeline |
 | 162 | Polyhedral engine decisions are exact (no rounded legality) | arch (exact rationals, checked int64, tri-state Feasibility), test (unit_poly) |
+| 163 | Polyhedral guarded re-entry is schedule-legal (const-slot normalization + integer-exact pivot-coordinate realizability gate) | arch (polyhedral_spec §scheduling/codegen), test (unit_poly guarded GEMM structure + bit-exact tiled/untiled differential) |
+| 164 | Parallel/vector marks follow INTEGER instance points, not the rational hull; guard execution is thread-safe (var-stack predicate only) | arch (integerLeFormFeasible tri-state, Rule 22), test (unit_poly parity-tight marking + guard predicate execution) |
 
 ## Slop checklist (Rule 84) — verified for this tree
 

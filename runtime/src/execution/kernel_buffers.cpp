@@ -386,8 +386,10 @@ struct MultiDimWalker {
     }
 
     /// True when the subtree rooted at nodeId contains only Loop/Compute/
-    /// Store nodes (the poly.codegen emission alphabet). Parallel chunking
-    /// is withheld for anything else (Call interns symbols — not a hot-
+    /// Store/Guard nodes (the poly.codegen emission alphabet). Guard
+    /// predicates read the thread-local var stack only, so a guarded
+    /// region is as thread-safe as its children. Parallel chunking is
+    /// withheld for anything else (Call interns symbols — not a hot-
     /// path-safe operation under threading).
     [[nodiscard]] bool subtreeThreadSafe(uint32_t nodeId) const {
         if (nodeId >= kernel.nodes.size()) return false;
@@ -396,6 +398,7 @@ struct MultiDimWalker {
             case KernelOp::Loop:
             case KernelOp::Compute:
             case KernelOp::Store:
+            case KernelOp::Guard:
                 break;
             default:
                 return false;
@@ -404,6 +407,33 @@ struct MultiDimWalker {
             if (!subtreeThreadSafe(c)) return false;
         }
         return true;
+    }
+
+    /// Iterates one node list with Compute+Store pairing by sibling
+    /// order (shared by loop bodies and guarded regions).
+    [[nodiscard]] Result<void> execChildList(
+        const SmallVector<uint32_t, 4>& children) {
+        for (std::size_t ci = 0; ci < children.size(); ++ci) {
+            const uint32_t cid = children[ci];
+            if (cid >= kernel.nodes.size()) {
+                return err(ErrorCode::InvalidGraph,
+                           "walker: child id out of range");
+            }
+            const KernelNode& c = kernel.nodes[cid];
+            if (c.op == KernelOp::Compute) {
+                const KernelNode* store = nullptr;
+                if (ci + 1 < children.size() &&
+                    children[ci + 1] < kernel.nodes.size() &&
+                    kernel.nodes[children[ci + 1]].op == KernelOp::Store) {
+                    store = &kernel.nodes[children[ci + 1]];
+                }
+                MLK_TRYV(execNode(cid, store));
+                if (store != nullptr) ++ci;  // consume Store
+                continue;
+            }
+            MLK_TRYV(execNode(cid, nullptr));
+        }
+        return {};
     }
 
     /// Iterates one loop's body over the INCLUSIVE range [b, e], pushing
@@ -419,28 +449,7 @@ struct MultiDimWalker {
             }
             vars.push_back(v);
             // Children with Compute+Store pairing by sibling order.
-            for (std::size_t ci = 0; ci < n.children.size(); ++ci) {
-                const uint32_t cid = n.children[ci];
-                if (cid >= kernel.nodes.size()) {
-                    return err(ErrorCode::InvalidGraph,
-                               "walker: child id out of range");
-                }
-                const KernelNode& c = kernel.nodes[cid];
-                if (c.op == KernelOp::Compute) {
-                    const KernelNode* store = nullptr;
-                    if (ci + 1 < n.children.size() &&
-                        n.children[ci + 1] <
-                            kernel.nodes.size() &&
-                        kernel.nodes[n.children[ci + 1]].op ==
-                            KernelOp::Store) {
-                        store = &kernel.nodes[n.children[ci + 1]];
-                    }
-                    MLK_TRYV(execNode(cid, store));
-                    if (store != nullptr) ++ci;  // consume Store
-                    continue;
-                }
-                MLK_TRYV(execNode(cid, nullptr));
-            }
+            MLK_TRYV(execChildList(n.children));
             vars.pop_back();
         }
         return {};
@@ -568,9 +577,37 @@ struct MultiDimWalker {
                 // Consumed by the pairing above or carry no semantics
                 // for this walker.
                 break;
-            case KernelOp::Guard:
-                // Guarded execution belongs to ExecutionEngine (Rule 5).
+            case KernelOp::Guard: {
+                if (!n.hasAffineGuard()) {
+                    // Speculative guarded execution belongs to
+                    // ExecutionEngine (Rule 5); nothing here.
+                    break;
+                }
+                // CLAST-style affine-equality predicate: children run
+                // only where sum coeffs[p]*vars[p] + offset == 0. The
+                // form reads the thread-local var stack only; every
+                // accumulation is overflow-checked (Rule 73: no silent
+                // wraparound).
+                int64_t acc = n.guardOffset;
+                for (std::size_t p = 0; p < n.guardCoeffs.size(); ++p) {
+                    const int64_t c = n.guardCoeffs[p];
+                    if (c == 0) continue;
+                    if (p >= vars.size()) {
+                        return err(ErrorCode::InvalidGraph,
+                                   "walker: guard references an unbound "
+                                   "loop var");
+                    }
+                    int64_t term = 0;
+                    if (__builtin_mul_overflow(c, vars[p], &term) ||
+                        __builtin_add_overflow(acc, term, &acc)) {
+                        return err(ErrorCode::ResourceExhausted,
+                                   "walker: guard form overflow");
+                    }
+                }
+                if (acc != 0) break;  // condition false: skip the region
+                MLK_TRYV(execChildList(n.children));
                 break;
+            }
             case KernelOp::Call:
                 MLK_TRYV(execGemm(n));
                 break;
@@ -699,8 +736,9 @@ Result<void> executeKernelOnBuffers(const KernelModule& kernel,
         return err(ErrorCode::InvalidGraph, "kernel module has no nodes");
     }
     // Multi-dim detection: any ElemIdx operand, affine loop bound,
-    // accumulate store, or buffer-dim loop bound routes the whole module
-    // through the tree walker (uniform handling of mixed forests).
+    // accumulate store, buffer-dim loop bound, affine store target, or
+    // affine guard routes the whole module through the tree walker
+    // (uniform handling of mixed forests).
     bool multiDim = false;
     for (const KernelNode& n : kernel.nodes) {
         if (n.accumulate || !n.beginCoeffs.empty() ||
@@ -709,9 +747,9 @@ Result<void> executeKernelOnBuffers(const KernelModule& kernel,
              n.endBuf != constants::kInvalidId)) {
             multiDim = true;
         }
-        if (n.op == KernelOp::Loop && n.end >= 0 &&
-            kernel.buffers.size() > 0 && false) {
-            multiDim = true;  // (dim-bound loops detected via endBuf above)
+        if (n.hasAffineStore() ||
+            (n.op == KernelOp::Guard && n.hasAffineGuard())) {
+            multiDim = true;
         }
         for (const KernelExpr& e : n.exprs) {
             if (e.a.kind == KernelOperand::Kind::ElemIdx ||

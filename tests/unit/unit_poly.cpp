@@ -1648,9 +1648,12 @@ MLK_TEST(poly, codegen_gemm_fused_nest) {
                                               symbols);
     MLK_CHECK(out.has_value());
     if (!out.has_value()) return;
-    // Expected tree: for i { for j { S0(init); for k { S1(acc) } } }:
-    // flat arena: [c1, s1, kLoop, c0, s0, jLoop, iLoop] with iLoop the
-    // single root.
+    // Expected tree (the guarded-fused schedule [i, k, j]: the order
+    // search picked the innermost-j SIMD stride fit; the k row carries
+    // the reduction chain; the init statement is row-constant at the k
+    // row and RE-ENTERS the k loop under a CLAST guard):
+    //   for i(par) { for k(seq) { for j(par, vector) {
+    //     guard(k == 0) { C[i,j] = 0 }; C[i,j] += A[i,k] * B[k,j] } } }
     const KernelModule& km2 = *out;
     MLK_CHECK_EQ(km2.buffers.size(), km.buffers.size());
     MLK_CHECK(!km2.nodes.empty());
@@ -1672,36 +1675,56 @@ MLK_TEST(poly, codegen_gemm_fused_nest) {
     }
     MLK_CHECK(root != 0xFFFFFFFFu);
     if (root == 0xFFFFFFFFu) return;
-    // i loop with one child: the j loop.
+    // i loop: the outermost parallel row (zero-distance).
     const KernelNode& iLoop = km2.nodes[root];
     MLK_CHECK_EQ(iLoop.begin, 0);
     MLK_CHECK_EQ(iLoop.end, kTestM);
+    MLK_CHECK(iLoop.parallel);
     MLK_CHECK_EQ(iLoop.children.size(), 1);
-    const KernelNode& jLoop = km2.nodes[iLoop.children[0]];
+    // k loop: carries the reduction chain (sequential).
+    const KernelNode& kLoop = km2.nodes[iLoop.children[0]];
+    MLK_CHECK_EQ(kLoop.op, mlk::KernelOp::Loop);
+    MLK_CHECK_EQ(kLoop.end, kTestK);
+    MLK_CHECK(!kLoop.parallel);
+    MLK_CHECK_EQ(kLoop.children.size(), 1);
+    // j loop: parallel + SIMD hint (the stride-fit winner row).
+    const KernelNode& jLoop = km2.nodes[kLoop.children[0]];
+    MLK_CHECK_EQ(jLoop.op, mlk::KernelOp::Loop);
     MLK_CHECK_EQ(jLoop.end, kTestN);
-    // j body: [init compute, init store, k loop]
+    MLK_CHECK(jLoop.parallel);
+    MLK_CHECK(jLoop.vectorHint);
+    // j body: [guard(init), acc compute, acc store] — the guarded init
+    // pair precedes the accumulate pair (origOrder tie-break at the
+    // fully-tied schedule vectors).
     MLK_CHECK_EQ(jLoop.children.size(), 3);
-    const KernelNode& initC = km2.nodes[jLoop.children[0]];
-    const KernelNode& initS = km2.nodes[jLoop.children[1]];
-    const KernelNode& kLoop = km2.nodes[jLoop.children[2]];
+    const KernelNode& guard = km2.nodes[jLoop.children[0]];
+    const KernelNode& accC = km2.nodes[jLoop.children[1]];
+    const KernelNode& accS = km2.nodes[jLoop.children[2]];
+    MLK_CHECK_EQ(guard.op, mlk::KernelOp::Guard);
+    // Guard condition over the stack [pi, pk, pj]: the short form
+    // 0*pi + 1*pk + 0 == 0 (coeffs run up to the guarded dim's stack
+    // position) — the init fires exactly at k == 0 (its folded row-0
+    // value).
+    MLK_CHECK(guard.hasAffineGuard());
+    MLK_CHECK_EQ(guard.guardCoeffs.size(), std::size_t{2});
+    MLK_CHECK_EQ(guard.guardCoeffs[1], 1);
+    MLK_CHECK_EQ(guard.guardOffset, 0);
+    MLK_CHECK_EQ(guard.children.size(), 2);
+    const KernelNode& initC = km2.nodes[guard.children[0]];
+    const KernelNode& initS = km2.nodes[guard.children[1]];
     MLK_CHECK_EQ(initC.op, mlk::KernelOp::Compute);
     MLK_CHECK_EQ(initS.op, mlk::KernelOp::Store);
     MLK_CHECK(!initS.accumulate);
-    MLK_CHECK_EQ(kLoop.op, mlk::KernelOp::Loop);
-    MLK_CHECK_EQ(kLoop.end, kTestK);
-    // k body: [acc compute, acc store] with accumulate = true.
-    MLK_CHECK_EQ(kLoop.children.size(), 2);
-    const KernelNode& accC = km2.nodes[kLoop.children[0]];
-    const KernelNode& accS = km2.nodes[kLoop.children[1]];
+    // Acc pair: accumulate = true.
     MLK_CHECK_EQ(accC.op, mlk::KernelOp::Compute);
     MLK_CHECK_EQ(accS.accumulate, true);
     // Acc chain: [A load, B load, mul] with stack-mapped operands:
-    // stack = [i, j, k] -> A coeffs [K,0,1] unchanged for identity order.
+    // stack = [i, k, j] -> A coeffs [K, 1, 0] (unit stride along k).
     MLK_CHECK_EQ(accC.exprs.size(), 3);
     MLK_CHECK(accC.exprs[0].a.kind == mlk::KernelOperand::Kind::ElemIdx);
     MLK_CHECK_EQ(accC.exprs[0].a.idxCoeffs.size(), 3);
     MLK_CHECK_EQ(accC.exprs[0].a.idxCoeffs[0], kTestK);
-    MLK_CHECK_EQ(accC.exprs[0].a.idxCoeffs[2], 1);
+    MLK_CHECK_EQ(accC.exprs[0].a.idxCoeffs[1], 1);
 }
 
 MLK_TEST(poly, codegen_tiled_gemm) {
@@ -2309,6 +2332,299 @@ MLK_TEST(poly, reducesum_synth_pipeline_bitexact) {
     }
     MLK_CHECK_EQ(mismatches, 0);
     mlk::poly::destroyPolyWorkspace(ws);
+}
+
+// ---------------------------------------------------------------------------
+// Round 13: integer-exact marking, CLAST guard execution, multi-part tiling.
+// ---------------------------------------------------------------------------
+
+MLK_TEST(poly, pluto_integer_exact_parallel_mark) {
+    // The rational hull of a dependence slice can admit fractional
+    // distances that no INTEGER instance pair realizes. The parallel
+    // mark must follow the integer points — the instances that execute
+    // — not the hull: the hand-built relation below holds
+    // 2*i_dst - 2*i_src >= 0 and 2*i_src - 2*i_dst + 1 >= 0, i.e.
+    // i_dst == i_src on integers but i_dst - i_src = 1/2 on the hull.
+    // The identity row is therefore PARALLEL (the old rational
+    // max-distance check marked it sequential).
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer y;
+    y.name = symbols.intern("y");
+    y.dims = SmallVector<int64_t, 4>{8};
+    y.isOutput = true;
+    const uint32_t by = km.addBuffer(y);
+    const SymbolId vi = symbols.intern("i");
+
+    // S0: y[i] = 1 (overwrite).
+    KernelNode compute0;
+    compute0.op = mlk::KernelOp::Compute;
+    KernelExpr one;
+    one.op = mlk::MathOp::Add;
+    one.a.kind = KernelOperand::Kind::Const;
+    one.a.constValue = 1.0;
+    compute0.exprs.push_back(one);
+    KernelNode store0;
+    store0.op = mlk::KernelOp::Store;
+    store0.bufferOut = by;
+    store0.outIndexCoeffs = SmallVector<int64_t, 4>{1};
+
+    // S1: y[i] = y[i] + 1 (reads the out buffer; dist-0 tie in program
+    // order).
+    KernelNode compute1;
+    compute1.op = mlk::KernelOp::Compute;
+    KernelExpr inc;
+    inc.op = mlk::MathOp::Add;
+    inc.a.kind = KernelOperand::Kind::ElemIdx;
+    inc.a.index = static_cast<int64_t>(by);
+    inc.a.idxCoeffs = SmallVector<int64_t, 4>{1};
+    inc.b.kind = KernelOperand::Kind::Const;
+    inc.b.constValue = 1.0;
+    compute1.exprs.push_back(inc);
+    KernelNode store1;
+    store1.op = mlk::KernelOp::Store;
+    store1.bufferOut = by;
+    store1.outIndexCoeffs = SmallVector<int64_t, 4>{1};
+
+    KernelNode loop;
+    loop.op = mlk::KernelOp::Loop;
+    loop.var = vi;
+    loop.begin = 0;
+    loop.end = 8;
+    {
+        const uint32_t c0 = km.addNode(compute0);
+        const uint32_t s0 = km.addNode(store0);
+        const uint32_t c1 = km.addNode(compute1);
+        const uint32_t s1 = km.addNode(store1);
+        loop.children.push_back(c0);
+        loop.children.push_back(s0);
+        loop.children.push_back(c1);
+        loop.children.push_back(s1);
+        (void)km.addNode(loop);
+    }
+
+    auto scop = mlk::poly::extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+
+    // Hand-built dependence over the product space {i_src, i_dst}: both
+    // domains in [0, 8), the parity-tight pair constraints. Integer
+    // points: i_dst == i_src only; the rational hull adds the fractional
+    // offset 1/2.
+    mlk::poly::Dependence dep;
+    dep.srcStmt = 0;
+    dep.dstStmt = 1;
+    dep.kind = mlk::poly::DepKind::Raw;
+    dep.relation.space = VarSpace{2, 0};
+    {
+        mlk::poly::Polyhedron p;
+        p.space = VarSpace{2, 0};
+        const auto row = [](int64_t a, int64_t b, int64_t c) {
+            mlk::poly::ConstraintRow r;
+            r.isEquality = false;
+            r.coeffs = SmallVector<int64_t, 8>{a, b};
+            r.constant = c;
+            return r;
+        };
+        p.addRow(row(1, 0, 0));   // i_src >= 0
+        p.addRow(row(-1, 0, 7));  // i_src <= 7
+        p.addRow(row(0, 1, 0));   // i_dst >= 0
+        p.addRow(row(0, -1, 7));  // i_dst <= 7
+        p.addRow(row(-2, 2, 0));  // 2 i_dst - 2 i_src >= 0
+        p.addRow(row(2, -2, 1));  // 2 i_src - 2 i_dst + 1 >= 0
+        dep.relation.disjuncts.push_back(std::move(p));
+    }
+    SmallVector<mlk::poly::Dependence, 16> deps;
+    deps.push_back(std::move(dep));
+
+    auto sched = mlk::poly::computePlutoSchedule(*scop, deps);
+    MLK_CHECK(sched.has_value());
+    if (!sched.has_value()) return;
+    MLK_CHECK_EQ(sched->rows.size(), std::size_t{1});
+    if (sched->rows.size() == 1) {
+        // THE assertion: integer-exact zero distance on the slice keeps
+        // the row parallel (the rational hull alone would mark it
+        // sequential).
+        MLK_CHECK(sched->parallel[0]);
+    }
+    auto legal = mlk::poly::verifyScheduleLegality(*scop, deps, *sched);
+    MLK_CHECK(legal.has_value() && *legal);
+
+    // Differential execution: the fused parallel loop replays S0 then
+    // S1 per instance (origOrder tie-break at the tied vectors) —
+    // y == 2 everywhere, bit-exact (Rule 43).
+    mlk::poly::TiledInfo untiled;
+    auto out = mlk::poly::emitScheduledKernel(*scop, *sched, untiled, km,
+                                              symbols);
+    MLK_CHECK(out.has_value());
+    if (!out.has_value()) return;
+    SmallVector<double, 8> bufY(8, 0.0);
+    mlk::KernelBufferBindings io;
+    io.outputs.push_back(bufY.data());
+    io.elements = 8;
+    auto r = mlk::executeKernelOnBuffers(*out, symbols, io, nullptr);
+    MLK_CHECK(r.has_value());
+    if (!r.has_value()) return;
+    for (std::size_t i = 0; i < 8; ++i) {
+        MLK_CHECK(bufY[i] == 2.0);
+    }
+}
+
+MLK_TEST(poly, runtime_guard_predicate_execution) {
+    // The CLAST-style affine-equality Guard executes its children only
+    // where 1*i - 2 == 0: exactly one iteration performs the guarded
+    // write; the unguarded sibling writes everywhere.
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer y;
+    y.name = symbols.intern("y");
+    y.dims = SmallVector<int64_t, 4>{6};
+    y.isOutput = true;
+    KernelBuffer z;
+    z.name = symbols.intern("z");
+    z.dims = SmallVector<int64_t, 4>{6};
+    z.isOutput = true;
+    const uint32_t by = km.addBuffer(y);
+    const uint32_t bz = km.addBuffer(z);
+    const SymbolId vi = symbols.intern("i");
+
+    KernelNode computeG;
+    computeG.op = mlk::KernelOp::Compute;
+    KernelExpr five;
+    five.op = mlk::MathOp::Add;
+    five.a.kind = KernelOperand::Kind::Const;
+    five.a.constValue = 5.0;
+    computeG.exprs.push_back(five);
+    KernelNode storeG;
+    storeG.op = mlk::KernelOp::Store;
+    storeG.bufferOut = by;
+    storeG.outIndexCoeffs = SmallVector<int64_t, 4>{1};
+
+    KernelNode computeZ;
+    computeZ.op = mlk::KernelOp::Compute;
+    KernelExpr two;
+    two.op = mlk::MathOp::Add;
+    two.a.kind = KernelOperand::Kind::Const;
+    two.a.constValue = 2.0;
+    computeZ.exprs.push_back(two);
+    KernelNode storeZ;
+    storeZ.op = mlk::KernelOp::Store;
+    storeZ.bufferOut = bz;
+    storeZ.outIndexCoeffs = SmallVector<int64_t, 4>{1};
+
+    KernelNode guard;
+    guard.op = mlk::KernelOp::Guard;
+    guard.guardCoeffs = SmallVector<int64_t, 4>{1};
+    guard.guardOffset = -2;  // i - 2 == 0
+
+    KernelNode loop;
+    loop.op = mlk::KernelOp::Loop;
+    loop.var = vi;
+    loop.begin = 0;
+    loop.end = 6;
+    {
+        const uint32_t cg = km.addNode(computeG);
+        const uint32_t sg = km.addNode(storeG);
+        guard.children.push_back(cg);
+        guard.children.push_back(sg);
+        const uint32_t gid = km.addNode(guard);
+        const uint32_t cz = km.addNode(computeZ);
+        const uint32_t sz = km.addNode(storeZ);
+        loop.children.push_back(gid);
+        loop.children.push_back(cz);
+        loop.children.push_back(sz);
+        (void)km.addNode(loop);
+    }
+
+    SmallVector<double, 8> bufY(6, 0.0), bufZ(6, 0.0);
+    mlk::KernelBufferBindings io;
+    io.outputs.push_back(bufY.data());
+    io.outputs.push_back(bufZ.data());
+    io.elements = 6;
+    auto r = mlk::executeKernelOnBuffers(km, symbols, io, nullptr);
+    MLK_CHECK(r.has_value());
+    if (!r.has_value()) return;
+    for (std::size_t i = 0; i < 6; ++i) {
+        MLK_CHECK(bufY[i] == (i == 2 ? 5.0 : 0.0));  // guarded write
+        MLK_CHECK(bufZ[i] == 2.0);                   // unguarded write
+    }
+}
+
+MLK_TEST(poly, runtime_tiled_guarded_gemm_bitexact) {
+    // Tile size 2 over M=4, K=3, N=5: the k and j levels carry FULL
+    // tiles plus a PARTIAL tail. Tile parts are sibling instance ranges
+    // — each replays the same statements for its own point range (the
+    // emission marks restore between parts). The guarded init (k == 0)
+    // fires only inside the k tile containing k == 0. The tiled kernel
+    // must match the untiled transformed kernel bit-exact.
+    SymbolTable symbols;
+    KernelModule km = buildGemmKernel(symbols);
+    auto scop = mlk::poly::extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    auto deps = mlk::poly::computeDependences(*scop);
+    MLK_CHECK(deps.has_value());
+    if (!deps.has_value()) return;
+    auto sched = mlk::poly::computePlutoSchedule(*scop, *deps);
+    MLK_CHECK(sched.has_value());
+    if (!sched.has_value()) return;
+
+    mlk::poly::TiledInfo untiled;
+    auto flat =
+        mlk::poly::emitScheduledKernel(*scop, *sched, untiled, km, symbols);
+    MLK_CHECK(flat.has_value());
+    auto tiled = mlk::poly::computeTiling(*scop, *deps, *sched, 2);
+    MLK_CHECK(tiled.has_value());
+    if (!tiled.has_value()) return;
+    MLK_CHECK(tiled->tiled);
+    auto tiledKm =
+        mlk::poly::emitScheduledKernel(*scop, *sched, *tiled, km, symbols);
+    MLK_CHECK(tiledKm.has_value());
+    if (!flat.has_value() || !tiledKm.has_value()) return;
+
+    // Deterministic inputs.
+    constexpr std::size_t nA = static_cast<std::size_t>(kTestM * kTestK);
+    constexpr std::size_t nB = static_cast<std::size_t>(kTestK * kTestN);
+    constexpr std::size_t nC = static_cast<std::size_t>(kTestM * kTestN);
+    SmallVector<double, 8> bufA(nA), bufB(nB);
+    for (std::size_t i = 0; i < nA; ++i) {
+        bufA[i] = static_cast<double>(i % 7) * 0.25;
+    }
+    for (std::size_t i = 0; i < nB; ++i) {
+        bufB[i] = static_cast<double>(i % 5) * 0.5;
+    }
+    SmallVector<double, 8> outFlat(nC, 0.0), outTiled(nC, 0.0);
+    mlk::KernelBufferBindings ioFlat;
+    ioFlat.inputs.push_back(bufA.data());
+    ioFlat.inputs.push_back(bufB.data());
+    ioFlat.outputs.push_back(outFlat.data());
+    ioFlat.elements = nC;
+    auto rFlat = mlk::executeKernelOnBuffers(*flat, symbols, ioFlat,
+                                             nullptr);
+    MLK_CHECK(rFlat.has_value());
+    mlk::KernelBufferBindings ioTiled;
+    ioTiled.inputs.push_back(bufA.data());
+    ioTiled.inputs.push_back(bufB.data());
+    ioTiled.outputs.push_back(outTiled.data());
+    ioTiled.elements = nC;
+    auto rTiled = mlk::executeKernelOnBuffers(*tiledKm, symbols, ioTiled,
+                                              nullptr);
+    MLK_CHECK(rTiled.has_value());
+    if (!rFlat.has_value() || !rTiled.has_value()) return;
+    for (std::size_t i = 0; i < nC; ++i) {
+        MLK_CHECK(outFlat[i] == outTiled[i]);  // bit-exact (Rule 43)
+    }
+    // The partial tile actually ran: cells covered only by the tail
+    // tiles (j == 4, k == 2) hold the full product sum, not garbage.
+    for (int64_t i = 0; i < kTestM; ++i) {
+        double ref = 0.0;
+        for (int64_t k = 0; k < kTestK; ++k) {
+            ref += bufA[static_cast<std::size_t>(i * kTestK + k)] *
+                   bufB[static_cast<std::size_t>(k * kTestN + (kTestN - 1))];
+        }
+        MLK_CHECK(outTiled[static_cast<std::size_t>(i * kTestN +
+                                                   (kTestN - 1))] == ref);
+    }
 }
 
 MLK_TEST_MAIN("poly")

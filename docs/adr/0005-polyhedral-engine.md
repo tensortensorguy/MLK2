@@ -46,9 +46,28 @@ arithmetic:
    carried distance, lexicographic determinism). Exhaustive below 4
    varying dims, greedy prefix extension deeper, both under explicit LP
    budgets (Rule 10) with identity as the always-feasible fallback. A
-   whole-schedule shape contract (per statement, varying rows form a
-   suffix) rejects orders the conservative codegen cannot emit
-   (guarded/split emission remains the roadmap).
+   whole-schedule shape contract rejects orders whose statements the
+   codegen cannot realize.
+8. **CLAST-lite guarded re-entry + integer-exact marking** (supersedes
+   the suffix shape contract of decision 7): a row-constant statement
+   may VARY again at later rows — the emitter re-enters it under an
+   affine-equality `Guard` node at its folded value inside the loop and
+   its remaining rows continue in the fused deeper loops. This unlocks
+   the vectorized fused GEMM (`[i, k, j]`: i parallel/threaded, k
+   carries the reduction, j innermost SIMD — the old contract forced
+   `[i, j, k]` with no SIMD-able innermost row). Soundness rests on
+   three exact conditions, all checked before emission: the row's
+   constant slot is zero for every pivot-varying statement (the loop
+   position realizes the schedule value), a REALIZABILITY GATE
+   integer-exactly proves no live dependence pair runs backward in
+   PIVOT-COORDINATE order (lexmin-witnessed; the same
+   `integerLeFormFeasible` primitive upgrades parallel marking from the
+   rational hull to the integer points — parity-tight slices keep their
+   parallel rows), and row-constant statements must have the pivot
+   PINNED for them (their instances occupy exactly one coordinate).
+   Legacy speculative guards (Rule 5) are untouched; the walker
+   evaluates the affine form on the thread-local var stack and admits
+   Guard to the thread-safe emission alphabet.
 
 ## Consequences
 

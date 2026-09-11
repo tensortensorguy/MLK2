@@ -54,12 +54,21 @@
 //
 // Shape contract (codegen compatibility, checked per realized row): each
 // statement is either a foldable constant (nonzero coefficients only on
-// pinned dims) or varies on the row's pivot dim with a positive
-// coefficient. The loop variable emitted by codegen IS the pivot dim
-// (box bounds); skew coefficients never reach loop bounds. With any
-// pivot SEQUENCE the nest enumerates instances in exactly the schedule's
-// lexicographic order (equal prefixes force equal spent coords by
-// induction), which is what makes arbitrary permutations codegen-safe.
+// pinned dims — its instances occupy one pivot coordinate) or varies on
+// the row's pivot dim with a positive coefficient. The loop variable
+// emitted by codegen IS the pivot dim (box bounds); skew coefficients
+// never reach loop bounds. With any pivot SEQUENCE the nest enumerates
+// instances in exactly the schedule's lexicographic order (equal prefixes
+// force equal spent coords by induction), which is what makes arbitrary
+// permutations codegen-safe. Row-constant statements may VARY again at
+// later rows: the emitter re-enters them under an affine-equality Guard
+// at their folded value (CLAST-lite guarded re-entry). Two scheduler-side
+// conditions keep "nest order == schedule order": LP rows zero the
+// constant slot of every pivot-varying statement (the loop position
+// realizes the schedule value exactly), and a REALIZABILITY GATE rejects
+// any row where a live dependence pair's pivot-coordinate distance can go
+// negative on integer points (integer-exact, lexmin-witnessed — the same
+// machinery as the integer-exact parallel marking).
 //
 // Budgets (Rule 10): the order search and every candidate LP run under
 // kPolyMaxSchedulerLps / kPolyMaxOrderLps; a tripped budget rejects the

@@ -251,7 +251,16 @@ using FormParts = SmallVector<SmallVector<Rational, 8>, 8>;
                                         uint32_t pivot) {
     for (const Statement& s : scop.statements) {
         int64_t folded = 0;
-        if (detail::rowEffectiveConst(s, row, &folded)) continue;
+        if (detail::rowEffectiveConst(s, row, &folded)) {
+            // A row-constant statement must not span the pivot: its
+            // instances sit at ONE coordinate (the folded value), so
+            // guarded re-entry / hoisting replays them exactly. A
+            // statement whose domain covers the pivot would lose every
+            // instance outside the guard's iteration.
+            int64_t pin = 0;
+            if (!detail::dimPinnedAt(s, pivot, &pin)) return false;
+            continue;
+        }
         const auto& cs = row.stmtCoeffs[s.id];
         if (pivot + 1 < cs.size() && cs[pivot + 1] >= 1 &&
             detail::dimVaries(s, pivot)) {
@@ -268,6 +277,34 @@ struct DepState {
     PresburgerSet slice{};
     bool resolved{false};
 };
+
+/// Realizability gate for a realized LP row (stages 1-2): the emitted
+/// nest orders same-row instances by PIVOT coordinates, so every live
+/// dependence pair must satisfy dst >= src at this row's pivot. The
+/// check is INTEGER-EXACT (a rational-negative minimum with no integer
+/// violation passes — integer-exact marking's counterpart); a witness,
+/// a budget trip, or any error rejects the row (false) and the stage
+/// falls through. The identity fallback is gate-free: its unit pivot
+/// coefficients and zero slots make the distance form equal the
+/// coordinate form, so processRow's validity check covers it.
+[[nodiscard]] bool realizableGate(
+    const Scop& scop, const SmallVector<Dependence, 16>& deps,
+    const SmallVector<DepState, 16>& states,
+    const SmallVector<uint32_t, 16>& live, uint32_t pivot) {
+    for (const uint32_t di : live) {
+        SmallVector<int64_t, 8> form;
+        int64_t fconst = 0;
+        auto formR = detail::pivotCoordDistForm(scop, deps[di], pivot,
+                                                form, fconst);
+        if (!formR.has_value()) return false;  // conservative reject
+        auto f = detail::integerLeFormFeasible(states[di].slice, form,
+                                               fconst);
+        if (!f.has_value() || *f != Feasibility::Empty) {
+            return false;  // witness / Unknown / error: reject
+        }
+    }
+    return true;
+}
 
 /// Builds the LP for one (pivot, anchor) candidate. Column layout: stmt
 /// coefficient blocks, then (sequential search only) one epigraph M
@@ -319,6 +356,22 @@ struct DepState {
         eq[anchor * coeffsPerStmt + 1 + pivot] = Rational{1, 1};
         lp.eqRows.push_back(std::move(eq));
         lp.eqRhs.push_back(Rational{1, 1});
+    }
+    // Const-slot normalization: statements VARYING on the pivot keep a
+    // zero constant slot. The emitted loop position of a varying
+    // statement is its pivot coordinate, so the position realizes the
+    // schedule value exactly only when the slot is zero — cross-
+    // statement comparisons at this row (guarded re-entry places pinned
+    // statements at their folded value; the dependence-tied body order)
+    // then agree with the nest order. Over box domains containing the
+    // origin this also forces every row coefficient non-negative, which
+    // keeps skew terms forward everywhere.
+    for (uint32_t s = 0; s < nStmts; ++s) {
+        if (!detail::dimVaries(scop.statements[s], pivot)) continue;
+        SmallVector<Rational, 8> eq(lp.nVars, Rational{});
+        eq[s * coeffsPerStmt] = Rational{1, 1};
+        lp.eqRows.push_back(std::move(eq));
+        lp.eqRhs.push_back(Rational{});
     }
     // Coefficient bounds |c| <= kRowCoeffBound (constant slot included).
     for (uint32_t s = 0; s < nStmts; ++s) {
@@ -467,22 +520,33 @@ struct DepState {
             continue;
         }
         if (anyLive) {
-            // Parallel only when the distance is identically zero on the
-            // slice (the dim carries nothing of this dependence).
-            SmallVector<int64_t, 8> negCoeffs;
-            for (const int64_t c : distCoeffs) negCoeffs.push_back(-c);
-            Rational maxDist{};
-            bool anyMax = false;
-            for (const Polyhedron& disjunct : st.slice.disjuncts) {
-                if (!detail::polyFeasible(disjunct)) continue;
-                MLK_TRY_VAR(mx, detail::minOverPoly(disjunct, negCoeffs,
-                                                    -distConst));
-                if (!anyMax || ratLess(maxDist, mx)) maxDist = mx;
-                anyMax = true;
+            // Parallel only when the distance is IDENTICALLY ZERO on the
+            // slice's INTEGER points — the instances that execute. The
+            // rational hull is a pre-filter only: a distance that is
+            // integer-zero everywhere but fractionally nonzero on the
+            // hull (transposed flat-index collisions) keeps the row
+            // parallel. dist is integer-affine over integer points, so
+            // "nonzero somewhere" is the union dist >= 1 and dist <= -1;
+            // a verified witness marks the row sequential, proven
+            // emptiness keeps it parallel, and any budget trip is
+            // sequential (Rule 22: Unknown is never Empty).
+            bool integerZero = true;
+            {
+                SmallVector<int64_t, 8> negCoeffs;
+                for (const int64_t c : distCoeffs) negCoeffs.push_back(-c);
+                const int64_t negConst = -distConst;
+                // dist >= 1  <=>  (-dist) <= -1.
+                MLK_TRY_VAR(ge, detail::integerLeFormFeasible(
+                                    st.slice, negCoeffs, negConst));
+                if (ge != Feasibility::Empty) integerZero = false;
+                if (integerZero) {
+                    // dist <= -1.
+                    MLK_TRY_VAR(le, detail::integerLeFormFeasible(
+                                        st.slice, distCoeffs, distConst));
+                    if (le != Feasibility::Empty) integerZero = false;
+                }
             }
-            if (anyMax && !(maxDist.isInt() && maxDist.num == 0)) {
-                rowParallel = false;
-            }
+            if (!integerZero) rowParallel = false;
         }
         // Refine the slice with "distance == 0" for the next row.
         PresburgerSet next;
@@ -669,7 +733,8 @@ struct SynthOutcome {
                                 a, true, lpBudget);
             if (!par.has_value()) continue;  // candidate rejected
             if (par->has_value() &&
-                rowCodegenCompatible(scop, **par, *pivot)) {
+                rowCodegenCompatible(scop, **par, *pivot) &&
+                realizableGate(scop, deps, states, live, *pivot)) {
                 realized = std::move(*par);
             }
         }
@@ -684,7 +749,8 @@ struct SynthOutcome {
                                     *pivot, a, false, lpBudget);
                 if (!seq.has_value()) continue;  // candidate rejected
                 if (seq->has_value() &&
-                    rowCodegenCompatible(scop, **seq, *pivot)) {
+                    rowCodegenCompatible(scop, **seq, *pivot) &&
+                    realizableGate(scop, deps, states, live, *pivot)) {
                     realized = std::move(*seq);
                 }
             }
@@ -740,24 +806,29 @@ struct SynthOutcome {
     return sc;
 }
 
-/// Codegen shape compatibility of a WHOLE schedule (see pluto.h): for
-/// every statement the rows on which it varies (pivot varies and the row
-/// is not foldable-constant for it) must form a SUFFIX of the row
-/// sequence. A statement that turns row-constant and then varies again
-/// would need its payload inside a loop iteration slice it is pinned out
-/// of (guarded/split emission — codegen bails conservatively today, so
-/// such orders are rejected by the search instead of at emission time).
+/// Codegen shape compatibility of a WHOLE schedule (see pluto.h). The
+/// CLAST-lite emitter realizes row-constant statements either by
+/// hoisting (before/after the level's loop) or by GUARDED re-entry (a
+/// Guard node fires at the statement's folded value inside the loop, and
+/// the statement's remaining rows continue in the fused deeper loops) —
+/// so a statement may turn row-constant and vary again. The one
+/// remaining requirement: a row-constant statement must not SPAN the
+/// row's pivot (its instances sit at exactly one pivot coordinate —
+/// dimPinnedAt), otherwise re-entry would drop the instances at other
+/// coordinates. rowCodegenCompatible enforces the same condition per
+/// row; this whole-schedule check is the order-search filter.
 [[nodiscard]] bool scheduleCodegenShape(const Scop& scop,
                                         const PolySchedule& sched) {
     for (const Statement& s : scop.statements) {
-        bool seenConst = false;
         for (uint32_t r = 0; r < sched.rows.size(); ++r) {
             int64_t folded = 0;
-            if (detail::rowEffectiveConst(s, sched.rows[r], &folded)) {
-                seenConst = true;
-                continue;
+            if (!detail::rowEffectiveConst(s, sched.rows[r], &folded)) {
+                continue;  // varying rows are ordered by pivot coordinate
             }
-            if (seenConst) return false;  // const row before a varying row
+            int64_t pin = 0;
+            if (!detail::dimPinnedAt(s, sched.pivotDim[r], &pin)) {
+                return false;
+            }
         }
     }
     return true;

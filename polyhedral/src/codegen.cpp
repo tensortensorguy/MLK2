@@ -50,6 +50,14 @@ struct Emitter {
     SmallVector<int32_t, 8> dimAtStack{};
     SmallVector<uint32_t, 8> body{};
     SmallVector<bool, 8> emitted{};
+    // Per statement: pending guard conditions (scop dim, folded row
+    // value), outermost first. Appended when the statement re-enters a
+    // loop under a CLAST guard; materialized as nested Guard nodes at
+    // EVERY payload emission (tile part duplication re-runs the
+    // recursion, so the guards are never consumed). The referenced dims
+    // are enclosing loop variables at every emission point.
+    SmallVector<SmallVector<std::pair<uint32_t, int64_t>, 4>, 8>
+        pendingGuards{};
     bool failed{false};
     int64_t copyBudget{1};
     std::string reason{};
@@ -142,8 +150,40 @@ struct Emitter {
         store.outIndexOffset = storeOff;
         const uint32_t cid = out.addNode(compute);
         const uint32_t sid = out.addNode(store);
-        body.push_back(cid);
-        body.push_back(sid);
+        // Pending guards nest around the payload (outermost condition
+        // outermost). The condition "scop dim == value" becomes the
+        // affine form 1*var[pos] - value == 0 over the CURRENT var
+        // stack; the dim must be bound here (its loop encloses every
+        // emission point of the statement).
+        SmallVector<uint32_t, 4> wrapped;
+        wrapped.push_back(cid);
+        wrapped.push_back(sid);
+        const auto& gs = pendingGuards[s.id];
+        for (std::size_t g = gs.size(); g-- > 0;) {
+            int32_t pos = -1;
+            for (uint32_t q = 0; q < dimAtStack.size(); ++q) {
+                if (dimAtStack[q] == static_cast<int32_t>(gs[g].first)) {
+                    pos = static_cast<int32_t>(q);
+                    break;
+                }
+            }
+            if (pos < 0) {
+                fail("codegen: guard dim is not bound at emission");
+                return {};
+            }
+            KernelNode guard;
+            guard.op = KernelOp::Guard;
+            guard.guardCoeffs = SmallVector<int64_t, 4>(
+                static_cast<std::size_t>(pos) + 1, 0);
+            guard.guardCoeffs[static_cast<uint32_t>(pos)] = 1;
+            guard.guardOffset = -gs[g].second;
+            guard.children.clear();
+            for (const uint32_t c : wrapped) guard.children.push_back(c);
+            const uint32_t gid = out.addNode(guard);
+            wrapped.clear();
+            wrapped.push_back(gid);
+        }
+        for (const uint32_t c : wrapped) body.push_back(c);
         return {};
     }
 
@@ -267,6 +307,15 @@ struct Emitter {
                 return {};
             }
         }
+        // Tile parts are SIBLING instance ranges: each part replays the
+        // same statements for its own point range. Snapshot the emission
+        // marks and guard state before the first part and restore them
+        // before the second, so the partial part re-emits everything the
+        // full part emitted (statements hoisted before the tile loop
+        // were emitted before the snapshot and stay filtered).
+        const SmallVector<bool, 8> emittedSnapshot = emitted;
+        const SmallVector<SmallVector<std::pair<uint32_t, int64_t>, 4>, 8>
+            guardsSnapshot = pendingGuards;
         if (hasFull) {
             KernelNode tile;
             tile.op = KernelOp::Loop;
@@ -281,6 +330,8 @@ struct Emitter {
                                    tileId, rowParallel, rowVector));
         }
         if (hasPartial) {
+            emitted = emittedSnapshot;
+            pendingGuards = guardsSnapshot;
             KernelNode tile;
             tile.op = KernelOp::Loop;
             tile.var = symbols->intern(
@@ -304,8 +355,8 @@ struct Emitter {
     /// row's marks (tile and point loops share the row's parallelism;
     /// the SIMD hint applies to the point enumeration).
     [[nodiscard]] Result<void> emitPointBody(
-        SmallVector<uint32_t, 8>& varStmts, uint32_t varDim, uint32_t r,
-        int64_t tileSize, int64_t partialEnd, uint32_t tileId,
+        const SmallVector<uint32_t, 8>& varStmts, uint32_t varDim,
+        uint32_t r, int64_t tileSize, int64_t partialEnd, uint32_t tileId,
         bool rowParallel, bool rowVector) {
         SymbolId varName =
             static_cast<std::size_t>(varDim) < scop->dimVars.size()
@@ -314,23 +365,35 @@ struct Emitter {
         if (varName == kInvalidSymbolId) {
             varName = symbols->intern("d" + std::to_string(varDim));
         }
+        // The tile index sits in the -1 stack slot pushed by emitLoop.
+        // Affine bound coefficients are STACK-ABSOLUTE (the walker
+        // indexes coeffs[p] by vars[p], outermost first), so the tile
+        // coefficient goes at that slot with zeros elsewhere — a short
+        // [t] vector would multiply the OUTERMOST var (a latent
+        // round-6 bug masked by single-tile test ranges).
+        const std::size_t tilePos = dimAtStack.size() - 1;
         KernelNode point;
         point.op = KernelOp::Loop;
         point.var = varName;
-        point.beginCoeffs = SmallVector<int64_t, 4>(1, tileSize);
+        point.beginCoeffs = SmallVector<int64_t, 4>(tilePos + 1, 0);
+        point.beginCoeffs[tilePos] = tileSize;
         point.beginOffset = 0;
         point.parallel = rowParallel;
         point.vectorHint = rowVector;  // SIMD-able innermost enumeration
         if (partialEnd >= 0) {
             point.end = partialEnd + 1;  // executor form: var < end
         } else {
-            point.endCoeffs = SmallVector<int64_t, 4>(1, tileSize);
+            point.endCoeffs = SmallVector<int64_t, 4>(tilePos + 1, 0);
+            point.endCoeffs[tilePos] = tileSize;
             point.endOffset = tileSize - 1;  // inclusive: t*ti + t - 1
         }
         dimAtStack.push_back(static_cast<int32_t>(varDim));
         const SmallVector<uint32_t, 8> saved = body;
         body.clear();
-        MLK_TRYV(emitLevel(std::move(varStmts), r + 1));
+        // COPY, not move: the sibling tile part replays the same
+        // statement list (a moved-from list silently empties the
+        // partial part's recursion).
+        MLK_TRYV(emitLevel(varStmts, r + 1));
         point.children.clear();
         for (const uint32_t c : body) point.children.push_back(c);
         body = saved;
@@ -352,8 +415,17 @@ struct Emitter {
         if (r >= sched->rows.size() || r >= sched->pivotDim.size()) {
             // Schedule exhausted: the scheduler's totality contract means
             // remaining statements have no unspent varying dims (each is
-            // emitted exactly once) — original order (determinism, 53).
-            for (const uint32_t s : alive) {
+            // emitted exactly once). The recursion list order is the
+            // classification order (varying first, guarded re-entries
+            // appended) — reorder by origOrder so dependence-tied
+            // statement pairs replay in program order (Rule 53).
+            SmallVector<uint32_t, 8> ordered = alive;
+            std::sort(ordered.begin(), ordered.end(),
+                      [&](uint32_t a, uint32_t b) {
+                          return scop->statements[a].origOrder <
+                                 scop->statements[b].origOrder;
+                      });
+            for (const uint32_t s : ordered) {
                 MLK_TRYV(emitPayload(scop->statements[s]));
                 emitted[s] = true;
             }
@@ -405,6 +477,7 @@ struct Emitter {
         }
         // Constant statements around the loop range.
         SmallVector<std::pair<int64_t, uint32_t>, 8> before, after;
+        SmallVector<std::pair<int64_t, uint32_t>, 8> reentry;
         for (const auto& item : constItems) {
             if (item.first < lo) {
                 before.push_back(item);
@@ -418,12 +491,28 @@ struct Emitter {
                 // before the loop preserves the lexicographic order.
                 before.push_back(item);
             } else {
-                fail("codegen: constant statement inside the loop range");
-                return {};
+                // CLAST-lite guarded re-entry: the statement's row value
+                // sits inside the loop range (or hoisting is unsafe), so
+                // its remaining schedule rows continue INSIDE the loop
+                // under the guard "pivot var == value". Soundness: the
+                // scheduler's shape contract pins the pivot for every
+                // row-constant statement (its instances occupy exactly
+                // that coordinate) and the realizability gate keeps the
+                // pivot-coordinate order forward on every live pair, so
+                // the guard fires at the statement's schedule position
+                // and the fused deeper loops replay it exactly once.
+                reentry.push_back(item);
             }
         }
+        for (const auto& item : reentry) {
+            pendingGuards[item.second].push_back({pivot, item.first});
+        }
+        SmallVector<uint32_t, 8> loopStmts = varStmts;
+        for (const auto& item : reentry) {
+            loopStmts.push_back(item.second);
+        }
         MLK_TRYV(emitConstItems(std::move(before)));
-        MLK_TRYV(emitLoop(std::move(varStmts), pivot, lo, hi, r));
+        MLK_TRYV(emitLoop(std::move(loopStmts), pivot, lo, hi, r));
         if (failed) return {};
         MLK_TRYV(emitConstItems(std::move(after)));
         return {};
@@ -445,6 +534,9 @@ Result<KernelModule> emitScheduledKernel(
     em.baseline = &baseline;
     em.symbols = &symbols;
     em.emitted = SmallVector<bool, 8>(scop.statements.size(), false);
+    em.pendingGuards = SmallVector<
+        SmallVector<std::pair<uint32_t, int64_t>, 4>, 8>(
+        scop.statements.size());
     em.out.name = baseline.name;
     em.out.buffers = baseline.buffers;
     em.out.scheduleParams = baseline.scheduleParams;
