@@ -1,63 +1,42 @@
 // Schedule → Kernel IR code generation (see codegen.h).
 //
-// The emitter walks schedule levels recursively over the statement set:
-//   - a level where every alive statement is CONSTANT (its theta value
-//     does not vary with the remaining dims) is a SEPARATOR: statements
-//     emit in (value, origOrder) order — statement-order at equal times;
-//   - a level where alive statements vary in ONE dimension d (row == ±e_d
-//     per statement; mixed dims bail) emits ONE loop over d (fusion);
-//     statements with different dims at the same level bail (fission
-//     beyond the synth class is not emitted);
+// The emitter walks schedule levels recursively over the statement set.
+// Every level carries the pivot dim chosen by the scheduler (rows[i] /
+// pivotDim[i]); skew coefficients on spent (outer) dims are legal in the
+// schedule and intentionally invisible here: with the loop variable kept
+// as the pivot dim and box bounds, the nest enumerates instances in
+// exactly the schedule's lexicographic order.
+//   - a level where every alive statement is CONSTANT (all nonzero row
+//     coefficients sit on dims pinned for that statement) is a
+//     SEPARATOR: statements emit in (value, origOrder) order —
+//     statement-order at equal times;
+//   - a level where alive statements vary emit ONE loop over the pivot
+//     dim (fusion); statements with a non-positive pivot coefficient
+//     bail (the scheduler's shape contract forbids them);
 //   - constant statements with value below the loop's lower bound emit
-//     BEFORE the loop (pinned reduced dims: value 0 = the dim minimum);
-//     values inside the range bail; values above emit after the loop;
+//     BEFORE the loop (pinned reduced dims fold into the value);
+//     values inside the range bail unless hoist-safe; values above emit
+//     after the loop;
 //   - tiled band levels emit a TILE loop (constant bounds floor(lo/t),
 //     floor(hi/t)) and a POINT loop with affine bounds t*ti and
 //     t*ti + (t-1); divisibility of the box bounds by t is required so
 //     the clipping is exact without piecewise forms.
 // Payloads replay the statement's Compute chain (ElemIdx operands
-// re-indexed from scop-dim coefficients to stack-position coefficients)
-// and its Store (accumulate preserved).
+// re-indexed from scop-dim coefficients to stack-position coefficients;
+// coefficients on PINNED dims fold into the constant offset) and its
+// Store (accumulate preserved).
 #include "mlk/poly/codegen.h"
 
 #include <algorithm>
 #include <string>
 #include <utility>
 
+#include "schedule_common.h"
+
 namespace mlk::poly {
 
 namespace {
 
-/// Returns the pinned constant value when statement s is a singleton at
-/// dim d (its full-rank domain pins the dim), or false otherwise. Dims at
-/// or beyond the statement's own depth are pinned to 0 by extraction.
-[[nodiscard]] bool singletonAt(const Statement& s, uint32_t d,
-                               int64_t* value) {
-    if (d < s.ownLower.size() && d < s.ownUpper.size()) {
-        if (s.ownLower[d] == s.ownUpper[d]) {
-            *value = s.ownLower[d];
-            return true;
-        }
-        return false;
-    }
-    if (d >= s.depth) {
-        *value = 0;  // deep-dim pin (init-then-accumulate semantics)
-        return true;
-    }
-    return false;
-}
-
-/// True when row r's form is constant for statement s (no dim coeffs).
-[[nodiscard]] bool rowConstantFor(const Statement& s,
-                                  const PolySchedule& sched, uint32_t r,
-                                  int64_t* value) {
-    const auto& coeffs = sched.rows[r].stmtCoeffs[s.id];
-    for (uint32_t d = 0; d < sched.depth && d + 1 < coeffs.size(); ++d) {
-        if (coeffs[d + 1] != 0) return false;
-    }
-    *value = coeffs[0];
-    return true;
-}
 
 struct Emitter {
     const Scop* scop{nullptr};
@@ -82,23 +61,55 @@ struct Emitter {
         }
     }
 
-    /// Re-expresses per-dim coefficients in stack-position order.
-    [[nodiscard]] SmallVector<int64_t, 4> mapCoeffs(
-        const SmallVector<int64_t, 4>& dimCoeffs) const {
-        SmallVector<int64_t, 4> mapped(dimAtStack.size(), 0);
-        for (uint32_t p = 0; p < dimAtStack.size(); ++p) {
-            const int32_t d = dimAtStack[p];
-            if (d >= 0 && d < static_cast<int32_t>(dimCoeffs.size())) {
-                mapped[p] = dimCoeffs[d];
-            }
+    /// Re-expresses per-dim coefficients in stack-position order, folding
+    /// coefficients of PINNED (off-stack) dims into *outOffset. A
+    /// non-pinned off-stack dim with a nonzero coefficient is a contract
+    /// bug (the schedule would collapse varying instances) — fails.
+    [[nodiscard]] Result<void> mapCoeffs(const Statement& s,
+                                         const SmallVector<int64_t, 4>& dimCoeffs,
+                                         SmallVector<int64_t, 4>& outStack,
+                                         int64_t* outOffset) {
+        outStack.clear();
+        for (std::size_t i = 0; i < dimAtStack.size(); ++i) {
+            outStack.push_back(0);
         }
-        return mapped;
+        int64_t offset = 0;
+        for (uint32_t d = 0; d < dimCoeffs.size(); ++d) {
+            const int64_t c = dimCoeffs[d];
+            if (c == 0) continue;
+            int32_t pos = -1;
+            for (uint32_t q = 0; q < dimAtStack.size(); ++q) {
+                if (dimAtStack[q] == static_cast<int32_t>(d)) {
+                    pos = static_cast<int32_t>(q);
+                    break;
+                }
+            }
+            if (pos >= 0) {
+                outStack[static_cast<uint32_t>(pos)] = c;
+                continue;
+            }
+            int64_t pin = 0;
+            if (!detail::dimPinnedAt(s, d, &pin)) {
+                fail("codegen: access references an unpinned unspent dim");
+                *outOffset = 0;
+                return {};
+            }
+            offset += c * pin;
+        }
+        *outOffset = offset;
+        return {};
     }
 
-    [[nodiscard]] KernelOperand mapOperand(const KernelOperand& o) const {
+    [[nodiscard]] Result<KernelOperand> mapOperand(const Statement& s,
+                                                   const KernelOperand& o) {
         KernelOperand mapped = o;
         if (o.kind == KernelOperand::Kind::ElemIdx) {
-            mapped.idxCoeffs = mapCoeffs(o.idxCoeffs);
+            SmallVector<int64_t, 4> stack;
+            int64_t off = 0;
+            MLK_TRYV(mapCoeffs(s, o.idxCoeffs, stack, &off));
+            mapped.idxCoeffs = std::move(stack);
+            MLK_TRY_VAR(total, checked::addLimited(o.idxOffset, off));
+            mapped.idxOffset = total;
         }
         return mapped;
     }
@@ -109,8 +120,10 @@ struct Emitter {
         for (const KernelExpr& e : s.exprs) {
             KernelExpr mapped;
             mapped.op = e.op;
-            mapped.a = mapOperand(e.a);
-            mapped.b = mapOperand(e.b);
+            MLK_TRY_VAR(a, mapOperand(s, e.a));
+            mapped.a = std::move(a);
+            MLK_TRY_VAR(b, mapOperand(s, e.b));
+            mapped.b = std::move(b);
             compute.exprs.push_back(std::move(mapped));
         }
         if (compute.exprs.empty()) {
@@ -121,8 +134,12 @@ struct Emitter {
         store.op = KernelOp::Store;
         store.bufferOut = s.storeBuffer;
         store.accumulate = s.accumulate;
-        store.outIndexCoeffs = mapCoeffs(s.storeCoeffs);
-        store.outIndexOffset = s.storeOffset;
+        SmallVector<int64_t, 4> stack;
+        int64_t off = 0;
+        MLK_TRYV(mapCoeffs(s, s.storeCoeffs, stack, &off));
+        store.outIndexCoeffs = std::move(stack);
+        MLK_TRY_VAR(storeOff, checked::addLimited(s.storeOffset, off));
+        store.outIndexOffset = storeOff;
         const uint32_t cid = out.addNode(compute);
         const uint32_t sid = out.addNode(store);
         body.push_back(cid);
@@ -131,12 +148,15 @@ struct Emitter {
     }
 
     /// A constant statement may be hoisted before a loop at level r when
-    /// ALL its remaining rows are constants that never exceed the minimum
-    /// remaining value of any varying statement (conservative box check).
+    /// ALL its remaining rows are constants (pin-folded) that never exceed
+    /// the minimum remaining value of any varying statement (conservative
+    /// box check).
     [[nodiscard]] bool canEmitBefore(const Statement& s, uint32_t r) const {
         for (uint32_t r2 = r + 1; r2 < sched->rows.size(); ++r2) {
             int64_t sv = 0;
-            if (!rowConstantFor(s, *sched, r2, &sv)) return false;
+            if (!detail::rowEffectiveConst(s, sched->rows[r2], &sv)) {
+                return false;
+            }
             for (const Statement& t : scop->statements) {
                 if (t.id == s.id) continue;
                 if (t.depth <= r2 && r2 >= t.depth) {
@@ -310,77 +330,55 @@ struct Emitter {
             if (!emitted[s]) alive.push_back(s);
         }
         if (alive.empty()) return {};
-        if (r >= sched->rows.size()) {
-            // Schedule exhausted: remaining statements share the same
-            // time — original order (determinism, Rule 53).
+        if (r >= sched->rows.size() || r >= sched->pivotDim.size()) {
+            // Schedule exhausted: the scheduler's totality contract means
+            // remaining statements have no unspent varying dims (each is
+            // emitted exactly once) — original order (determinism, 53).
             for (const uint32_t s : alive) {
                 MLK_TRYV(emitPayload(scop->statements[s]));
                 emitted[s] = true;
             }
             return {};
         }
-        // Classify alive statements at this level.
+        const uint32_t pivot = sched->pivotDim[r];
+        const ScheduleRow& row = sched->rows[r];
+        // Classify alive statements at this level: foldable constants vs
+        // pivot-varying (the scheduler's shape contract admits exactly
+        // these two classes; anything else is a contract bug).
         SmallVector<std::pair<int64_t, uint32_t>, 8> constItems;
         SmallVector<uint32_t, 8> varStmts;
-        int32_t varDim = -1;
         for (const uint32_t s : alive) {
-            const auto& coeffs = sched->rows[r].stmtCoeffs[s];
-            int32_t varDimS = -1;
-            bool varNegS = false;
-            for (uint32_t d = 0; d < scop->depth && d + 1 < coeffs.size();
-                 ++d) {
-                const int64_t c = coeffs[d + 1];
-                if (c == 0) continue;
-                if (c != 1 && c != -1) {
-                    fail("codegen: non-unimodular schedule row");
-                    return {};
-                }
-                if (varDimS != -1) {
-                    fail("codegen: schedule row combines dimensions");
-                    return {};
-                }
-                varDimS = static_cast<int32_t>(d);
-                varNegS = c < 0;
+            const Statement& st = scop->statements[s];
+            int64_t folded = 0;
+            if (detail::rowEffectiveConst(st, row, &folded)) {
+                constItems.emplace_back(folded, s);
+                continue;
             }
-            if (varDimS == -1) {
-                constItems.emplace_back(coeffs[0], s);
-            } else if (true) {
-                // Singleton at this dim? The statement acts as a constant
-                // item with its pinned value (pinned reduced dims).
-                int64_t pinned = 0;
-                if (singletonAt(scop->statements[s],
-                                static_cast<uint32_t>(varDimS), &pinned)) {
-                    constItems.emplace_back(coeffs[0] +
-                                                coeffs[varDimS + 1] * pinned,
-                                            s);
-                } else {
-                    if (varDim != -1 && varDim != varDimS) {
-                        fail("codegen: fission across dims at one level");
-                        return {};
-                    }
-                    varDim = varDimS;
-                    varStmts.push_back(s);
-                    (void)varNegS;
-                }
-            } else {
-                constItems.emplace_back(coeffs[0], s);
+            const auto& coeffs = row.stmtCoeffs[st.id];
+            if (pivot + 1 < coeffs.size() && coeffs[pivot + 1] >= 1) {
+                varStmts.push_back(s);
+                continue;
             }
+            fail("codegen: statement neither constant nor pivot-varying");
+            return {};
         }
         if (varStmts.empty()) {
             MLK_TRYV(emitConstItems(std::move(constItems)));
             return {};
         }
-        // Loop bounds: intersection of the varying statements' boxes.
+        // Loop bounds: box of the pivot dim, intersected over varStmts.
+        // Skew coefficients on spent dims are order-only and never reach
+        // bounds (the nest order equals the schedule lex order).
         int64_t lo = INT64_MIN;
         int64_t hi = INT64_MAX;
         for (const uint32_t s : varStmts) {
             const Statement& st = scop->statements[s];
-            if (varDim >= static_cast<int32_t>(st.ownLower.size())) {
+            if (pivot >= st.ownLower.size() || pivot >= st.ownUpper.size()) {
                 fail("codegen: statement lacks bounds for the loop dim");
                 return {};
             }
-            lo = st.ownLower[varDim] > lo ? st.ownLower[varDim] : lo;
-            hi = st.ownUpper[varDim] < hi ? st.ownUpper[varDim] : hi;
+            lo = st.ownLower[pivot] > lo ? st.ownLower[pivot] : lo;
+            hi = st.ownUpper[pivot] < hi ? st.ownUpper[pivot] : hi;
         }
         if (lo == INT64_MIN || hi == INT64_MAX || lo > hi) {
             fail("codegen: empty or unbounded loop range");
@@ -406,8 +404,7 @@ struct Emitter {
             }
         }
         MLK_TRYV(emitConstItems(std::move(before)));
-        MLK_TRYV(emitLoop(std::move(varStmts), static_cast<uint32_t>(varDim),
-                          lo, hi, r));
+        MLK_TRYV(emitLoop(std::move(varStmts), pivot, lo, hi, r));
         if (failed) return {};
         MLK_TRYV(emitConstItems(std::move(after)));
         return {};

@@ -23,13 +23,19 @@ arithmetic:
    callers (conservative — loses optimization, never correctness).
 4. **Determinism** (Rule 53): Bland's-rule simplex, fixed candidate
    ordering, integer scaling by LCM + gcd normalization.
-5. **Identity-prefix scheduling**: the original program order is legal by
-   construction for extraction-produced SCoPs, so the scheduler starts
-   from it and only adds separator rows for dependences the identity
-   never strictly separates (Feautrier-style hard resolution, one
-   dependence per row). The full Pluto ILP objective (skewed schedules)
-   is the documented roadmap item; the autotuner gates adoption by
-   measurement (Rule 32).
+5. **LP-selected scheduling** (supersedes the original identity-prefix
+   shortcut): every row is chosen by an exact LP — parallel-first
+   feasibility search (all live dependence distances identically zero;
+   fuses statement nests), then distance-minimal sequential rows
+   (Farkas-encoded validity + epigraph objective + progress), with the
+   identity row as a guaranteed-valid fallback (original-order
+   purification orients every dependence forward). A per-row shape
+   contract keeps codegen total: loop variables stay pivot dims with box
+   bounds, skew coefficients ride the schedule only, and every varying
+   dim is spent so each instance replays exactly once. Pivot orders are
+   ascending (identity always feasible ⇒ always wins); free-coefficient
+   rows + CLAST-style codegen remain the documented roadmap to full Pluto
+   ILP; the autotuner gates adoption by measurement (Rule 32).
 
 ## Consequences
 

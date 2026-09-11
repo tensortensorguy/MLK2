@@ -42,6 +42,27 @@ namespace {
     return range.isInt() && range.num >= 1;
 }
 
+/// Pivot-coordinate distance form for a band row: v_p(dst) - v_p(src)
+/// over the product space. Rectangular tiling legality is a condition on
+/// LOOP-ITERATION-SPACE distances (the tile function is floor(v_p / t)
+/// per band level); theta distances would wrongly let skew coefficients
+/// on outer dims leak into the legality decision.
+[[nodiscard]] Result<void> pivotDistForm(const Dependence& d,
+                                         uint32_t depth, uint32_t pivot,
+                                         SmallVector<int64_t, 8>& outCoeffs,
+                                         int64_t& outConst) {
+    outCoeffs.clear();
+    for (uint32_t i = 0; i < depth * 2; ++i) outCoeffs.push_back(0);
+    if (pivot >= depth) {
+        return err(ErrorCode::InvalidArgument, "pivot dim out of range");
+    }
+    outCoeffs[pivot] = -1;         // source block: dims [0, depth)
+    outCoeffs[depth + pivot] = 1;  // sink block: dims [depth, 2*depth)
+    outConst = 0;
+    (void)d;
+    return {};
+}
+
 }  // namespace
 
 Result<TiledInfo> computeTiling(
@@ -67,6 +88,8 @@ Result<TiledInfo> computeTiling(
     }
 
     for (uint32_t r = 0; r < sched.rows.size(); ++r) {
+        if (r >= sched.pivotDim.size()) break;  // legacy schedule guard
+        const uint32_t pivot = sched.pivotDim[r];
         SmallVector<uint32_t, 16> live;
         for (uint32_t di = 0; di < states.size(); ++di) {
             if (!states[di].resolved) live.push_back(di);
@@ -84,15 +107,18 @@ Result<TiledInfo> computeTiling(
         }
         if (!varies) break;
 
-        // Defense in depth: every live dep distance must stay >= 0 on its
-        // slice at this band row (Pluto's LP already guarantees it).
+        // Band legality (defense in depth): every live dependence's
+        // PIVOT-COORDINATE distance must stay >= 0 on its refined slice
+        // at this band row — the lex-nonnegative projection condition
+        // for rectangular tiling (the scheduler LP guarantees it for
+        // rows it emitted; skew-heavy schedules may end the band early).
         SmallVector<SmallVector<int64_t, 8>, 16> distForms;
         SmallVector<int64_t, 16> distConsts;
         for (const uint32_t di : live) {
             const Dependence& d = deps[di];
             SmallVector<int64_t, 8> dc;
             int64_t dk = 0;
-            MLK_TRYV(detail::distanceForm(row, d, scop.depth, dc, dk));
+            MLK_TRYV(pivotDistForm(d, scop.depth, pivot, dc, dk));
             MLK_TRY_VAR(mn, [&]() -> Result<Rational> {
                 Rational best{};
                 bool any = false;

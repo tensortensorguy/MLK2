@@ -88,4 +88,51 @@ using CoeffRow = SmallVector<int64_t, 8>;  // [c0, c1..cd] for one statement
     return f.has_value() && *f != Feasibility::Empty;
 }
 
+/// True when the statement's dim d is pinned to a compile-time constant:
+/// singleton own-bounds, or a deep dim beyond the statement's own depth
+/// (pinned to 0 by extraction — see scop.h).
+[[nodiscard]] inline bool dimPinnedAt(const Statement& s, uint32_t d,
+                                      int64_t* value) {
+    if (d < s.ownLower.size() && d < s.ownUpper.size()) {
+        if (s.ownLower[d] == s.ownUpper[d]) {
+            *value = s.ownLower[d];
+            return true;
+        }
+        return false;
+    }
+    if (d >= s.depth) {
+        *value = 0;
+        return true;
+    }
+    return false;
+}
+
+/// True when the statement's dim d actually varies over its domain.
+[[nodiscard]] inline bool dimVaries(const Statement& s, uint32_t d) {
+    int64_t pin = 0;
+    return !dimPinnedAt(s, d, &pin);
+}
+
+/// Row-constant fold for one statement: true with *value = constant +
+/// sum(coeff_d * pin_d) when every nonzero row coefficient sits on a dim
+/// pinned for this statement; false when any nonzero coefficient
+/// references a varying (loop-carried) dim. Magnitudes are bounded by
+/// construction (kPolyMaxScheduleCoeff coefficients, workload-specialized
+/// singleton bounds), so plain arithmetic is safe here.
+[[nodiscard]] inline bool rowEffectiveConst(const Statement& s,
+                                            const ScheduleRow& row,
+                                            int64_t* value) {
+    const auto& cs = row.stmtCoeffs[s.id];
+    int64_t folded = cs[0];
+    for (uint32_t d = 0; d + 1 < cs.size(); ++d) {
+        const int64_t c = cs[d + 1];
+        if (c == 0) continue;
+        int64_t pin = 0;
+        if (!dimPinnedAt(s, d, &pin)) return false;
+        folded += c * pin;
+    }
+    *value = folded;
+    return true;
+}
+
 }  // namespace mlk::poly::detail

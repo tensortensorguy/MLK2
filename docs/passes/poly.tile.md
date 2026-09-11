@@ -2,7 +2,7 @@
 
 **Kind**: Transform (Tier 2/3, kill switch: `poly.tile`)
 
-maximal tileable band prefix detection with knob-driven tile sizes (poly_tile_size)
+maximal tileable band prefix detection with knob-driven tile sizes (poly_tile_size); band legality proven on PIVOT-COORDINATE dependence distances (loop-iteration space), so skew-heavy schedules end the band correctly
 
 ## Contract (Rule 142)
 

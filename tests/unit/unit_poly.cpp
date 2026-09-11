@@ -1166,9 +1166,11 @@ MLK_TEST(poly, pluto_gemm_legal_schedule) {
     MLK_CHECK(anyNonParallel);
 }
 
-MLK_TEST(poly, pluto_no_deps_zero_rows) {
-    // y[i] = 2*x[i]: no dependences → zero schedule rows (all statements
-    // at time 0, codegen orders by origOrder).
+MLK_TEST(poly, pluto_no_deps_totality_row) {
+    // y[i] = 2*x[i]: no dependences, but the schedule still covers the
+    // varying dim (TOTALITY contract): one identity row on dim 0 so
+    // codegen emits the loop and replays every instance exactly once
+    // (zero rows would collapse the instance space to a single point).
     SymbolTable symbols;
     KernelModule km;
     KernelBuffer x;
@@ -1212,12 +1214,340 @@ MLK_TEST(poly, pluto_no_deps_zero_rows) {
     auto sched = mlk::poly::computePlutoSchedule(*scop, *deps);
     MLK_CHECK(sched.has_value());
     if (sched.has_value()) {
-        MLK_CHECK_EQ(sched->rows.size(), 0);
+        // Totality: exactly one row, pivoting the only varying dim,
+        // parallel (nothing to carry).
+        MLK_CHECK_EQ(sched->rows.size(), std::size_t{1});
+        MLK_CHECK_EQ(sched->pivotDim.size(), std::size_t{1});
+        if (sched->rows.size() == 1) {
+            MLK_CHECK_EQ(sched->pivotDim[0], 0u);
+            MLK_CHECK(sched->parallel[0]);
+            const auto& cs = sched->rows[0].stmtCoeffs[0];
+            MLK_CHECK(cs.size() >= 2 && cs[1] == 1);
+        }
         auto legal = mlk::poly::verifyScheduleLegality(*scop, *deps, *sched);
         MLK_CHECK(legal.has_value() && *legal);
     }
 }
 
+
+MLK_TEST(poly, pluto_fusion_emergence) {
+    // Producer/consumer chain t[i] = 2*x[i]; y[i] = t[i] + 1: the parallel
+    // row search must FUSE both statements into ONE loop over i (a single
+    // parallel schedule row — the old identity+separator scheduler emitted
+    // extra separator rows), and the fused kernel must execute bit-exact.
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer x;
+    x.name = symbols.intern("x");
+    x.dims = SmallVector<int64_t, 4>{8};
+    x.isInput = true;
+    KernelBuffer t;
+    t.name = symbols.intern("t");
+    t.dims = SmallVector<int64_t, 4>{8};
+    // The runtime ABI passes inputs and outputs only (no intermediate
+    // allocation yet — roadmap), so the scratch is an output.
+    t.isOutput = true;
+    KernelBuffer y;
+    y.name = symbols.intern("y");
+    y.dims = SmallVector<int64_t, 4>{8};
+    y.isOutput = true;
+    const uint32_t bx = km.addBuffer(x);
+    const uint32_t bt = km.addBuffer(t);
+    const uint32_t by = km.addBuffer(y);
+    const SymbolId vi = symbols.intern("i");
+
+    // S0: t[i] = 2 * x[i].
+    KernelNode compute0;
+    compute0.op = mlk::KernelOp::Compute;
+    KernelExpr mul;
+    mul.op = mlk::MathOp::Mul;
+    mul.a.kind = KernelOperand::Kind::ElemIdx;
+    mul.a.index = static_cast<int64_t>(bx);
+    mul.a.idxCoeffs = SmallVector<int64_t, 4>{1};
+    mul.b.kind = KernelOperand::Kind::Const;
+    mul.b.constValue = 2.0;
+    compute0.exprs.push_back(mul);
+    compute0.bufferA = bx;
+    KernelNode store0;
+    store0.op = mlk::KernelOp::Store;
+    store0.bufferOut = bt;
+    store0.outIndexCoeffs = SmallVector<int64_t, 4>{1};
+
+    // S1: y[i] = t[i] + 1.
+    KernelNode compute1;
+    compute1.op = mlk::KernelOp::Compute;
+    KernelExpr add;
+    add.op = mlk::MathOp::Add;
+    add.a.kind = KernelOperand::Kind::ElemIdx;
+    add.a.index = static_cast<int64_t>(bt);
+    add.a.idxCoeffs = SmallVector<int64_t, 4>{1};
+    add.b.kind = KernelOperand::Kind::Const;
+    add.b.constValue = 1.0;
+    compute1.exprs.push_back(add);
+    compute1.bufferA = bt;
+    KernelNode store1;
+    store1.op = mlk::KernelOp::Store;
+    store1.bufferOut = by;
+    store1.outIndexCoeffs = SmallVector<int64_t, 4>{1};
+
+    KernelNode loop;
+    loop.op = mlk::KernelOp::Loop;
+    loop.var = vi;
+    loop.begin = 0;
+    loop.end = 8;
+    {
+        uint32_t c0 = km.addNode(compute0);
+        uint32_t s0 = km.addNode(store0);
+        uint32_t c1 = km.addNode(compute1);
+        uint32_t s1 = km.addNode(store1);
+        loop.children.push_back(c0);
+        loop.children.push_back(s0);
+        loop.children.push_back(c1);
+        loop.children.push_back(s1);
+    }
+    (void)km.addNode(loop);
+
+    auto scop = mlk::poly::extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    auto deps = mlk::poly::computeDependences(*scop);
+    MLK_CHECK(deps.has_value());
+    if (!deps.has_value()) return;
+    MLK_CHECK_EQ(deps->size(), std::size_t{1});  // the t RAW chain
+    auto sched = mlk::poly::computePlutoSchedule(*scop, *deps);
+    MLK_CHECK(sched.has_value());
+    if (!sched.has_value()) return;
+    // FUSION: one parallel row, both statements varying on dim 0 with
+    // coefficient 1 (the fused loop), zero separators.
+    MLK_CHECK_EQ(sched->rows.size(), std::size_t{1});
+    if (sched->rows.size() == 1) {
+        MLK_CHECK_EQ(sched->pivotDim[0], 0u);
+        MLK_CHECK(sched->parallel[0]);
+        const auto& c0 = sched->rows[0].stmtCoeffs[0];
+        const auto& c1 = sched->rows[0].stmtCoeffs[1];
+        MLK_CHECK(c0.size() >= 2 && c1.size() >= 2);
+        MLK_CHECK(c0[1] == 1 && c1[1] == 1);
+    }
+    auto legal = mlk::poly::verifyScheduleLegality(*scop, *deps, *sched);
+    MLK_CHECK(legal.has_value() && *legal);
+
+    // Differential runtime: the fused nest executes bit-exact.
+    auto tiled = mlk::poly::computeTiling(*scop, *deps, *sched, 4);
+    MLK_CHECK(tiled.has_value());
+    if (!tiled.has_value()) return;
+    auto out = mlk::poly::emitScheduledKernel(*scop, *sched, *tiled, km,
+                                              symbols);
+    MLK_CHECK(out.has_value());
+    if (!out.has_value()) return;
+    SmallVector<double, 8> inX(8), scratchT(8, 0.0), outY(8, 0.0);
+    for (std::size_t i = 0; i < 8; ++i) {
+        inX[i] = static_cast<double>(i) * 0.5;
+    }
+    mlk::KernelBufferBindings io;
+    io.inputs.push_back(inX.data());
+    io.outputs.push_back(scratchT.data());  // t: output slot 0
+    io.outputs.push_back(outY.data());      // y: output slot 1
+    io.elements = 8;
+    auto r = mlk::executeKernelOnBuffers(*out, symbols, io, nullptr);
+    MLK_CHECK(r.has_value());
+    if (!r.has_value()) return;
+    for (std::size_t i = 0; i < 8; ++i) {
+        const double ref = 2.0 * inX[i] + 1.0;
+        MLK_CHECK(outY[i] == ref);  // bit-exact (Rule 43)
+    }
+}
+
+MLK_TEST(poly, pluto_wavefront_nest) {
+    // b[i][j] = b[i-1][j] + b[i][j-1] over i,j in [1,3] (the classic
+    // wavefront dependences (1,0) and (0,1), self-fed so the reads have
+    // real producers): the parallel search must fail (no zero-distance
+    // row exists), the sequential rows carry each dependence exactly
+    // once, and the schedule is legal.
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer b;
+    b.name = symbols.intern("b");
+    b.dims = SmallVector<int64_t, 4>{4, 4};
+    b.isInput = true;
+    b.isOutput = true;
+    const uint32_t bb = km.addBuffer(b);
+    const SymbolId vi = symbols.intern("i");
+    const SymbolId vj = symbols.intern("j");
+
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    KernelExpr e1;
+    e1.op = mlk::MathOp::Add;
+    e1.a.kind = KernelOperand::Kind::ElemIdx;
+    e1.a.index = static_cast<int64_t>(bb);
+    e1.a.idxCoeffs = SmallVector<int64_t, 4>{4, 1};  // 4i + j
+    e1.a.idxOffset = -4;                             // b[i-1][j]
+    KernelExpr e2;
+    e2.op = mlk::MathOp::Add;
+    e2.a.kind = KernelOperand::Kind::ElemIdx;
+    e2.a.index = static_cast<int64_t>(bb);
+    e2.a.idxCoeffs = SmallVector<int64_t, 4>{4, 1};  // 4i + j
+    e2.a.idxOffset = -1;                             // b[i][j-1]
+    KernelExpr sum;
+    sum.op = mlk::MathOp::Add;
+    sum.a.kind = KernelOperand::Kind::Temp;
+    sum.a.index = 0;
+    sum.b.kind = KernelOperand::Kind::Temp;
+    sum.b.index = 1;
+    compute.exprs.push_back(e1);
+    compute.exprs.push_back(e2);
+    compute.exprs.push_back(sum);
+    compute.bufferA = bb;
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = bb;
+    store.outIndexCoeffs = SmallVector<int64_t, 4>{4, 1};
+
+    KernelNode jLoop;
+    jLoop.op = mlk::KernelOp::Loop;
+    jLoop.var = vj;
+    jLoop.begin = 1;
+    jLoop.end = 4;
+    {
+        uint32_t c = km.addNode(compute);
+        uint32_t st = km.addNode(store);
+        jLoop.children.push_back(c);
+        jLoop.children.push_back(st);
+    }
+    KernelNode iLoop;
+    iLoop.op = mlk::KernelOp::Loop;
+    iLoop.var = vi;
+    iLoop.begin = 1;
+    iLoop.end = 4;
+    iLoop.children.push_back(km.addNode(jLoop));
+    (void)km.addNode(iLoop);
+
+    auto scop = mlk::poly::extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    auto deps = mlk::poly::computeDependences(*scop);
+    MLK_CHECK(deps.has_value());
+    if (!deps.has_value()) return;
+    MLK_CHECK(deps->size() >= 2);  // RAW (1,0) and RAW (0,1)
+    auto sched = mlk::poly::computePlutoSchedule(*scop, *deps);
+    MLK_CHECK(sched.has_value());
+    if (!sched.has_value()) return;
+    // Both rows carry: [i] resolves (1,0); [j] resolves (0,1) on the
+    // i-equal slice. No parallel row exists.
+    MLK_CHECK_EQ(sched->rows.size(), std::size_t{2});
+    if (sched->rows.size() == 2) {
+        MLK_CHECK(!sched->parallel[0]);
+        MLK_CHECK(!sched->parallel[1]);
+        MLK_CHECK_EQ(sched->pivotDim[0], 0u);
+        MLK_CHECK_EQ(sched->pivotDim[1], 1u);
+    }
+    auto legal = mlk::poly::verifyScheduleLegality(*scop, *deps, *sched);
+    MLK_CHECK(legal.has_value() && *legal);
+    // Determinism (Rule 53).
+    auto sched2 = mlk::poly::computePlutoSchedule(*scop, *deps);
+    MLK_CHECK(sched2.has_value());
+    if (sched2.has_value()) {
+        MLK_CHECK(sched2->rows[0].stmtCoeffs == sched->rows[0].stmtCoeffs);
+        MLK_CHECK(sched2->rows[1].stmtCoeffs == sched->rows[1].stmtCoeffs);
+    }
+}
+
+MLK_TEST(poly, pluto_sor_time_space_parallel) {
+    // 1-D SOR over a time dimension: a[t][i] = a[t-1][i-1] + a[t-1][i] +
+    // a[t-1][i+1]. Dependences (1,-1),(1,0),(1,+1): the t row is
+    // sequential (carries all three); the space row is PARALLEL — the
+    // wavefront-parallel structure, derived by the LP (not copied).
+    SymbolTable symbols;
+    KernelModule km;
+    constexpr int64_t kT = 4;
+    constexpr int64_t kN = 8;
+    KernelBuffer a;
+    a.name = symbols.intern("a");
+    a.dims = SmallVector<int64_t, 4>{kT, kN};
+    a.isInput = true;
+    a.isOutput = true;
+    const uint32_t ba = km.addBuffer(a);
+    const SymbolId vt = symbols.intern("t");
+    const SymbolId vi = symbols.intern("i");
+
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    KernelExpr e1;
+    e1.op = mlk::MathOp::Add;
+    e1.a.kind = KernelOperand::Kind::ElemIdx;
+    e1.a.index = static_cast<int64_t>(ba);
+    e1.a.idxCoeffs = SmallVector<int64_t, 4>{kN, 1};  // t*N + i
+    e1.a.idxOffset = -kN - 1;                         // a[t-1][i-1]
+    KernelExpr e2;
+    e2.op = mlk::MathOp::Add;
+    e2.a.kind = KernelOperand::Kind::ElemIdx;
+    e2.a.index = static_cast<int64_t>(ba);
+    e2.a.idxCoeffs = SmallVector<int64_t, 4>{kN, 1};
+    e2.a.idxOffset = -kN;                             // a[t-1][i]
+    KernelExpr e3;
+    e3.op = mlk::MathOp::Add;
+    e3.a.kind = KernelOperand::Kind::Temp;
+    e3.a.index = 0;
+    e3.b.kind = KernelOperand::Kind::ElemIdx;
+    e3.b.index = static_cast<int64_t>(ba);
+    e3.b.idxCoeffs = SmallVector<int64_t, 4>{kN, 1};
+    e3.b.idxOffset = -kN + 1;                         // a[t-1][i+1]
+    KernelExpr sum2;
+    sum2.op = mlk::MathOp::Add;
+    sum2.a.kind = KernelOperand::Kind::Temp;
+    sum2.a.index = 2;
+    sum2.b.kind = KernelOperand::Kind::Const;
+    sum2.b.constValue = 0.0;  // 3-way sum via two Adds + identity tail
+    compute.exprs.push_back(e1);
+    compute.exprs.push_back(e2);
+    compute.exprs.push_back(e3);
+    compute.exprs.push_back(sum2);
+    compute.bufferA = ba;
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = ba;
+    store.outIndexCoeffs = SmallVector<int64_t, 4>{kN, 1};
+
+    KernelNode iLoop;
+    iLoop.op = mlk::KernelOp::Loop;
+    iLoop.var = vi;
+    iLoop.begin = 1;
+    iLoop.end = kN - 1;
+    {
+        uint32_t c = km.addNode(compute);
+        uint32_t st = km.addNode(store);
+        iLoop.children.push_back(c);
+        iLoop.children.push_back(st);
+    }
+    KernelNode tLoop;
+    tLoop.op = mlk::KernelOp::Loop;
+    tLoop.var = vt;
+    tLoop.begin = 1;
+    tLoop.end = kT;
+    tLoop.children.push_back(km.addNode(iLoop));
+    (void)km.addNode(tLoop);
+
+    auto scop = mlk::poly::extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    auto deps = mlk::poly::computeDependences(*scop);
+    MLK_CHECK(deps.has_value());
+    if (!deps.has_value()) return;
+    MLK_CHECK(deps->size() >= 3);  // three RAW stencils
+    auto sched = mlk::poly::computePlutoSchedule(*scop, *deps);
+    MLK_CHECK(sched.has_value());
+    if (!sched.has_value()) return;
+    MLK_CHECK_EQ(sched->rows.size(), std::size_t{2});
+    if (sched->rows.size() == 2) {
+        MLK_CHECK_EQ(sched->pivotDim[0], 0u);  // t first: carries all
+        MLK_CHECK_EQ(sched->pivotDim[1], 1u);  // i: space loop
+        MLK_CHECK(!sched->parallel[0]);
+        MLK_CHECK(sched->parallel[1]);  // SPACE PARALLELISM
+        MLK_CHECK(sched->vectorizable[1]);
+    }
+    auto legal = mlk::poly::verifyScheduleLegality(*scop, *deps, *sched);
+    MLK_CHECK(legal.has_value() && *legal);
+}
 
 MLK_TEST(poly, tiling_gemm_band) {
     SymbolTable symbols;
@@ -1383,6 +1713,7 @@ MLK_TEST(poly, codegen_tiled_gemm) {
     MLK_CHECK(deps.has_value());
     auto sched = mlk::poly::computePlutoSchedule(*scop, *deps);
     MLK_CHECK(sched.has_value());
+    if (!sched.has_value()) return;
     // Tile size 2 divides M=4, N=5? N-1=4: (hi+1)=5 % 2 != 0 → the j
     // level bails; tile 2 divides i (4) and k (3? no: 3 % 2 != 0 → bail).
     // Use tile 1: divides everything (identity tiles).

@@ -2,7 +2,7 @@
 
 **Kind**: Transform (Tier 2/3, kill switch: `poly.schedule`)
 
-identity-prefix schedule + Feautrier-style separator rows (exact rational LP with Bland's rule); parallel/vector markings
+LP-selected affine schedule (exact rational simplex, Bland's rule): parallel-first fusion rows (all live dependence distances identically zero), distance-minimal sequential rows (epigraph objective + progress), identity fallback; per-row pivot dims; totality over varying dims; parallel/vector markings
 
 ## Contract (Rule 142)
 
