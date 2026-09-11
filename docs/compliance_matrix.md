@@ -169,6 +169,8 @@ expiry).
 | 158 | Replay artifacts sufficient | test (replay suite) |
 | 159 | ABI/FFI/security tests in CI | test (security suite; FFI tests roadmap) |
 | 160 | Governance/ADRs/compliance/hermetic | doc (this matrix + ADRs), build (hermetic default) |
+| 161 | Polyhedral schedules are legal (dependences preserved) or the baseline kernel is kept | test (unit_poly legality + differential execution), poly.verify in-pipeline |
+| 162 | Polyhedral engine decisions are exact (no rounded legality) | arch (exact rationals, checked int64, tri-state Feasibility), test (unit_poly) |
 
 ## Slop checklist (Rule 84) — verified for this tree
 

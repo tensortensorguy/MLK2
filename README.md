@@ -28,12 +28,13 @@ ctest --test-dir build
 
 | Area | Contents |
 |---|---|
-| `compiler/` | Math IR (index-based, interned, effect-carrying), type/property/effect inference, proof/accuracy contracts, pass framework with contracts + kill switches, 47 registered passes (analysis, canonicalization, e-graph, calculus, tensor, approximation, schedule, physical, lowering, backend), pipeline runner with per-tier pipelines |
+| `compiler/` | Math IR (index-based, interned, effect-carrying), type/property/effect inference, proof/accuracy contracts, pass framework with contracts + kill switches, 54 registered passes (analysis, canonicalization, e-graph, calculus, tensor, approximation, schedule, physical, polyhedral, lowering, backend), pipeline runner with per-tier pipelines |
 | `runtime/` | Tier 0 reference interpreter, GraphState/fallback/deoptimization, async tier-up with atomic kernel publication, telemetry, realization cache |
 | `autotuner/` | Declarative search spaces, verify-before-benchmark harness, roofline pruning, noise filtering, complete-key caching |
 | `superopt/` | Certificated candidate generators: scalar peephole, math-function approximation (measured-ULP degree-13 sin: max 2 ULPs vs libm), algebraic e-graph optimizer |
+| `polyhedral/` | Hermetic polyhedral engine (Presburger sets, Fourier-Motzkin, exact lexmin, rational simplex) + the poly.* pass family: SCoP extraction, exact dependence analysis, affine scheduling, tiling, Kernel IR code generation, schedule verification (docs/polyhedral_spec.md) |
 | `backends/` | Tier 0 interpreter backend, CPU backend (KernelModule execution + C++ source emission for AOT) |
-| `tools/` | `mlkc`, `mlk-verify`, `mlk-tune`, `mlk-bench`, `mlk-profile`, `mlk-replay`, `mlk-generate-profiles` |
+| `tools/` | `mlkc`, `mlk-poly`, `mlk-verify`, `mlk-tune`, `mlk-bench`, `mlk-profile`, `mlk-replay`, `mlk-generate-profiles` |
 | `tests/` | unit (10 suites), differential (Rule 43), fallback (Rule 102), fuzz (Rule 152), security (Rule 124), replay (Rule 158) |
 | `docs/` | architecture, IR/property/effect/profile/autotuner/superoptimizer/bytecode/ABI/cache specs, 47 pass docs, ADRs, compliance matrix |
 
