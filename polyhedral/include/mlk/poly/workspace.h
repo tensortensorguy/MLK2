@@ -22,6 +22,8 @@ struct PolyWorkspace {
     bool dependencesValid{false};
     PolySchedule schedule{};
     TiledInfo tiled{};
+    KernelModule baselineKernel{};  // pre-codegen copy (verify restores)
+    bool baselineSaved{false};
     bool scheduleValid{false};
     bool tileValid{false};
     bool codegenValid{false};

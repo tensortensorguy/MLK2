@@ -5,6 +5,7 @@
 
 #include "mlk/core/event_sink.h"
 #include "mlk/cost/cost_model.h"
+#include "mlk/poly/workspace.h"
 #include "mlk/verifier/graph_verifier.h"
 
 namespace mlk {
@@ -83,6 +84,16 @@ SmallVector<SymbolId, 16> tierPipeline(Tier tier, SymbolTable& symbols) {
             add("memory.place");
             add("memory.layout_select");
             add("lower.to_kernel_ir");
+            // Polyhedral pipeline (spec §8.13): synthesis, SCoP
+            // extraction, dependence analysis, Pluto scheduling, tiling,
+            // codegen, verification — each pass kill-switchable.
+            add("poly.synth");
+            add("poly.scop_detect");
+            add("poly.dependence");
+            add("poly.schedule");
+            add("poly.tile");
+            add("poly.codegen");
+            add("poly.verify");
             add("backend.emit_binary");
             break;
         case Tier::Tier3:
@@ -125,6 +136,16 @@ SmallVector<SymbolId, 16> tierPipeline(Tier tier, SymbolTable& symbols) {
             add("memory.place");
             add("memory.layout_select");
             add("lower.to_kernel_ir");
+            // Polyhedral pipeline (spec §8.13): synthesis, SCoP
+            // extraction, dependence analysis, Pluto scheduling, tiling,
+            // codegen, verification — each pass kill-switchable.
+            add("poly.synth");
+            add("poly.scop_detect");
+            add("poly.dependence");
+            add("poly.schedule");
+            add("poly.tile");
+            add("poly.codegen");
+            add("poly.verify");
             add("backend.emit_binary");
             break;
     }
@@ -157,6 +178,14 @@ Result<PassResult> PipelineRunner::run(Tier tier, PassContext& baseCtx,
     PassResult total;
     total.nodesBefore = graph.liveNodeCount();
     const auto passNames = tierPipeline(tier, symbols_);
+    poly::PolyWorkspace* polyWs =
+        tier == Tier::Tier2 || tier == Tier::Tier3
+            ? poly::createPolyWorkspace()
+            : nullptr;
+    struct WsGuard {
+        poly::PolyWorkspace* ws;
+        ~WsGuard() { poly::destroyPolyWorkspace(ws); }
+    } wsGuard{polyWs};
     for (const SymbolId nameId : passNames) {
         if (baseCtx.cancel != nullptr && baseCtx.cancel->cancelled()) {
             return err(ErrorCode::Cancelled, "pipeline cancelled", 132);
@@ -192,10 +221,21 @@ Result<PassResult> PipelineRunner::run(Tier tier, PassContext& baseCtx,
             }
         }
         PassContext ctx = baseCtx;
-        ctx.kernelOut = (nameId == symbols_.intern("lower.to_kernel_ir") ||
-                         nameId == symbols_.intern("backend.emit_binary"))
-                            ? kernelOut
-                            : nullptr;
+        const SymbolId lowerId = symbols_.intern("lower.to_kernel_ir");
+        const SymbolId emitId = symbols_.intern("backend.emit_binary");
+        const bool polyPass =
+            nameId == symbols_.intern("poly.synth") ||
+            nameId == symbols_.intern("poly.scop_detect") ||
+            nameId == symbols_.intern("poly.dependence") ||
+            nameId == symbols_.intern("poly.schedule") ||
+            nameId == symbols_.intern("poly.tile") ||
+            nameId == symbols_.intern("poly.codegen") ||
+            nameId == symbols_.intern("poly.verify");
+        ctx.polyWorkspace = polyWs;
+        ctx.kernelOut =
+            (nameId == lowerId || nameId == emitId || polyPass)
+                ? kernelOut
+                : nullptr;
         MLK_TRY_VAR(result, pass->run(ctx, graph));
         total.changed = total.changed || result.changed;
         for (const auto& inv : result.invalidatedAnalyses) {

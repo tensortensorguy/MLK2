@@ -4,6 +4,9 @@
 #include <optional>
 
 #include "mlk/poly/poly.h"
+#include "mlk/runtime/execution.h"
+
+#include <cmath>
 
 #include "mlk_test.h"
 
@@ -1497,6 +1500,102 @@ MLK_TEST(poly, full_chain_baseline_to_transformed) {
 
     mlk::poly::destroyPolyWorkspace(ws);
     (void)bufC;
+}
+
+
+MLK_TEST(poly, runtime_execute_transformed_gemm) {
+    // Differential milestone (Rules 43/85/90): run the TRANSFORMED GEMM
+    // kernel over dense buffers and compare against a straightforward
+    // reference implementation — bit-exact (same accumulation order per
+    // output cell: k ascending).
+    SymbolTable symbols;
+    mlk::DiagnosticEngine diag;
+    mlk::PassContext ctx;
+    ctx.symbols = &symbols;
+    ctx.diag = &diag;
+    ctx.tier = mlk::Tier::Tier2;
+    mlk::poly::PolyWorkspace* ws = mlk::poly::createPolyWorkspace();
+    ctx.polyWorkspace = ws;
+    mlk::MathGraph graph(&symbols);
+    mlk::passes::registerAllPasses(symbols);
+
+    constexpr int64_t M = 8, K = 6, N = 7;
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{M, K};
+    a.isInput = true;
+    KernelBuffer b;
+    b.name = symbols.intern("B");
+    b.dims = SmallVector<int64_t, 4>{K, N};
+    b.isInput = true;
+    KernelBuffer c;
+    c.name = symbols.intern("C");
+    c.dims = SmallVector<int64_t, 4>{M, N};
+    c.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufB = km.addBuffer(b);
+    const uint32_t bufC = km.addBuffer(c);
+    KernelNode call;
+    call.op = mlk::KernelOp::Call;
+    call.math = mlk::MathOp::MatMul;
+    call.bufferA = bufA;
+    call.bufferB = bufB;
+    call.bufferOut = bufC;
+    (void)km.addNode(call);
+    ctx.kernelOut = &km;
+
+    mlk::MathGraph g2(&symbols);
+    auto passFn = [&](const char* name) -> mlk::Pass* {
+        return mlk::PassRegistry::instance().byName(symbols.intern(name));
+    };
+    for (const char* name :
+         {"poly.synth", "poly.scop_detect", "poly.dependence",
+          "poly.schedule", "poly.tile", "poly.codegen", "poly.verify"}) {
+        auto r = passFn(name)->run(ctx, g2);
+        MLK_CHECK(r.has_value());
+    }
+    MLK_CHECK(ws->codegenValid);
+
+    // Bind buffers with a deterministic pattern.
+    const std::size_t nA = static_cast<std::size_t>(M * K);
+    const std::size_t nB = static_cast<std::size_t>(K * N);
+    const std::size_t nC = static_cast<std::size_t>(M * N);
+    SmallVector<double, 8> bufInA(nA), bufInB(nB), bufOutC(nC, 0.0);
+    for (std::size_t i = 0; i < nA; ++i) {
+        bufInA[i] = static_cast<double>((i * 7) % 13) * 0.25;
+    }
+    for (std::size_t i = 0; i < nB; ++i) {
+        bufInB[i] = static_cast<double>((i * 5) % 11) * 0.5;
+    }
+    mlk::KernelBufferBindings io;
+    io.inputs.push_back(bufInA.data());
+    io.inputs.push_back(bufInB.data());
+    io.outputs.push_back(bufOutC.data());
+    io.elements = M * K;
+
+    auto r = mlk::executeKernelOnBuffers(km, symbols, io, nullptr);
+    MLK_CHECK(r.has_value());
+    if (!r.has_value()) {
+        mlk::poly::destroyPolyWorkspace(ws);
+        return;
+    }
+    // Reference: C[i][j] = sum_k A[i][k] * B[k][j] (k ascending).
+    int mismatches = 0;
+    for (int64_t i = 0; i < M && mismatches == 0; ++i) {
+        for (int64_t j = 0; j < N && mismatches == 0; ++j) {
+            double ref = 0.0;
+            for (int64_t k = 0; k < K; ++k) {
+                ref += bufInA[static_cast<std::size_t>(i * K + k)] *
+                       bufInB[static_cast<std::size_t>(k * N + j)];
+            }
+            const double got =
+                bufOutC[static_cast<std::size_t>(i * N + j)];
+            if (std::fabs(ref - got) > 1e-9) ++mismatches;
+        }
+    }
+    MLK_CHECK_EQ(mismatches, 0);
+    mlk::poly::destroyPolyWorkspace(ws);
 }
 
 MLK_TEST_MAIN("poly")

@@ -55,6 +55,47 @@ struct ExprEvaluator {
     const SmallVector<double, 8>& scalars;
     SinFamily sinFamily;
     double temps[kMaxTempSlots] = {};
+    // Polyhedral multi-dim context: enclosing loop-var values (outermost
+    // first) and the buffer table for ElemIdx operands. Empty stack and
+    // null module => legacy 1-D evaluation.
+    const SmallVector<int64_t, 8>* vars{nullptr};
+    const KernelModule* module{nullptr};
+    const KernelBufferBindings* io{nullptr};
+
+    /// Flat element address of an ElemIdx operand:
+    ///   sum coeffs[p] * vars[p] + offset
+    [[nodiscard]] int64_t flatIndex(const KernelOperand& o) const noexcept {
+        int64_t flat = o.idxOffset;
+        if (vars != nullptr) {
+            const std::size_t n = o.idxCoeffs.size() < vars->size()
+                                      ? o.idxCoeffs.size()
+                                      : vars->size();
+            for (std::size_t p = 0; p < n; ++p) {
+                flat += o.idxCoeffs[p] * (*vars)[p];
+            }
+        }
+        return flat;
+    }
+
+    /// Resolves an ElemIdx operand to its buffer element pointer.
+    [[nodiscard]] const double* elemPtr(const KernelOperand& o) const {
+        if (module == nullptr || io == nullptr) return nullptr;
+        if (o.index < 0 ||
+            static_cast<uint32_t>(o.index) >= module->buffers.size()) {
+            return nullptr;
+        }
+        const uint32_t bid = static_cast<uint32_t>(o.index);
+        const double* base = nullptr;
+        if (module->buffers[bid].isInput) {
+            base = bid < io->inputs.size() ? io->inputs[bid] : nullptr;
+        } else {
+            const uint32_t outIdx =
+                bid - static_cast<uint32_t>(io->inputs.size());
+            base = outIdx < io->outputs.size() ? io->outputs[outIdx]
+                                               : nullptr;
+        }
+        return base != nullptr ? base + flatIndex(o) : nullptr;
+    }
 
     [[nodiscard]] double evalOne(const KernelOperand& o,
                                  const int64_t i) const noexcept {
@@ -72,15 +113,10 @@ struct ExprEvaluator {
                 const auto idx = static_cast<std::size_t>(o.index);
                 return idx < kMaxTempSlots ? temps[idx] : 0.0;
             }
-            case KernelOperand::Kind::ElemIdx:
-                // Affine multi-index operands are produced only by the
-                // polyhedral codegen and executed by the multi-dim tree
-                // walker (see docs/polyhedral_spec.md §executor); the
-                // 1-D executor never receives them. Reaching here means
-                // a poly kernel hit the legacy path — the documented
-                // behavior is the same neutral element the other
-                // unbound cases use, never a crash (Rule 115).
-                return 0.0;
+            case KernelOperand::Kind::ElemIdx: {
+                const double* p = elemPtr(o);
+                return p != nullptr ? *p : 0.0;
+            }
         }
         return 0.0;
     }
@@ -256,6 +292,232 @@ void gemmRowBlock(const double* a, const double* b, double* c,
     }
 }
 
+
+// --- Multi-dim tree walker (polyhedral kernels) -----------------------------
+//
+// Walks the KernelModule forest recursively with a loop-var stack:
+//   - Loop: resolves bounds (affine beginCoeffs/endCoeffs over the stack,
+//     buffer-dim bounds via endBuf/endDim, or constants) and iterates
+//     var from begin while var < end (step must be 1 for multi-dim nests;
+//     other steps are rejected at SCoP extraction),
+//   - Compute: evaluates the fused expression chain with ElemIdx operands
+//     and forwards the last temp to the paired Store,
+//   - Store: writes (or accumulates into) the affine target,
+//   - Call: delegated to the legacy blocked GEMM path.
+// Single-threaded by design for v1 (Rule 12 roadmap; the legacy 1-D fast
+// path above keeps its chunked threading).
+struct MultiDimWalker {
+    const KernelModule& kernel;
+    SymbolTable& symbols;
+    const KernelBufferBindings& io;
+    CancellationToken* cancel;
+    SmallVector<int64_t, 8> vars{};
+
+    [[nodiscard]] Result<void> execNode(uint32_t nodeId,
+                                        const KernelNode* pairedStore) {
+        if (nodeId >= kernel.nodes.size()) {
+            return err(ErrorCode::InvalidGraph,
+                       "walker: node id out of range");
+        }
+        const KernelNode& n = kernel.nodes[nodeId];
+        switch (n.op) {  // Rule 78: exhaustive
+            case KernelOp::Loop: {
+                if (n.step != 1) {
+                    return err(ErrorCode::UnsupportedCapability,
+                               "walker: non-unit loop step");
+                }
+                int64_t begin = n.begin;
+                int64_t endInclusive = n.end - 1;
+                if (!n.beginCoeffs.empty()) {
+                    begin = n.beginOffset;
+                    for (std::size_t p = 0;
+                         p < n.beginCoeffs.size() && p < vars.size(); ++p) {
+                        begin += n.beginCoeffs[p] * vars[p];
+                    }
+                }
+                if (!n.endCoeffs.empty()) {
+                    endInclusive = n.endOffset;
+                    for (std::size_t p = 0;
+                         p < n.endCoeffs.size() && p < vars.size(); ++p) {
+                        endInclusive += n.endCoeffs[p] * vars[p];
+                    }
+                } else if (n.end == constants::kKernelLoopDynamicBound &&
+                           n.endBuf != constants::kInvalidId &&
+                           n.endDim >= 0 &&
+                           n.endBuf < kernel.buffers.size() &&
+                           n.endDim <
+                               static_cast<int32_t>(
+                                   kernel.buffers[n.endBuf].dims.size())) {
+                    endInclusive =
+                        kernel.buffers[n.endBuf].dims[n.endDim] - 1;
+                } else if (n.end == constants::kKernelLoopDynamicBound) {
+                    endInclusive = io.elements - 1;  // legacy dynamic form
+                }
+                for (int64_t v = begin; v <= endInclusive; ++v) {
+                    if (cancel != nullptr && cancel->cancelled()) {
+                        return err(ErrorCode::Cancelled,
+                                   "kernel execution cancelled", 130);
+                    }
+                    vars.push_back(v);
+                    // Children with Compute+Store pairing by sibling order.
+                    for (std::size_t ci = 0; ci < n.children.size(); ++ci) {
+                        const uint32_t cid = n.children[ci];
+                        if (cid >= kernel.nodes.size()) {
+                            return err(ErrorCode::InvalidGraph,
+                                       "walker: child id out of range");
+                        }
+                        const KernelNode& c = kernel.nodes[cid];
+                        if (c.op == KernelOp::Compute) {
+                            const KernelNode* store = nullptr;
+                            if (ci + 1 < n.children.size() &&
+                                n.children[ci + 1] <
+                                    kernel.nodes.size() &&
+                                kernel.nodes[n.children[ci + 1]].op ==
+                                    KernelOp::Store) {
+                                store = &kernel.nodes[n.children[ci + 1]];
+                            }
+                            MLK_TRYV(execNode(cid, store));
+                            if (store != nullptr) ++ci;  // consume Store
+                            continue;
+                        }
+                        MLK_TRYV(execNode(cid, nullptr));
+                    }
+                    vars.pop_back();
+                }
+                break;
+            }
+            case KernelOp::Compute: {
+                if (pairedStore == nullptr) {
+                    // Bare Compute without its Store: no semantics here.
+                    break;
+                }
+                MLK_TRYV(execPair(n, *pairedStore));
+                break;
+            }
+            case KernelOp::Store:
+            case KernelOp::Load:
+            case KernelOp::AllocBuffer:
+            case KernelOp::CopyBuffer:
+            case KernelOp::Barrier:
+            case KernelOp::Trace:
+                // Consumed by the pairing above or carry no semantics
+                // for this walker.
+                break;
+            case KernelOp::Guard:
+                // Guarded execution belongs to ExecutionEngine (Rule 5).
+                break;
+            case KernelOp::Call:
+                MLK_TRYV(execGemm(n));
+                break;
+            case KernelOp::kCount:
+                return err(ErrorCode::InvalidGraph,
+                           "walker: kCount sentinel");
+        }
+        return {};
+    }
+
+    /// Executes a Compute+Store pair at one loop-nest point.
+    [[nodiscard]] Result<void> execPair(const KernelNode& compute,
+                                        const KernelNode& store) {
+        // Multi-dim computes address memory exclusively through ElemIdx
+        // operands; legacy ElemA/ElemB belong to the 1-D fast path.
+        for (const KernelExpr& e : compute.exprs) {
+            for (const KernelOperand* o : {&e.a, &e.b}) {
+                if (o->kind == KernelOperand::Kind::ElemA ||
+                    o->kind == KernelOperand::Kind::ElemB) {
+                    return err(ErrorCode::InvalidGraph,
+                               "walker: legacy element operand in a "
+                               "multi-dim compute");
+                }
+            }
+        }
+        double* outP = resolveOutput(kernel, io, store.bufferOut);
+        if (outP == nullptr) {
+            return err(ErrorCode::InvalidArgument,
+                       "walker: output buffer not bound");
+        }
+        const SinFamily fam =
+            compute.family == kInvalidSymbolId
+                ? SinFamily::Libm
+                : resolveFamily(symbols, compute.family);
+        ExprEvaluator ev{compute.exprs,
+                         nullptr,
+                         nullptr,
+                         io.scalars,
+                         fam,
+                         {},
+                         &vars,
+                         &kernel,
+                         &io};
+        KernelOperand target;
+        target.kind = KernelOperand::Kind::ElemIdx;
+        target.index = static_cast<int64_t>(store.bufferOut);
+        target.idxCoeffs = store.outIndexCoeffs;
+        target.idxOffset = store.outIndexOffset;
+        const int64_t flat = ev.flatIndex(target);
+        if (flat < 0) {
+            return err(ErrorCode::InvalidGraph,
+                       "walker: negative store address");
+        }
+        const double value = ev.run(-1);
+        double& slot = outP[flat];
+        if (store.accumulate) {
+            slot += value;
+        } else {
+            slot = value;
+        }
+        return {};
+    }
+
+    /// Legacy blocked GEMM for Call(MatMul) nodes (shared with the 1-D
+    /// executor).
+    [[nodiscard]] Result<void> execGemm(const KernelNode& top) {
+        if (top.math != MathOp::MatMul) {
+            return err(ErrorCode::UnsupportedCapability,
+                       "no executor for call target", 121);
+        }
+        if (top.bufferA >= kernel.buffers.size() ||
+            top.bufferB >= kernel.buffers.size() ||
+            top.bufferOut >= kernel.buffers.size()) {
+            return err(ErrorCode::InvalidGraph,
+                       "matmul buffer id out of range");
+        }
+        const KernelBuffer& ba = kernel.buffers[top.bufferA];
+        const KernelBuffer& bb = kernel.buffers[top.bufferB];
+        const KernelBuffer& bc = kernel.buffers[top.bufferOut];
+        if (ba.dims.size() != 2 || bb.dims.size() != 2 ||
+            bc.dims.size() != 2) {
+            return err(ErrorCode::InvalidGraph,
+                       "matmul requires rank-2 buffer dims");
+        }
+        const double* a = resolveInput(kernel, io, top.bufferA);
+        const double* b = resolveInput(kernel, io, top.bufferB);
+        double* c = resolveOutput(kernel, io, top.bufferOut);
+        if (a == nullptr || b == nullptr || c == nullptr) {
+            return err(ErrorCode::InvalidArgument,
+                       "matmul buffers not bound by the caller");
+        }
+        const int64_t m = ba.dims[0];
+        const int64_t k = ba.dims[1];
+        const int64_t n = bc.dims[1];
+        if (bb.dims[0] != k || bc.dims[0] != m || bc.dims[1] != n) {
+            return err(ErrorCode::InvalidGraph,
+                       "matmul operand shapes incompatible");
+        }
+        const SymbolId tmKey = symbols.intern("tile_m");
+        const SymbolId tnKey = symbols.intern("tile_n");
+        const SymbolId tkKey = symbols.intern("tile_k");
+        gemmRowBlock(a, b, c, n, k,
+                     scheduleParam(kernel, tmKey,
+                                   constants::kDefaultTileM),
+                     scheduleParam(kernel, tnKey,
+                                   constants::kDefaultTileN),
+                     scheduleParam(kernel, tkKey,
+                                   constants::kDefaultTileK), 0, m);
+        return {};
+    }
+};
+
 }  // namespace
 
 Result<void> executeKernelOnBuffers(const KernelModule& kernel,
@@ -264,6 +526,47 @@ Result<void> executeKernelOnBuffers(const KernelModule& kernel,
                                     CancellationToken* cancel) {
     if (kernel.nodes.empty()) {
         return err(ErrorCode::InvalidGraph, "kernel module has no nodes");
+    }
+    // Multi-dim detection: any ElemIdx operand, affine loop bound,
+    // accumulate store, or buffer-dim loop bound routes the whole module
+    // through the tree walker (uniform handling of mixed forests).
+    bool multiDim = false;
+    for (const KernelNode& n : kernel.nodes) {
+        if (n.accumulate || !n.beginCoeffs.empty() ||
+            !n.endCoeffs.empty() ||
+            (n.end == constants::kKernelLoopDynamicBound &&
+             n.endBuf != constants::kInvalidId)) {
+            multiDim = true;
+        }
+        if (n.op == KernelOp::Loop && n.end >= 0 &&
+            kernel.buffers.size() > 0 && false) {
+            multiDim = true;  // (dim-bound loops detected via endBuf above)
+        }
+        for (const KernelExpr& e : n.exprs) {
+            if (e.a.kind == KernelOperand::Kind::ElemIdx ||
+                e.b.kind == KernelOperand::Kind::ElemIdx) {
+                multiDim = true;
+            }
+        }
+    }
+    if (multiDim) {
+        MultiDimWalker walker{kernel, symbols, io, cancel, {}};
+        for (uint32_t i = 0; i < kernel.nodes.size(); ++i) {
+            // Flat-forest roots only (children execute via their parents).
+            bool referenced = false;
+            for (const KernelNode& n : kernel.nodes) {
+                for (const uint32_t c : n.children) {
+                    referenced = referenced || c == i;
+                }
+            }
+            if (referenced) continue;
+            MLK_TRYV(walker.execNode(i, nullptr));
+        }
+        if (cancel != nullptr && cancel->cancelled()) {
+            return err(ErrorCode::Cancelled,
+                       "kernel execution cancelled", 130);
+        }
+        return {};
     }
     for (const KernelNode& top : kernel.nodes) {
         switch (top.op) {  // Rule 78: exhaustive

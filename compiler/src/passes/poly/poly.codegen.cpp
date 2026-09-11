@@ -43,6 +43,10 @@ public:
                     poly::emitScheduledKernel(ws.scop, ws.schedule,
                                               ws.tiled, *ctx.kernelOut,
                                               *ctx.symbols));
+        // Rule 62/102: keep the pre-codegen kernel so poly.verify can
+        // restore it if the transformed schedule fails verification.
+        ws.baselineKernel = *ctx.kernelOut;
+        ws.baselineSaved = true;
         *ctx.kernelOut = std::move(kernel);
         ws.codegenValid = true;
         r.changed = true;
