@@ -17,6 +17,7 @@ mlk_add_library(mlk_poly
         src/dependence.cpp
         src/lp.cpp
         src/pluto.cpp
+        src/tile.cpp
         src/workspace.cpp
     PUBLIC_DEPS mlk_core mlk_ir
 )

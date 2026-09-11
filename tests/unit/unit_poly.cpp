@@ -1150,14 +1150,11 @@ MLK_TEST(poly, pluto_gemm_legal_schedule) {
             MLK_CHECK(sched2->rows[r].stmtCoeffs == sched->rows[r].stmtCoeffs);
         }
     }
-    // The k-reduction must be carried (not parallel) somewhere or the
-    // schedule must resolve it strictly; the innermost REDUCTION dim can
-    // never be parallel-marked while the accumulator chain is unresolved
-    // at earlier rows. Verify at least one row exists that carries the
-    // chain (parallel=false) OR all rows already resolve it.
+    // The k-reduction chain must be CARRIED somewhere (some row with
+    // parallel=false) — the accumulator order is never fully parallel.
     bool anyNonParallel = false;
     for (const bool p : sched->parallel) anyNonParallel |= !p;
-    MLK_CHECK(anyNonParallel || sched->rows.empty());
+    MLK_CHECK(anyNonParallel);
 }
 
 MLK_TEST(poly, pluto_no_deps_zero_rows) {
@@ -1209,6 +1206,86 @@ MLK_TEST(poly, pluto_no_deps_zero_rows) {
         MLK_CHECK_EQ(sched->rows.size(), 0);
         auto legal = mlk::poly::verifyScheduleLegality(*scop, *deps, *sched);
         MLK_CHECK(legal.has_value() && *legal);
+    }
+}
+
+
+MLK_TEST(poly, tiling_gemm_band) {
+    SymbolTable symbols;
+    KernelModule km = buildGemmKernel(symbols);
+    auto scop = mlk::poly::extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    auto deps = mlk::poly::computeDependences(*scop);
+    MLK_CHECK(deps.has_value());
+    if (!deps.has_value()) return;
+    auto sched = mlk::poly::computePlutoSchedule(*scop, *deps);
+    MLK_CHECK(sched.has_value());
+    if (!sched.has_value()) return;
+    // Tiling consistency: the band is a prefix of the schedule rows; every
+    // band row carries a tile size; dims carried by the reduction chain
+    // are never parallel-marked.
+    auto tiled = mlk::poly::computeTiling(*scop, *deps, *sched, 32);
+    MLK_CHECK(tiled.has_value());
+    if (!tiled.has_value()) return;
+    MLK_CHECK(tiled->bandEnd <= sched->rows.size());
+    MLK_CHECK_EQ(tiled->tileSizes.size(),
+                 static_cast<std::size_t>(tiled->bandEnd));
+    MLK_CHECK(tiled->tiled == (tiled->bandEnd > 0));
+    for (const int64_t t : tiled->tileSizes) MLK_CHECK_EQ(t, 32);
+    bool anyNonParallel = false;
+    for (const bool p : sched->parallel) anyNonParallel |= !p;
+    MLK_CHECK(anyNonParallel);
+}
+
+MLK_TEST(poly, tiling_no_deps_no_band) {
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer x;
+    x.name = symbols.intern("x");
+    x.dims = SmallVector<int64_t, 4>{8};
+    x.isInput = true;
+    KernelBuffer y;
+    y.name = symbols.intern("y");
+    y.dims = SmallVector<int64_t, 4>{8};
+    y.isOutput = true;
+    const uint32_t bx = km.addBuffer(x);
+    const uint32_t by = km.addBuffer(y);
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    KernelExpr e;
+    e.op = mlk::MathOp::Mul;
+    e.a.kind = mlk::KernelOperand::Kind::ElemA;
+    compute.exprs.push_back(e);
+    compute.bufferA = bx;
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = by;
+    KernelNode loop;
+    loop.op = mlk::KernelOp::Loop;
+    loop.var = symbols.intern("i");
+    loop.begin = 0;
+    loop.end = 8;
+    {
+        uint32_t cid = km.addNode(compute);
+        uint32_t sid = km.addNode(store);
+        loop.children.push_back(cid);
+        loop.children.push_back(sid);
+    }
+    (void)km.addNode(loop);
+    auto scop = mlk::poly::extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    auto deps = mlk::poly::computeDependences(*scop);
+    MLK_CHECK(deps.has_value());
+    auto sched = mlk::poly::computePlutoSchedule(*scop, *deps);
+    MLK_CHECK(sched.has_value());
+    if (!sched.has_value()) return;
+    auto tiled = mlk::poly::computeTiling(*scop, *deps, *sched, 32);
+    MLK_CHECK(tiled.has_value());
+    if (tiled.has_value()) {
+        MLK_CHECK(!tiled->tiled);  // zero rows: nothing to tile
+        MLK_CHECK_EQ(tiled->bandEnd, 0);
     }
 }
 

@@ -75,6 +75,7 @@ void registerAllPasses(SymbolTable& symbols) {
     register_poly_scop_detect_pass(symbols);
     register_poly_dependence_pass(symbols);
     register_poly_schedule_pass(symbols);
+    register_poly_tile_pass(symbols);
     // Backend (spec §8.12)
     register_backend_emit_binary_pass(symbols);
 }

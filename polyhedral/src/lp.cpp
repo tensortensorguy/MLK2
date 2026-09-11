@@ -87,7 +87,23 @@ public:
                 sum = added;
             }
         }
-        return sum.isZero();
+        if (!sum.isZero()) return false;
+        // Drive degenerate basic artificials (value 0) out of the basis:
+        // without this, phase-2 pivots could grow them back and yield a
+        // point that violates the original equality rows.
+        for (uint32_t r = 0; r < m_; ++r) {
+            if (basis_[r] < nStruct_ + nSurplus_) continue;
+            for (uint32_t c = 0; c < nStruct_ + nSurplus_; ++c) {
+                if (!rows_[r][c].isZero()) {
+                    MLK_TRYV(pivot(r, c));
+                    break;
+                }
+            }
+            // No structural pivot column: the row is redundant (all-zero
+            // in non-artificial columns) — its rhs stays 0 forever and it
+            // constrains nothing; safe to leave as-is.
+        }
+        return true;
     }
 
     /// Phase 2: minimize c.x; fills the objective and primal solution.

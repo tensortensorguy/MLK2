@@ -14,5 +14,6 @@
 #include "mlk/poly/lp.h"
 #include "mlk/poly/pluto.h"
 #include "mlk/poly/rational.h"
+#include "mlk/poly/tile.h"
 #include "mlk/poly/scop.h"
 #include "mlk/poly/workspace.h"
