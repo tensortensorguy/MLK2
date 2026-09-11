@@ -72,6 +72,7 @@ void registerAllPasses(SymbolTable& symbols) {
     // Lowering (spec §8.11)
     register_lower_to_kernel_ir_pass(symbols);
     // Polyhedral (spec §8.13 — docs/polyhedral_spec.md)
+    register_poly_synth_pass(symbols);
     register_poly_scop_detect_pass(symbols);
     register_poly_dependence_pass(symbols);
     register_poly_schedule_pass(symbols);

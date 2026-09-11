@@ -146,6 +146,7 @@ mlk_add_library(mlk_passes
         # Lowering (spec §8.11)
         src/passes/lower/lower.to_kernel_ir.cpp
         # Polyhedral (spec §8.13 — docs/polyhedral_spec.md; 1:1 pass->file)
+        src/passes/poly/poly.synth.cpp
         src/passes/poly/poly.scop_detect.cpp
         src/passes/poly/poly.dependence.cpp
         src/passes/poly/poly.schedule.cpp

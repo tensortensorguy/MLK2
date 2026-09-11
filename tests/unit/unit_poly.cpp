@@ -567,6 +567,11 @@ MLK_TEST(poly, set_with_symbols_emptiness_parametric) {
 
 // --- SCoP extraction (iteration 2) -------------------------------------------
 
+#include "mlk/core/diagnostics.h"
+#include "mlk/pass/pass_registry.h"
+#include "mlk/pipeline/pipeline_runner.h"
+
+using mlk::DiagnosticEngine;
 using mlk::KernelBuffer;
 using mlk::KernelExpr;
 using mlk::KernelModule;
@@ -1389,6 +1394,100 @@ MLK_TEST(poly, codegen_tiled_gemm) {
     MLK_CHECK(!km2.nodes.empty());
     auto legal2 = mlk::poly::verifyScheduleLegality(*scop, *deps, *sched);
     MLK_CHECK(legal2.has_value() && *legal2);
+}
+
+
+MLK_TEST(poly, full_chain_baseline_to_transformed) {
+    // THE end-to-end milestone: a baseline GEMM kernel (Call node, the
+    // lower.to_kernel_ir shape) flows through poly.synth -> scop_detect ->
+    // dependence -> schedule -> tile -> codegen and comes out as a legal
+    // fused, tiled loop forest.
+    SymbolTable symbols;
+    mlk::DiagnosticEngine diag;
+    mlk::PassContext ctx;
+    ctx.symbols = &symbols;
+    ctx.diag = &diag;
+    ctx.tier = mlk::Tier::Tier2;
+    mlk::poly::PolyWorkspace* ws = mlk::poly::createPolyWorkspace();
+    ctx.polyWorkspace = ws;
+    mlk::MathGraph graph(&symbols);
+
+    // Baseline: buffers + a single Call(MatMul) node.
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{kTestM, kTestK};
+    a.isInput = true;
+    KernelBuffer b;
+    b.name = symbols.intern("B");
+    b.dims = SmallVector<int64_t, 4>{kTestK, kTestN};
+    b.isInput = true;
+    KernelBuffer c;
+    c.name = symbols.intern("C");
+    c.dims = SmallVector<int64_t, 4>{kTestM, kTestN};
+    c.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufB = km.addBuffer(b);
+    const uint32_t bufC = km.addBuffer(c);
+    KernelNode call;
+    call.op = mlk::KernelOp::Call;
+    call.math = mlk::MathOp::MatMul;
+    call.bufferA = bufA;
+    call.bufferB = bufB;
+    call.bufferOut = bufC;
+    (void)km.addNode(call);
+    ctx.kernelOut = &km;
+
+    auto passFn = [&](const char* name) -> mlk::Pass* {
+        return mlk::PassRegistry::instance().byName(
+            symbols.intern(name));
+    };
+
+    // 1. poly.synth: Call -> init + accumulate nest.
+    {
+        auto r = passFn("poly.synth")->run(ctx, graph);
+        MLK_CHECK(r.has_value());
+        MLK_CHECK(r->changed);
+    }
+    MLK_CHECK_EQ(km.nodes.size(), std::size_t{7});
+
+    // 2. scop_detect.
+    {
+        auto r = passFn("poly.scop_detect")->run(ctx, graph);
+        MLK_CHECK(r.has_value());
+        MLK_CHECK(ws->scopValid);
+        MLK_CHECK_EQ(ws->scop.statements.size(), 2);
+    }
+    // 3. dependences.
+    {
+        auto r = passFn("poly.dependence")->run(ctx, graph);
+        MLK_CHECK(r.has_value());
+        MLK_CHECK(ws->dependencesValid);
+        MLK_CHECK(ws->dependences.size() >= 3);
+    }
+    // 4. schedule.
+    {
+        auto r = passFn("poly.schedule")->run(ctx, graph);
+        MLK_CHECK(r.has_value());
+        MLK_CHECK(ws->scheduleValid);
+    }
+    // 5. tile.
+    {
+        auto r = passFn("poly.tile")->run(ctx, graph);
+        MLK_CHECK(r.has_value());
+        MLK_CHECK(ws->tileValid);
+    }
+    // 6. codegen.
+    {
+        auto r = passFn("poly.codegen")->run(ctx, graph);
+        MLK_CHECK(r.has_value());
+        MLK_CHECK(ws->codegenValid);
+        MLK_CHECK(r->changed);
+    }
+    MLK_CHECK_EQ(km.nodes.size(), std::size_t{7});  // same tree as before
+
+    mlk::poly::destroyPolyWorkspace(ws);
+    (void)bufC;
 }
 
 MLK_TEST_MAIN("poly")
