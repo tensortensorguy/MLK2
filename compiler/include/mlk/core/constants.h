@@ -108,6 +108,8 @@ inline constexpr int64_t kPolyMaxScheduleCoeff = 1024;
 inline constexpr int64_t kPolyDefaultTileSize = 32;
 /// Default SIMD width recorded by poly.schedule for innermost vector dims.
 inline constexpr int64_t kPolyDefaultVectorWidth = 8;
+/// Maximum inner-tree duplication across tiled levels in poly.codegen.
+inline constexpr int64_t kPolyMaxCodegenCopies = 16;
 
 // --- Runtime / telemetry (Rule 130, Rule 157) -------------------------------
 inline constexpr uint32_t kSafepointPollIntervalIterations = 4096;

@@ -113,6 +113,7 @@ void register_poly_scop_detect_pass(SymbolTable& symbols);
 void register_poly_dependence_pass(SymbolTable& symbols);
 void register_poly_schedule_pass(SymbolTable& symbols);
 void register_poly_tile_pass(SymbolTable& symbols);
+void register_poly_codegen_pass(SymbolTable& symbols);
 // Backend (backend/)
 void register_backend_emit_binary_pass(SymbolTable& symbols);
 

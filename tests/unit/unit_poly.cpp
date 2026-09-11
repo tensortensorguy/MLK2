@@ -1289,4 +1289,106 @@ MLK_TEST(poly, tiling_no_deps_no_band) {
     }
 }
 
+
+MLK_TEST(poly, codegen_gemm_fused_nest) {
+    SymbolTable symbols;
+    KernelModule km = buildGemmKernel(symbols);
+    auto scop = mlk::poly::extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    if (!scop.has_value()) return;
+    auto deps = mlk::poly::computeDependences(*scop);
+    MLK_CHECK(deps.has_value());
+    if (!deps.has_value()) return;
+    auto sched = mlk::poly::computePlutoSchedule(*scop, *deps);
+    MLK_CHECK(sched.has_value());
+    if (!sched.has_value()) return;
+    // Untiled emission for the structure check (tiled form is covered by
+    // the next test).
+    mlk::poly::TiledInfo untiled;
+    auto out = mlk::poly::emitScheduledKernel(*scop, *sched, untiled, km,
+                                              symbols);
+    MLK_CHECK(out.has_value());
+    if (!out.has_value()) return;
+    // Expected tree: for i { for j { S0(init); for k { S1(acc) } } }:
+    // flat arena: [c1, s1, kLoop, c0, s0, jLoop, iLoop] with iLoop the
+    // single root.
+    const KernelModule& km2 = *out;
+    MLK_CHECK_EQ(km2.buffers.size(), km.buffers.size());
+    MLK_CHECK(!km2.nodes.empty());
+    // Find the root (never referenced as a child).
+    uint32_t root = 0xFFFFFFFFu;
+    {
+        SmallVector<bool, 8> ref(km2.nodes.size(), false);
+        for (const auto& n : km2.nodes) {
+            for (const uint32_t c : n.children) {
+                if (c < ref.size()) ref[c] = true;
+            }
+        }
+        for (uint32_t i = 0; i < km2.nodes.size(); ++i) {
+            if (!ref[i] && km2.nodes[i].op == mlk::KernelOp::Loop) {
+                root = i;
+                break;
+            }
+        }
+    }
+    MLK_CHECK(root != 0xFFFFFFFFu);
+    if (root == 0xFFFFFFFFu) return;
+    // i loop with one child: the j loop.
+    const KernelNode& iLoop = km2.nodes[root];
+    MLK_CHECK_EQ(iLoop.begin, 0);
+    MLK_CHECK_EQ(iLoop.end, kTestM);
+    MLK_CHECK_EQ(iLoop.children.size(), 1);
+    const KernelNode& jLoop = km2.nodes[iLoop.children[0]];
+    MLK_CHECK_EQ(jLoop.end, kTestN);
+    // j body: [init compute, init store, k loop]
+    MLK_CHECK_EQ(jLoop.children.size(), 3);
+    const KernelNode& initC = km2.nodes[jLoop.children[0]];
+    const KernelNode& initS = km2.nodes[jLoop.children[1]];
+    const KernelNode& kLoop = km2.nodes[jLoop.children[2]];
+    MLK_CHECK_EQ(initC.op, mlk::KernelOp::Compute);
+    MLK_CHECK_EQ(initS.op, mlk::KernelOp::Store);
+    MLK_CHECK(!initS.accumulate);
+    MLK_CHECK_EQ(kLoop.op, mlk::KernelOp::Loop);
+    MLK_CHECK_EQ(kLoop.end, kTestK);
+    // k body: [acc compute, acc store] with accumulate = true.
+    MLK_CHECK_EQ(kLoop.children.size(), 2);
+    const KernelNode& accC = km2.nodes[kLoop.children[0]];
+    const KernelNode& accS = km2.nodes[kLoop.children[1]];
+    MLK_CHECK_EQ(accC.op, mlk::KernelOp::Compute);
+    MLK_CHECK_EQ(accS.accumulate, true);
+    // Acc chain: [A load, B load, mul] with stack-mapped operands:
+    // stack = [i, j, k] -> A coeffs [K,0,1] unchanged for identity order.
+    MLK_CHECK_EQ(accC.exprs.size(), 3);
+    MLK_CHECK(accC.exprs[0].a.kind == mlk::KernelOperand::Kind::ElemIdx);
+    MLK_CHECK_EQ(accC.exprs[0].a.idxCoeffs.size(), 3);
+    MLK_CHECK_EQ(accC.exprs[0].a.idxCoeffs[0], kTestK);
+    MLK_CHECK_EQ(accC.exprs[0].a.idxCoeffs[2], 1);
+}
+
+MLK_TEST(poly, codegen_tiled_gemm) {
+    SymbolTable symbols;
+    KernelModule km = buildGemmKernel(symbols);
+    auto scop = mlk::poly::extractScop(km, symbols);
+    MLK_CHECK(scop.has_value());
+    auto deps = mlk::poly::computeDependences(*scop);
+    MLK_CHECK(deps.has_value());
+    auto sched = mlk::poly::computePlutoSchedule(*scop, *deps);
+    MLK_CHECK(sched.has_value());
+    // Tile size 2 divides M=4, N=5? N-1=4: (hi+1)=5 % 2 != 0 → the j
+    // level bails; tile 2 divides i (4) and k (3? no: 3 % 2 != 0 → bail).
+    // Use tile 1: divides everything (identity tiles).
+    auto tiled = mlk::poly::computeTiling(*scop, *deps, *sched, 1);
+    MLK_CHECK(tiled.has_value());
+    if (!tiled.has_value()) return;
+    auto out = mlk::poly::emitScheduledKernel(*scop, *sched, *tiled, km,
+                                              symbols);
+    MLK_CHECK(out.has_value());
+    if (!out.has_value()) return;
+    // Tile size 1: tile loop == point loop bounds; structure preserved.
+    const KernelModule& km2 = *out;
+    MLK_CHECK(!km2.nodes.empty());
+    auto legal2 = mlk::poly::verifyScheduleLegality(*scop, *deps, *sched);
+    MLK_CHECK(legal2.has_value() && *legal2);
+}
+
 MLK_TEST_MAIN("poly")

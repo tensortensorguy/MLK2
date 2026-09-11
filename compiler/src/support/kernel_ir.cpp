@@ -50,6 +50,10 @@ HashValue KernelModule::hash() const noexcept {
         h = hashCombine(h, hashI64(n.step));
         h = hashCombine(h, hashU64(n.endBuf));
         h = hashCombine(h, hashI64(n.endDim));
+        for (const int64_t v : n.beginCoeffs) h = hashCombine(h, hashI64(v));
+        h = hashCombine(h, hashI64(n.beginOffset));
+        for (const int64_t v : n.endCoeffs) h = hashCombine(h, hashI64(v));
+        h = hashCombine(h, hashI64(n.endOffset));
         h = hashCombine(h, hashU64(n.family));
         for (const int64_t c : n.outIndexCoeffs) h = hashCombine(h, hashI64(c));
         h = hashCombine(h, hashI64(n.outIndexOffset));
@@ -132,6 +136,16 @@ json::Value KernelModule::toJson(SymbolTable& symbols) const {
         if (n.endBuf != constants::kInvalidId) {
             no.set("end_buf", json::Value{static_cast<int64_t>(n.endBuf)});
             no.set("end_dim", json::Value{static_cast<int64_t>(n.endDim)});
+        }
+        if (!n.beginCoeffs.empty() || !n.endCoeffs.empty()) {
+            json::Value bc = json::Array{};
+            for (const int64_t v : n.beginCoeffs) bc.push(json::Value{v});
+            no.set("begin_coeffs", std::move(bc));
+            no.set("begin_offset", json::Value{n.beginOffset});
+            json::Value ec = json::Array{};
+            for (const int64_t v : n.endCoeffs) ec.push(json::Value{v});
+            no.set("end_coeffs", std::move(ec));
+            no.set("end_offset", json::Value{n.endOffset});
         }
         if (n.hasAffineStore()) {
             json::Value cs = json::Array{};

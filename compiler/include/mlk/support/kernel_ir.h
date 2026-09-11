@@ -92,6 +92,17 @@ struct KernelNode {
     int64_t begin{0};
     int64_t end{constants::kKernelLoopDynamicBound};
     int64_t step{1};
+    /// Polyhedral extension: affine bounds over the ENCLOSING loop-var
+    /// stack (outermost first). When beginCoeffs is non-empty:
+    ///   begin        = sum beginCoeffs[d]*var[d] + beginOffset
+    ///   endInclusive = sum endCoeffs[d]*var[d]   + endOffset
+    /// (the executor iterates var from begin to endInclusive inclusive;
+    /// see docs/polyhedral_spec.md). Empty => the constant begin/end
+    /// above (backward compatible).
+    SmallVector<int64_t, 4> beginCoeffs{};
+    int64_t beginOffset{0};
+    SmallVector<int64_t, 4> endCoeffs{};
+    int64_t endOffset{0};
     /// Polyhedral extension: when end == kKernelLoopDynamicBound and
     /// endBuf is valid, the bound is buffers[endBuf].dims[endDim] resolved
     /// at execution (multi-dim nests from poly.synth/poly.codegen).

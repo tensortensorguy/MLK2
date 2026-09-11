@@ -161,24 +161,126 @@ Result<PolySchedule> computePlutoSchedule(
         states.push_back(std::move(st));
     }
 
-    for (uint32_t r = 0; r < constants::kPolyMaxScheduleRows; ++r) {
-        // Live (unresolved) dependence list; compact M-column positions.
+    // Post-row bookkeeping shared by both phases: resolution (min distance
+    // >= 1 on the slice), parallel marking (every live dependence distance
+    // identically zero), and slice refinement (dist == 0 equalities).
+    auto processRow = [&](const ScheduleRow& row,
+                          const SmallVector<uint32_t, 16>& live,
+                          SmallVector<bool, 16>& resolvesNow) -> Result<void> {
+        bool rowParallel = true;
+        for (std::size_t li = 0; li < live.size(); ++li) {
+            const uint32_t di = live[li];
+            DepState& st = states[di];
+            const Dependence& d = deps[di];
+            SmallVector<int64_t, 8> distCoeffs;
+            int64_t distConst = 0;
+            MLK_TRYV(detail::distanceForm(row, d, depth, distCoeffs,
+                                          distConst));
+            bool anyLive = false;
+            Rational minDist{};
+            for (const Polyhedron& disjunct : st.slice.disjuncts) {
+                if (!detail::polyFeasible(disjunct)) continue;
+                MLK_TRY_VAR(mn, detail::minOverPoly(disjunct, distCoeffs,
+                                                distConst));
+                if (!anyLive || ratLess(mn, minDist)) minDist = mn;
+                anyLive = true;
+            }
+            resolvesNow[di] =
+                anyLive && minDist.isInt() && minDist.num >= 1;
+            // Parallel only when this dep's distance is identically zero
+            // on its slice (the dim carries nothing). A dep resolved by
+            // this row is exactly the one being CARRIED here.
+            if (anyLive) {
+                SmallVector<int64_t, 8> negCoeffs;
+                for (const int64_t c : distCoeffs) negCoeffs.push_back(-c);
+                Rational maxDist{};
+                bool anyMax = false;
+                for (const Polyhedron& disjunct : st.slice.disjuncts) {
+                    if (!detail::polyFeasible(disjunct)) continue;
+                    MLK_TRY_VAR(mx, detail::minOverPoly(
+                                        disjunct, negCoeffs, -distConst));
+                    if (!anyMax || ratLess(maxDist, mx)) maxDist = mx;
+                    anyMax = true;
+                }
+                if (anyMax && !(maxDist.isInt() && maxDist.num == 0)) {
+                    rowParallel = false;
+                }
+            }
+        }
+        out.parallel.push_back(rowParallel);
+        for (std::size_t li = 0; li < live.size(); ++li) {
+            const uint32_t di = live[li];
+            DepState& st = states[di];
+            if (resolvesNow[di]) {
+                st.resolved = true;
+                continue;
+            }
+            const Dependence& d = deps[di];
+            SmallVector<int64_t, 8> distCoeffs;
+            int64_t distConst = 0;
+            MLK_TRYV(detail::distanceForm(row, d, depth, distCoeffs,
+                                          distConst));
+            PresburgerSet next;
+            next.space = st.slice.space;
+            bool anyLiveDisjunct = false;
+            for (const Polyhedron& disjunct : st.slice.disjuncts) {
+                if (!detail::polyFeasible(disjunct)) continue;
+                Polyhedron updated = disjunct;
+                ConstraintRow eq;
+                eq.isEquality = true;
+                for (const int64_t c : distCoeffs) eq.coeffs.push_back(c);
+                eq.constant = -distConst;
+                updated.addRow(std::move(eq));
+                if (detail::polyFeasible(updated)) {
+                    next.disjuncts.push_back(std::move(updated));
+                    anyLiveDisjunct = true;
+                }
+            }
+            if (!anyLiveDisjunct) {
+                st.resolved = true;
+            } else {
+                st.slice = std::move(next);
+            }
+        }
+        return {};
+    };
+
+    // Phase 1 — identity prefix: theta_r = v_r reproduces the ORIGINAL
+    // program order for extraction-produced SCoPs, which is legal by
+    // construction (the original execution is the legality reference).
+    // Rows parallel-marked when no dependence is carried at them.
+    for (uint32_t r = 0; r < depth; ++r) {
         SmallVector<uint32_t, 16> live;
         for (uint32_t di = 0; di < states.size(); ++di) {
             if (!states[di].resolved) live.push_back(di);
         }
         if (live.empty()) break;
-        const uint32_t baseCols = nStmts * coeffsPerStmt;
+        ScheduleRow row;
+        for (uint32_t st = 0; st < nStmts; ++st) {
+            SmallVector<int64_t, 8> cs(coeffsPerStmt, 0);
+            cs[r + 1] = 1;
+            row.stmtCoeffs.push_back(std::move(cs));
+        }
+        SmallVector<bool, 16> resolvesNow(states.size(), false);
+        MLK_TRYV(processRow(row, live, resolvesNow));
+        out.rows.push_back(std::move(row));
+    }
 
-        // Deterministic "resolve one dependence per row": the primary dep
-        // is forced to strictly positive distance (dist >= 1 everywhere on
-        // its slice); all other live deps keep dist >= 0 with an epigraph
-        // objective that keeps their distances small (the fusion driver).
-        // The hard primary constraint makes progress mandatory — no
-        // degenerate rows. Intra-statement deps are tried first: their
-        // slices pin instance coordinates, so satisfying them requires a
-        // real dimension row (never a bare statement-order constant),
-        // which keeps dimension rows ahead of separator rows.
+    // Phase 2 — separator rows for dependences the identity never
+    // strictly separates (cross-statement same-position pairs, e.g. an
+    // init statement vs its accumulator): Feautrier-style hard primary
+    // resolution, one dependence per row, intra-statement primaries
+    // first. These rows are statement-order separators (constants) for
+    // the synth kernel class.
+    while (true) {
+        SmallVector<uint32_t, 16> live;
+        for (uint32_t di = 0; di < states.size(); ++di) {
+            if (!states[di].resolved) live.push_back(di);
+        }
+        if (live.empty() ||
+            out.rows.size() >= constants::kPolyMaxScheduleRows) {
+            break;
+        }
         SmallVector<uint32_t, 16> candidates;
         for (const uint32_t di : live) {
             if (deps[di].srcStmt == deps[di].dstStmt) {
@@ -190,6 +292,7 @@ Result<PolySchedule> computePlutoSchedule(
                 candidates.push_back(di);
             }
         }
+        const uint32_t baseCols = nStmts * coeffsPerStmt;
         std::optional<ScheduleRow> realized;
         SmallVector<bool, 16> primaryResolved(states.size(), false);
         for (const uint32_t primary : candidates) {
@@ -200,7 +303,6 @@ Result<PolySchedule> computePlutoSchedule(
                            "pluto LP exceeds column budget");
             }
             // Statement non-negativity: theta_s(v) >= 0 over the domain.
-            bool lpOk = true;
             for (const Statement& st : scop.statements) {
                 for (const Polyhedron& dom : st.domain.disjuncts) {
                     if (!detail::polyFeasible(dom)) continue;
@@ -215,47 +317,32 @@ Result<PolySchedule> computePlutoSchedule(
                         }
                         parts.push_back(std::move(row));
                     }
-                    Result<void> fr =
-                        appendFarkas(dom, parts, 0, lp);
-                    if (!fr.has_value()) {
-                        return err(fr.error().code, fr.error().message);
-                    }
+                    MLK_TRYV(appendFarkas(dom, parts, 0, lp));
                 }
             }
-            // Per-dependence blocks.
             for (uint32_t li = 0; li < live.size(); ++li) {
                 const uint32_t di = live[li];
                 DepState& st = states[di];
                 const Dependence& d = deps[di];
                 const uint32_t mCol = baseCols + li;
                 const int64_t shift = (di == primary) ? 1 : 0;
-                Result<FormParts> pr = distanceParts(
-                    depth, coeffsPerStmt, lp.nVars, d.srcStmt, d.dstStmt);
-                if (!pr.has_value()) {
-                    return err(pr.error().code, pr.error().message);
-                }
-                const FormParts& parts = *pr;
+                MLK_TRY_VAR(parts,
+                            distanceParts(depth, coeffsPerStmt, lp.nVars,
+                                          d.srcStmt, d.dstStmt));
                 for (const Polyhedron& disjunct : st.slice.disjuncts) {
                     if (!detail::polyFeasible(disjunct)) continue;
-                    // Block 1: dist - shift >= 0.
                     FormParts plain;
                     for (uint32_t j = 0; j <= depth * 2; ++j) {
                         SmallVector<Rational, 8> row(lp.nVars, Rational{});
                         row = parts[j];
                         plain.push_back(std::move(row));
                     }
-                    Result<void> f1 =
-                        appendFarkas(disjunct, plain, shift, lp);
-                    if (!f1.has_value()) {
-                        return err(f1.error().code, f1.error().message);
-                    }
-                    if (shift != 0) continue;  // primary: no epigraph
-                    // Block 2 (non-primary): M_d - dist >= 0.
+                    MLK_TRYV(appendFarkas(disjunct, plain, shift, lp));
+                    if (shift != 0) continue;
                     FormParts epi;
                     for (uint32_t j = 0; j <= depth * 2; ++j) {
                         SmallVector<Rational, 8> row(lp.nVars, Rational{});
-                        for (uint32_t col = 0; col < parts[j].size();
-                             ++col) {
+                        for (uint32_t col = 0; col < parts[j].size(); ++col) {
                             Result<Rational> n = ratNeg(parts[j][col]);
                             if (!n.has_value()) {
                                 return err(ErrorCode::ResourceExhausted,
@@ -266,15 +353,9 @@ Result<PolySchedule> computePlutoSchedule(
                         if (j == depth * 2) row[mCol] = Rational{1, 1};
                         epi.push_back(std::move(row));
                     }
-                    Result<void> f2 =
-                        appendFarkas(disjunct, epi, 0, lp);
-                    if (!f2.has_value()) {
-                        return err(f2.error().code, f2.error().message);
-                    }
+                    MLK_TRYV(appendFarkas(disjunct, epi, 0, lp));
                 }
-                (void)lpOk;
             }
-            // Objective: minimize sum of NON-primary M_d.
             lp.objective = SmallVector<Rational, 8>(lp.nVars, Rational{});
             for (uint32_t li = 0; li < live.size(); ++li) {
                 if (live[li] != primary) {
@@ -282,9 +363,7 @@ Result<PolySchedule> computePlutoSchedule(
                 }
             }
             MLK_TRY_VAR(sol, solveLp(lp));
-            if (sol.status != LpStatus::Optimal) continue;  // try next dep
-
-            // Realize the row as canonical integers.
+            if (sol.status != LpStatus::Optimal) continue;
             ScheduleRow row;
             int64_t lcm = 1;
             for (uint32_t st2 = 0; st2 < nStmts; ++st2) {
@@ -316,104 +395,11 @@ Result<PolySchedule> computePlutoSchedule(
         }
         if (!realized.has_value()) {
             return err(ErrorCode::UnsupportedCapability,
-                       "pluto: no dependence can make progress (row " +
-                           std::to_string(r) + ")");
+                       "pluto: unresolved dependences cannot be separated");
         }
-        const ScheduleRow& row = *realized;
-
-        // Post-row: distance forms with the fixed integer row.
         SmallVector<bool, 16> resolvesNow = primaryResolved;
-        bool rowParallel = true;
-        for (uint32_t li = 0; li < live.size(); ++li) {
-            const uint32_t di = live[li];
-            DepState& st = states[di];
-            const Dependence& d = deps[di];
-            SmallVector<int64_t, 8> distCoeffs;
-            int64_t distConst = 0;
-            MLK_TRYV(detail::distanceForm(row, d, depth, distCoeffs,
-                                          distConst));
-            // Resolution: min distance over every live disjunct >= 1.
-            bool anyLive = false;
-            Rational minDist{};
-            for (const Polyhedron& disjunct : st.slice.disjuncts) {
-                if (!detail::polyFeasible(disjunct)) continue;
-                MLK_TRY_VAR(mn, detail::minOverPoly(disjunct, distCoeffs,
-                                                distConst));
-                if (!anyLive || ratLess(mn, minDist)) minDist = mn;
-                anyLive = true;
-            }
-            const bool resolved =
-                anyLive && minDist.isInt() && minDist.num >= 1;
-            resolvesNow[di] = resolved;
-            // Parallel test: the dim is parallel only when this dep's
-            // distance is IDENTICALLY zero on its slice (it carries
-            // nothing). A dep resolved by this row (dist >= 1) is exactly
-            // the one being CARRIED here — it forces sequential order.
-            if (anyLive) {
-                SmallVector<int64_t, 8> negCoeffs;
-                for (const int64_t c : distCoeffs) negCoeffs.push_back(-c);
-                Rational maxDist{};
-                bool anyMax = false;
-                for (const Polyhedron& disjunct : st.slice.disjuncts) {
-                    if (!detail::polyFeasible(disjunct)) continue;
-                    MLK_TRY_VAR(mx, detail::minOverPoly(
-                                        disjunct, negCoeffs, -distConst));
-                    if (!anyMax || ratLess(maxDist, mx)) maxDist = mx;
-                    anyMax = true;
-                }
-                if (anyMax && !(maxDist.isInt() && maxDist.num == 0)) {
-                    rowParallel = false;
-                }
-            }
-        }
-        out.parallel.push_back(rowParallel);
-
-        // Slice updates: resolved deps leave; others gain dist == 0.
-        for (uint32_t li = 0; li < live.size(); ++li) {
-            const uint32_t di = live[li];
-            DepState& st = states[di];
-            if (resolvesNow[di]) {
-                st.resolved = true;
-                continue;
-            }
-            const Dependence& d = deps[di];
-            SmallVector<int64_t, 8> distCoeffs;
-            int64_t distConst = 0;
-            MLK_TRYV(detail::distanceForm(row, d, depth, distCoeffs,
-                                          distConst));
-            PresburgerSet next;
-            next.space = st.slice.space;
-            bool anyLiveDisjunct = false;
-            for (const Polyhedron& disjunct : st.slice.disjuncts) {
-                if (!detail::polyFeasible(disjunct)) continue;
-                Polyhedron updated = disjunct;
-                ConstraintRow eq;
-                eq.isEquality = true;
-                for (const int64_t c : distCoeffs) eq.coeffs.push_back(c);
-                eq.constant = -distConst;
-                updated.addRow(std::move(eq));
-                if (detail::polyFeasible(updated)) {
-                    next.disjuncts.push_back(std::move(updated));
-                    anyLiveDisjunct = true;
-                }
-            }
-            if (!anyLiveDisjunct) {
-                st.resolved = true;  // slice vanished: fully zero-dist
-            } else {
-                st.slice = std::move(next);
-            }
-        }
-
-        out.rows.push_back(std::move(row));
-    }
-
-    // Every dependence must be resolved by the final row (the last row
-    // enforces dist >= 1 on all remaining slices).
-    for (const DepState& st : states) {
-        if (!st.resolved) {
-            return err(ErrorCode::UnsupportedCapability,
-                       "pluto: row budget exhausted with live dependences");
-        }
+        MLK_TRYV(processRow(*realized, live, resolvesNow));
+        out.rows.push_back(std::move(*realized));
     }
 
     // Vectorizable: the innermost (last) parallel row, if any.
@@ -440,7 +426,6 @@ Result<bool> verifyScheduleLegality(
         PresburgerSet slice = d.relation;
         bool resolved = false;
         for (uint32_t r = 0; r < sched.rows.size() && !resolved; ++r) {
-            // Slice emptiness (resolved by earlier rows).
             MLK_TRY_VAR(f, slice.feasibility());
             if (f == Feasibility::Empty) {
                 resolved = true;
@@ -451,7 +436,6 @@ Result<bool> verifyScheduleLegality(
             int64_t distConst = 0;
             MLK_TRYV(detail::distanceForm(row, d, scop.depth, distCoeffs,
                                           distConst));
-            // Min distance over the live slice.
             Rational minDist{};
             bool anyLive = false;
             for (const Polyhedron& disjunct : slice.disjuncts) {
