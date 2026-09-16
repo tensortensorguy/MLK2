@@ -68,6 +68,23 @@ arithmetic:
    Legacy speculative guards (Rule 5) are untouched; the walker
    evaluates the affine form on the thread-local var stack and admits
    Guard to the thread-safe emission alphabet.
+9. **Piecewise-split re-entry** (supersedes the runtime-Guard form of
+   decision 8, which remains the copy-budget fallback): a re-entering
+   row-constant statement is realized STRUCTURALLY — the loop range is
+   cut at every re-entry value and the statement joins only the
+   singleton segment `[v, v]`, where the guard condition holds for the
+   whole segment, so its payload emits unguarded and every hot segment
+   loses the per-iteration branch. Tiled levels cut the tile range at
+   `floor(v/t)`; singleton tiles emit constant-bound point segments.
+   Segment enumeration in ascending pivot order plus the unchanged
+   deeper recursion realize exactly the guarded form's instance order —
+   bit-exact by construction (verified three-way: walker, C++ artifact,
+   assembly artifact). Emission-mark restoration between replayed
+   bodies is per-statement so single-segment payloads keep their marks;
+   the piecewise split exposed a latent C++-emitter scoping bug
+   (sibling pairs re-declared the same temp names once the guard's
+   if-block scope disappeared) — compute pairs now emit in explicit
+   per-pair block scopes mirroring the walker's execPair temp lifetime.
 
 ## Consequences
 

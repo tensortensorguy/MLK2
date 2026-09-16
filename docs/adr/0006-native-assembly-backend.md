@@ -32,7 +32,9 @@ marks are recorded in the artifact header (Rule 148) and the assembly
 form executes sequentially (deterministic because parallel rows write
 disjoint slabs); OpenMP pragmas ship in the C++ form. Differential
 tests build real shared objects and compare every output bit-exactly
-(walker vs C++ vs assembly). Honest capability boundary: poly7 Sin
-families and speculative guards are rejected by the assembly form;
-the mlk-graph text format still cannot round-trip tensor descriptors
+(walker vs C++ vs assembly). The verified poly7 Sin family emits local helper routines (same
+operation order as math_families.h, constants from the same header);
+every argument is spilled to a prologue home slot because argument
+registers do not survive PLT calls. Speculative guards are rejected by
+the assembly form; the mlk-graph text format still cannot round-trip tensor descriptors
 (upstream serializer), so tensor kernels enter via the GraphBuilder.

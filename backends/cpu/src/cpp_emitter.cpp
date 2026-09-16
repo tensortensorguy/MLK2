@@ -283,6 +283,16 @@ struct CppEmitter {
     /// runElementwiseRange contract).
     [[nodiscard]] Result<void> emitComputePair(const KernelNode& compute,
                                                const KernelNode& store) {
+        // Per-pair block scope: chain temps have execPair lifetime
+        // (the executor's temp slots are per pair), and sibling pairs
+        // at the same loop level re-declare the same temp names —
+        // legal only in disjoint scopes. The guarded re-entry form
+        // accidentally provided this scope through the guard's if
+        // block; the piecewise-split form emits sibling pairs
+        // unguarded, so the scope is explicit now. (Error returns
+        // leave depth bumped: a failed emission discards the text.)
+        body += indent() + "{\n";
+        ++depth;
         std::string value;
         if (compute.exprs.empty()) {
             if (multiDim) {
@@ -345,6 +355,8 @@ struct CppEmitter {
         }
         body += indent() + target + (store.accumulate ? " += " : " = ") +
                 value + ";\n";
+        --depth;
+        body += indent() + "}\n";
         return {};
     }
 

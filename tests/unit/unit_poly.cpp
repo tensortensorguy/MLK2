@@ -1652,15 +1652,24 @@ MLK_TEST(poly, codegen_gemm_fused_nest) {
                                               symbols);
     MLK_CHECK(out.has_value());
     if (!out.has_value()) return;
-    // Expected tree (the guarded-fused schedule [i, k, j]: the order
-    // search picked the innermost-j SIMD stride fit; the k row carries
-    // the reduction chain; the init statement is row-constant at the k
-    // row and RE-ENTERS the k loop under a CLAST guard):
-    //   for i(par) { for k(seq) { for j(par, vector) {
-    //     guard(k == 0) { C[i,j] = 0 }; C[i,j] += A[i,k] * B[k,j] } } }
+    // Expected tree (the fused schedule [i, k, j]: the order search
+    // picked the innermost-j SIMD stride fit; the k row carries the
+    // reduction chain; the init statement is row-constant at the k row
+    // and re-enters via the PIECEWISE SPLIT — the k range is cut at the
+    // init's folded value 0, so the init pair emits unguarded in the
+    // singleton segment and the hot k >= 1 segment carries no branch):
+    //   for i(par) { for k in [0,1)  { for j(par, vector) {
+    //     C[i,j] = 0; C[i,j] += A[i,k] * B[k,j] } }
+    //                for k in [1,K) { for j(par, vector) {
+    //     C[i,j] += A[i,k] * B[k,j] } } }
     const KernelModule& km2 = *out;
     MLK_CHECK_EQ(km2.buffers.size(), km.buffers.size());
     MLK_CHECK(!km2.nodes.empty());
+    // No Guard nodes anywhere: the split realized every re-entry
+    // guard structurally (Rule 78 shape, checked by scan below).
+    for (const auto& n : km2.nodes) {
+        MLK_CHECK(n.op != mlk::KernelOp::Guard);
+    }
     // Find the root (never referenced as a child).
     uint32_t root = 0xFFFFFFFFu;
     {
@@ -1684,42 +1693,49 @@ MLK_TEST(poly, codegen_gemm_fused_nest) {
     MLK_CHECK_EQ(iLoop.begin, 0);
     MLK_CHECK_EQ(iLoop.end, kTestM);
     MLK_CHECK(iLoop.parallel);
-    MLK_CHECK_EQ(iLoop.children.size(), 1);
-    // k loop: carries the reduction chain (sequential).
-    const KernelNode& kLoop = km2.nodes[iLoop.children[0]];
-    MLK_CHECK_EQ(kLoop.op, mlk::KernelOp::Loop);
-    MLK_CHECK_EQ(kLoop.end, kTestK);
-    MLK_CHECK(!kLoop.parallel);
-    MLK_CHECK_EQ(kLoop.children.size(), 1);
-    // j loop: parallel + SIMD hint (the stride-fit winner row).
-    const KernelNode& jLoop = km2.nodes[kLoop.children[0]];
-    MLK_CHECK_EQ(jLoop.op, mlk::KernelOp::Loop);
-    MLK_CHECK_EQ(jLoop.end, kTestN);
-    MLK_CHECK(jLoop.parallel);
-    MLK_CHECK(jLoop.vectorHint);
-    // j body: [guard(init), acc compute, acc store] — the guarded init
-    // pair precedes the accumulate pair (origOrder tie-break at the
-    // fully-tied schedule vectors).
-    MLK_CHECK_EQ(jLoop.children.size(), 3);
-    const KernelNode& guard = km2.nodes[jLoop.children[0]];
-    const KernelNode& accC = km2.nodes[jLoop.children[1]];
-    const KernelNode& accS = km2.nodes[jLoop.children[2]];
-    MLK_CHECK_EQ(guard.op, mlk::KernelOp::Guard);
-    // Guard condition over the stack [pi, pk, pj]: the short form
-    // 0*pi + 1*pk + 0 == 0 (coeffs run up to the guarded dim's stack
-    // position) — the init fires exactly at k == 0 (its folded row-0
-    // value).
-    MLK_CHECK(guard.hasAffineGuard());
-    MLK_CHECK_EQ(guard.guardCoeffs.size(), std::size_t{2});
-    MLK_CHECK_EQ(guard.guardCoeffs[1], 1);
-    MLK_CHECK_EQ(guard.guardOffset, 0);
-    MLK_CHECK_EQ(guard.children.size(), 2);
-    const KernelNode& initC = km2.nodes[guard.children[0]];
-    const KernelNode& initS = km2.nodes[guard.children[1]];
+    // Two sibling k segments: the init's singleton [0, 0] and the hot
+    // [1, K) body.
+    MLK_CHECK_EQ(iLoop.children.size(), std::size_t{2});
+    // k segment 0: singleton (end = 1), carries the init pair + acc.
+    const KernelNode& k0 = km2.nodes[iLoop.children[0]];
+    MLK_CHECK_EQ(k0.op, mlk::KernelOp::Loop);
+    MLK_CHECK_EQ(k0.begin, 0);
+    MLK_CHECK_EQ(k0.end, 1);
+    MLK_CHECK(!k0.parallel);
+    MLK_CHECK_EQ(k0.children.size(), std::size_t{1});
+    const KernelNode& j0 = km2.nodes[k0.children[0]];
+    MLK_CHECK_EQ(j0.op, mlk::KernelOp::Loop);
+    MLK_CHECK_EQ(j0.end, kTestN);
+    MLK_CHECK(j0.parallel);
+    MLK_CHECK(j0.vectorHint);
+    // Segment 0's j body: [init compute, init store, acc compute,
+    // acc store] — the origOrder tie-break keeps init before acc at the
+    // fully-tied schedule vectors, exactly like the guarded form.
+    MLK_CHECK_EQ(j0.children.size(), std::size_t{4});
+    const KernelNode& initC = km2.nodes[j0.children[0]];
+    const KernelNode& initS = km2.nodes[j0.children[1]];
+    const KernelNode& accC0 = km2.nodes[j0.children[2]];
+    const KernelNode& accS0 = km2.nodes[j0.children[3]];
     MLK_CHECK_EQ(initC.op, mlk::KernelOp::Compute);
     MLK_CHECK_EQ(initS.op, mlk::KernelOp::Store);
     MLK_CHECK(!initS.accumulate);
-    // Acc pair: accumulate = true.
+    MLK_CHECK_EQ(accC0.op, mlk::KernelOp::Compute);
+    MLK_CHECK_EQ(accS0.accumulate, true);
+    // k segment 1: the hot range [1, K) — acc only, no branch.
+    const KernelNode& k1 = km2.nodes[iLoop.children[1]];
+    MLK_CHECK_EQ(k1.op, mlk::KernelOp::Loop);
+    MLK_CHECK_EQ(k1.begin, 1);
+    MLK_CHECK_EQ(k1.end, kTestK);
+    MLK_CHECK(!k1.parallel);
+    MLK_CHECK_EQ(k1.children.size(), std::size_t{1});
+    const KernelNode& j1 = km2.nodes[k1.children[0]];
+    MLK_CHECK_EQ(j1.op, mlk::KernelOp::Loop);
+    MLK_CHECK_EQ(j1.end, kTestN);
+    MLK_CHECK(j1.parallel);
+    MLK_CHECK(j1.vectorHint);
+    MLK_CHECK_EQ(j1.children.size(), std::size_t{2});
+    const KernelNode& accC = km2.nodes[j1.children[0]];
+    const KernelNode& accS = km2.nodes[j1.children[1]];
     MLK_CHECK_EQ(accC.op, mlk::KernelOp::Compute);
     MLK_CHECK_EQ(accS.accumulate, true);
     // Acc chain: [A load, B load, mul] with stack-mapped operands:
@@ -3105,6 +3121,135 @@ MLK_TEST(poly, asm_backend_reducesum_bitexact) {
         MLK_CHECK(outAsm[i] == outW[i]);  // bit-exact (Rule 43)
     }
     mlk::poly::destroyPolyWorkspace(ws);
+}
+
+MLK_TEST(poly, asm_backend_poly7_sin_bitexact) {
+    // The verified "poly7" Sin family in the ASSEMBLY artifact: the
+    // local helper routines must reproduce math_families.h operation
+    // for operation (Cody-Waite quadrant reduction, degree-13 minimax
+    // Horner residuals), so walker / C++ artifact / assembly artifact
+    // agree BIT-EXACTLY including quadrant edges. Values stay inside
+    // the family's verified domain [-pi, pi] (Rule 34 certificate).
+    SymbolTable symbols;
+    constexpr int64_t N = 64;
+    KernelModule km;
+    km.name = symbols.intern("poly7_sin_kernel");
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{N};
+    a.isInput = true;
+    KernelBuffer out;
+    out.name = symbols.intern("Out");
+    out.dims = SmallVector<int64_t, 4>{N};
+    out.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufOut = km.addBuffer(out);
+    const SymbolId vi = symbols.intern("i");
+
+    KernelNode loop;
+    loop.op = mlk::KernelOp::Loop;
+    loop.var = vi;
+    loop.begin = 0;
+    loop.end = N;
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    compute.math = mlk::MathOp::Sin;
+    compute.family = symbols.intern("poly7");
+    KernelExpr e;
+    e.op = mlk::MathOp::Sin;
+    e.a.kind = KernelOperand::Kind::ElemIdx;
+    e.a.index = static_cast<int64_t>(bufA);
+    e.a.idxCoeffs = SmallVector<int64_t, 4>{1};
+    e.a.idxOffset = 0;
+    compute.exprs.push_back(e);
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = bufOut;
+    store.outIndexCoeffs = SmallVector<int64_t, 4>{1};
+    {
+        const uint32_t cid = km.addNode(compute);
+        const uint32_t sid = km.addNode(store);
+        loop.children.push_back(cid);
+        loop.children.push_back(sid);
+        (void)km.addNode(loop);
+    }
+
+    // Inputs: exact quadrant edges plus deterministic fractions across
+    // [-pi, pi].
+    SmallVector<double, 8> bufIn(static_cast<std::size_t>(N));
+    constexpr double kPi = 3.14159265358979323846;
+    const double edges[] = {0.0, kPi, -kPi, kPi / 2, -kPi / 2,
+                            kPi / 4, -kPi / 4, 3 * kPi / 4, -3 * kPi / 4};
+    for (int64_t i = 0; i < N; ++i) {
+        const std::size_t ui = static_cast<std::size_t>(i);
+        if (i < 9) {
+            bufIn[ui] = edges[i];
+        } else {
+            const double t =
+                static_cast<double>((i * 37) % 101) / 101.0;
+            bufIn[ui] = -kPi + t * 2.0 * kPi;
+        }
+    }
+    SmallVector<double, 8> outW(static_cast<std::size_t>(N), 0.0),
+        outCpp(static_cast<std::size_t>(N), 0.0),
+        outAsm(static_cast<std::size_t>(N), 0.0);
+    auto bind = [&](SmallVector<double, 8>& outC) {
+        mlk::KernelBufferBindings io;
+        io.inputs.push_back(bufIn.data());
+        io.outputs.push_back(outC.data());
+        io.elements = N;
+        return io;
+    };
+    auto rw = mlk::executeKernelOnBuffers(km, symbols, bind(outW), nullptr);
+    MLK_CHECK(rw.has_value());
+    if (!rw.has_value()) return;
+
+    MLK_CHECK(backendToolchainReady());
+    if (!backendToolchainReady()) return;
+    mlk::BackendDriverConfig cfg;
+    auto cppArt =
+        mlk::buildKernelArtifact(km, symbols, mlk::ArtifactKind::Cpp, cfg);
+    MLK_CHECK(cppArt.has_value());
+    if (!cppArt.has_value()) {
+        std::fprintf(stderr, "  emit/cpp: %s\n",
+                     cppArt.error().message.c_str());
+        return;
+    }
+    auto rCpp = cppArt->run(km, symbols, bind(outCpp));
+    MLK_CHECK(rCpp.has_value());
+    if (!rCpp.has_value()) {
+        std::fprintf(stderr, "  run/cpp: %s\n",
+                     rCpp.error().message.c_str());
+        return;
+    }
+    auto asmArt =
+        mlk::buildKernelArtifact(km, symbols, mlk::ArtifactKind::Asm, cfg);
+    MLK_CHECK(asmArt.has_value());
+    if (!asmArt.has_value()) {
+        std::fprintf(stderr, "  emit/asm: %s\n",
+                     asmArt.error().message.c_str());
+        return;
+    }
+    auto rAsm = asmArt->run(km, symbols, bind(outAsm));
+    MLK_CHECK(rAsm.has_value());
+    if (!rAsm.has_value()) {
+        std::fprintf(stderr, "  run/asm: %s\n",
+                     rAsm.error().message.c_str());
+        return;
+    }
+    for (std::size_t i = 0; i < outW.size(); ++i) {
+        // Three-way bit-exact agreement (Rules 33/43/90).
+        MLK_CHECK(outAsm[i] == outW[i]);
+        MLK_CHECK(outCpp[i] == outW[i]);
+    }
+    // The family actually changed the result vs libm sin on SOME input
+    // (the test would be vacuous if the dispatch were inert) — but the
+    // family stays within its verified single-digit-ULP certificate.
+    bool differs = false;
+    for (std::size_t i = 0; i < outW.size(); ++i) {
+        differs = differs || outW[i] != std::sin(bufIn[i]);
+    }
+    MLK_CHECK(differs);
 }
 
 #endif  // x86-64 native execution tests

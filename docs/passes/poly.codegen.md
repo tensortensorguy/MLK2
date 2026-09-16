@@ -2,7 +2,7 @@
 
 **Kind**: Lowering (Tier 2/3, kill switch: `poly.codegen`)
 
-regenerate the kernel loop forest (CLAST-lite): fused loops, hoisted pinned statements, GUARDED re-entry (an affine-equality Guard node fires a row-constant statement at its folded value inside the loop while its remaining rows continue in the fused deeper loops), tile/point pairs with stack-absolute affine bounds (tile parts are sibling instance ranges — the partial part replays the same statements), re-indexed ElemIdx payloads
+regenerate the kernel loop forest (CLAST-lite): fused loops, hoisted pinned statements, PIECEWISE-SPLIT re-entry (the loop range is cut at every re-entry value; a row-constant statement joins only the singleton segment [v, v] where its guard condition holds structurally — payload unguarded, hot segments branch-free; tiled levels cut the tile range at floor(v/t) with constant-bound point segments inside the singleton tile; the runtime-Guard form remains the copy-budget fallback), tile/point pairs with stack-absolute affine bounds (tile parts are sibling instance ranges — the partial part replays the same statements), re-indexed ElemIdx payloads
 
 ## Contract (Rule 142)
 

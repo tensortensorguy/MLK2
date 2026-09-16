@@ -14,9 +14,13 @@
 //     dim (fusion); statements with a non-positive pivot coefficient
 //     bail (the scheduler's shape contract forbids them);
 //   - constant statements with value below the loop's lower bound emit
-//     BEFORE the loop (pinned reduced dims fold into the value);
-//     values inside the range bail unless hoist-safe; values above emit
-//     after the loop;
+//     BEFORE the loop (pinned reduced dims fold into the value); values
+//     above emit after the loop; values inside the range RE-ENTER via
+//     the piecewise split: the loop range is cut at every re-entry
+//     value and the statement joins only the singleton segment [v, v]
+//     (identical instance order to a runtime guard, but the hot
+//     segments carry no branch; the Guard form remains as the budget
+//     fallback);
 //   - tiled band levels emit a TILE loop (constant bounds floor(lo/t),
 //     floor(hi/t)) and a POINT loop with affine bounds t*ti and
 //     t*ti + (t-1); divisibility of the box bounds by t is required so
@@ -240,6 +244,47 @@ struct Emitter {
         return {};
     }
 
+    /// Emits one plain (untiled) loop over dim `varDim` with constant
+    /// inclusive bounds [lo, hi] whose body is the recursion at level
+    /// r+1 for `varStmts`. Shared by the guarded fallback path and the
+    /// piecewise split segments (identical marks: parallel/vector hints
+    /// come from the schedule row).
+    [[nodiscard]] Result<void> emitPlainLoop(
+        const SmallVector<uint32_t, 8>& varStmts, uint32_t varDim,
+        int64_t lo, int64_t hi, uint32_t r) {
+        const bool rowParallel = r < sched->parallel.size()
+                                     ? sched->parallel[r]
+                                     : false;
+        const bool rowVector = r < sched->vectorizable.size()
+                                   ? sched->vectorizable[r]
+                                   : false;
+        SymbolId varName =
+            static_cast<std::size_t>(varDim) < scop->dimVars.size()
+                ? scop->dimVars[varDim]
+                : kInvalidSymbolId;
+        if (varName == kInvalidSymbolId) {
+            varName = symbols->intern("d" + std::to_string(varDim));
+        }
+        KernelNode loop;
+        loop.op = KernelOp::Loop;
+        loop.var = varName;
+        loop.begin = lo;
+        loop.end = hi + 1;  // executor form: var < end
+        loop.parallel = rowParallel;
+        loop.vectorHint = rowVector;
+        dimAtStack.push_back(static_cast<int32_t>(varDim));
+        const SmallVector<uint32_t, 8> saved = body;
+        body.clear();
+        MLK_TRYV(emitLevel(varStmts, r + 1));
+        loop.children.clear();
+        for (const uint32_t c : body) loop.children.push_back(c);
+        body = saved;
+        dimAtStack.pop_back();
+        const uint32_t lid = out.addNode(loop);
+        body.push_back(lid);
+        return {};
+    }
+
     /// Emits a loop over dim `varDim` (tiled when in the band) whose body
     /// is the recursion at level r+1 for `varStmts`. The loop carries the
     /// scheduler's parallel/vector marks for its row: `parallel` means
@@ -265,23 +310,7 @@ struct Emitter {
             varName = symbols->intern("d" + std::to_string(varDim));
         }
         if (!tiledHere) {
-            KernelNode loop;
-            loop.op = KernelOp::Loop;
-            loop.var = varName;
-            loop.begin = lo;
-            loop.end = hi + 1;  // executor form: var < end
-            loop.parallel = rowParallel;
-            loop.vectorHint = rowVector;
-            dimAtStack.push_back(static_cast<int32_t>(varDim));
-            const SmallVector<uint32_t, 8> saved = body;
-            body.clear();
-            MLK_TRYV(emitLevel(std::move(varStmts), r + 1));
-            loop.children.clear();
-            for (const uint32_t c : body) loop.children.push_back(c);
-            body = saved;
-            dimAtStack.pop_back();
-            const uint32_t lid = out.addNode(loop);
-            body.push_back(lid);
+            MLK_TRYV(emitPlainLoop(varStmts, varDim, lo, hi, r));
             return {};
         }
         // Tiled: the tile loop iterates floor(v / t); the POINT loop is
@@ -405,6 +434,312 @@ struct Emitter {
         return {};
     }
 
+    // --- Piecewise split (CLAST range splitting) ----------------------
+    //
+    // A row-constant statement re-entering a loop is realized today by a
+    // per-iteration affine guard "pivot == v". The split realizes the
+    // SAME instance order STRUCTURALLY: the loop range is cut at every
+    // guard value; the statement participates only in the singleton
+    // segment [v, v], where the guard condition holds for every
+    // iteration and the payload emits unguarded. Tiled levels cut the
+    // TILE range at floor(v / t); the singleton tile emits constant
+    // point segments. Execution order is provably identical to the
+    // guarded form (segments enumerate in ascending pivot order; the
+    // deeper recursion is unchanged), so the transformation is bit-exact
+    // by construction — and the hot segments lose the branch entirely.
+    // Fallback: when the replay budget would be exceeded the level falls
+    // back to the guard form (never fails the kernel).
+
+    /// One replayed body at a split level: a plain loop over the pivot
+    /// range (untiled levels), or one tile sub-range with either the
+    /// standard point body or explicit constant point segments (tiled
+    /// levels, singleton tile only).
+    struct SplitBody {
+        int64_t lo{0};
+        int64_t hi{0};  // inclusive (pivot range or tile range)
+        bool tiled{false};
+        int64_t partialEnd{-1};  // tiled: constant point end of the LAST tile
+        SmallVector<uint32_t, 8> stmts{};
+        SmallVector<std::pair<int64_t, int64_t>, 4> segRange{};
+        SmallVector<SmallVector<uint32_t, 8>, 4> segStmts{};
+    };
+
+    [[nodiscard]] Result<void> emitSplitBody(const SplitBody& b,
+                                             uint32_t varDim, uint32_t r) {
+        if (!b.tiled) {
+            MLK_TRYV(emitPlainLoop(b.stmts, varDim, b.lo, b.hi, r));
+            return {};
+        }
+        const bool rowParallel = r < sched->parallel.size()
+                                     ? sched->parallel[r]
+                                     : false;
+        const bool rowVector = r < sched->vectorizable.size()
+                                   ? sched->vectorizable[r]
+                                   : false;
+        const int64_t tileSize = tiled->tileSizes[r];
+        SymbolId varName =
+            static_cast<std::size_t>(varDim) < scop->dimVars.size()
+                ? scop->dimVars[varDim]
+                : kInvalidSymbolId;
+        if (varName == kInvalidSymbolId) {
+            varName = symbols->intern("d" + std::to_string(varDim));
+        }
+        KernelNode tile;
+        tile.op = KernelOp::Loop;
+        tile.var = symbols->intern(
+            std::string(symbols->text(varName)) + std::string("_t"));
+        tile.begin = b.lo;
+        tile.end = b.hi + 1;
+        tile.parallel = rowParallel;  // dist-0 rows: tiles are disjoint
+        const uint32_t tileId = out.addNode(tile);
+        dimAtStack.push_back(-1);  // tile index: not a scop dim
+        if (b.segRange.empty()) {
+            // Standard tile body (affine point bounds or the partial
+            // constant end) — the proven emitPointBody path.
+            MLK_TRYV(emitPointBody(b.stmts, varDim, r, tileSize,
+                                   b.partialEnd, tileId, rowParallel,
+                                   rowVector));
+            return {};
+        }
+        // Singleton tile: constant point segments (the tile var is fixed
+        // at b.lo == b.hi, so the affine bound degenerates to a constant
+        // and nothing references the tile slot). Segments replay the
+        // deeper recursion — snapshot/restore between them.
+        const SmallVector<bool, 8> snapE = emitted;
+        const SmallVector<SmallVector<std::pair<uint32_t, int64_t>, 4>, 8>
+            snapG = pendingGuards;
+        for (std::size_t si = 0; si < b.segRange.size(); ++si) {
+            if (si > 0) {
+                // Restore replay marks ONLY for statements this segment
+                // replays: payloads emitted in earlier segments alone
+                // (single-segment re-entries) keep their marks so they
+                // are never re-emitted here. Guards are restored
+                // wholesale (deeper fallback levels re-push them).
+                for (const uint32_t s : b.segStmts[si]) {
+                    emitted[s] = snapE[s];
+                }
+                pendingGuards = snapG;
+            }
+            KernelNode point;
+            point.op = KernelOp::Loop;
+            point.var = varName;
+            point.begin = b.segRange[si].first;
+            point.end = b.segRange[si].second + 1;  // executor: var < end
+            point.parallel = rowParallel;
+            point.vectorHint = rowVector;
+            dimAtStack.push_back(static_cast<int32_t>(varDim));
+            const SmallVector<uint32_t, 8> saved = body;
+            body.clear();
+            MLK_TRYV(emitLevel(b.segStmts[si], r + 1));
+            point.children.clear();
+            for (const uint32_t c : body) point.children.push_back(c);
+            body = saved;
+            dimAtStack.pop_back();
+            const uint32_t pointId = out.addNode(point);
+            out.nodes[tileId].children.push_back(pointId);
+        }
+        dimAtStack.pop_back();  // tile slot
+        body.push_back(tileId);
+        return {};
+    }
+
+    /// Builds the singleton-tile point segments for every group value
+    /// inside [pLo, pHi] and appends the resulting SplitBody.
+    void buildTileSegBody(SmallVector<SplitBody, 8>& bodies,
+                          const SmallVector<
+                              std::pair<int64_t,
+                                        SmallVector<uint32_t, 4>>, 4>&
+                              groups,
+                          const SmallVector<uint32_t, 8>& varStmts,
+                          const int64_t tv, const int64_t tileSize,
+                          const int64_t pHi) {
+        SplitBody b;
+        b.tiled = true;
+        b.lo = tv;
+        b.hi = tv;
+        const int64_t pLo = tv * tileSize;
+        int64_t cur = pLo;
+        for (const auto& g : groups) {
+            if (g.first / tileSize != tv) continue;
+            if (g.first > cur) {
+                b.segRange.emplace_back(cur, g.first - 1);
+                b.segStmts.push_back(varStmts);
+            }
+            SmallVector<uint32_t, 8> segStmts = varStmts;
+            for (const uint32_t s : g.second) segStmts.push_back(s);
+            b.segRange.emplace_back(g.first, g.first);
+            b.segStmts.push_back(std::move(segStmts));
+            cur = g.first + 1;
+        }
+        if (cur <= pHi) {
+            b.segRange.emplace_back(cur, pHi);
+            b.segStmts.push_back(varStmts);
+        }
+        bodies.push_back(std::move(b));
+    }
+
+    /// Piecewise split emission for a level with re-entry statements.
+    /// Falls back to the guarded form when the replay budget would be
+    /// exceeded (the guard path is always available and always correct).
+    [[nodiscard]] Result<void> emitSplitNest(
+        const SmallVector<uint32_t, 8>& varStmts, uint32_t pivotDim,
+        int64_t lo, int64_t hi, uint32_t r,
+        const SmallVector<std::pair<int64_t, uint32_t>, 8>& reentry) {
+        // Group the re-entry statements by folded row value (ascending;
+        // deterministic — the classification order is a registry order).
+        SmallVector<int64_t, 4> sorted;
+        for (const auto& item : reentry) sorted.push_back(item.first);
+        std::sort(sorted.begin(), sorted.end());
+        SmallVector<int64_t, 4> values;
+        for (const int64_t v : sorted) {
+            if (values.empty() || values.back() != v) values.push_back(v);
+        }
+        SmallVector<std::pair<int64_t, SmallVector<uint32_t, 4>>, 4>
+            groups;
+        for (const int64_t v : values) {
+            SmallVector<uint32_t, 4> stmts;
+            for (const auto& item : reentry) {
+                if (item.first == v) stmts.push_back(item.second);
+            }
+            groups.emplace_back(v, std::move(stmts));
+        }
+        const bool tiledHere = tiled->tiled && r < tiled->bandEnd;
+        const int64_t tileSize = tiledHere ? tiled->tileSizes[r] : 0;
+        // Build the replayed-body list.
+        SmallVector<SplitBody, 8> bodies;
+        if (!tiledHere) {
+            int64_t cur = lo;
+            for (const auto& g : groups) {
+                if (g.first > cur) {
+                    SplitBody b;
+                    b.lo = cur;
+                    b.hi = g.first - 1;
+                    b.stmts = varStmts;
+                    bodies.push_back(std::move(b));
+                }
+                SplitBody b;
+                b.lo = g.first;
+                b.hi = g.first;
+                b.stmts = varStmts;
+                for (const uint32_t s : g.second) b.stmts.push_back(s);
+                bodies.push_back(std::move(b));
+                cur = g.first + 1;
+            }
+            if (cur <= hi) {
+                SplitBody b;
+                b.lo = cur;
+                b.hi = hi;
+                b.stmts = varStmts;
+                bodies.push_back(std::move(b));
+            }
+        } else {
+            if (lo % tileSize != 0) {
+                fail("codegen: tile lower bound not aligned");
+                return {};
+            }
+            const int64_t firstTile = lo / tileSize;
+            const int64_t lastTile = hi / tileSize;
+            const int64_t fullLast = (hi + 1) / tileSize - 1;
+            const bool hasFull = fullLast >= firstTile;
+            const bool hasPartial = (hi + 1) % tileSize != 0;
+            // One entry per tile part (full part + trailing partial
+            // tile), each cut at the tile indices holding a guard value.
+            const std::pair<int64_t, int64_t> parts[] = {
+                {firstTile, fullLast}, {lastTile, lastTile}};
+            for (int pi = 0; pi < 2; ++pi) {
+                const int64_t a = parts[pi].first;
+                const int64_t b = parts[pi].second;
+                const bool isPartial = pi == 1 && hasPartial;
+                if (pi == 1 && !hasPartial) continue;
+                if (pi == 0 && !hasFull) continue;
+                SmallVector<int64_t, 4> tvs;
+                for (const auto& g : groups) {
+                    const int64_t tv = g.first / tileSize;
+                    if (tv >= a && tv <= b &&
+                        (tvs.empty() || tvs.back() != tv)) {
+                        tvs.push_back(tv);
+                    }
+                }
+                if (tvs.empty()) {
+                    SplitBody sb;
+                    sb.tiled = true;
+                    sb.lo = a;
+                    sb.hi = b;
+                    sb.partialEnd = isPartial ? hi : -1;
+                    sb.stmts = varStmts;
+                    bodies.push_back(std::move(sb));
+                    continue;
+                }
+                int64_t cur = a;
+                for (const int64_t tv : tvs) {
+                    if (tv > cur) {
+                        SplitBody sb;
+                        sb.tiled = true;
+                        sb.lo = cur;
+                        sb.hi = tv - 1;
+                        sb.stmts = varStmts;
+                        bodies.push_back(std::move(sb));
+                    }
+                    buildTileSegBody(bodies, groups, varStmts, tv,
+                                     tileSize,
+                                     isPartial && tv == b
+                                         ? hi
+                                         : tv * tileSize + tileSize - 1);
+                    cur = tv + 1;
+                }
+                if (cur <= b) {
+                    SplitBody sb;
+                    sb.tiled = true;
+                    sb.lo = cur;
+                    sb.hi = b;
+                    sb.partialEnd = isPartial ? hi : -1;
+                    sb.stmts = varStmts;
+                    bodies.push_back(std::move(sb));
+                }
+            }
+        }
+        // Budget: every body replays the deeper recursion.
+        const int64_t replays = static_cast<int64_t>(bodies.size());
+        if (replays > 1 &&
+            copyBudget * replays > constants::kPolyMaxCodegenCopies) {
+            // Guarded fallback (the CLAST-lite form — correct, retains
+            // the per-iteration branch).
+            for (const auto& item : reentry) {
+                pendingGuards[item.second].push_back(
+                    {pivotDim, item.first});
+            }
+            SmallVector<uint32_t, 8> loopStmts = varStmts;
+            for (const auto& item : reentry) {
+                loopStmts.push_back(item.second);
+            }
+            MLK_TRYV(emitLoop(std::move(loopStmts), pivotDim, lo, hi, r));
+            return {};
+        }
+        copyBudget *= replays;
+        const SmallVector<bool, 8> snapE = emitted;
+        const SmallVector<SmallVector<std::pair<uint32_t, int64_t>, 4>, 8>
+            snapG = pendingGuards;
+        for (std::size_t bi = 0; bi < bodies.size(); ++bi) {
+            if (bi > 0) {
+                // Restore replay marks ONLY for the statements this
+                // body replays (its transitive emission set is exactly
+                // its own statement lists — deeper re-entries are drawn
+                // from the lists passed down). Payloads emitted in
+                // earlier bodies alone keep their marks. Guards restore
+                // wholesale (deeper fallback levels re-push them).
+                for (const uint32_t s : bodies[bi].stmts) {
+                    emitted[s] = snapE[s];
+                }
+                for (const auto& seg : bodies[bi].segStmts) {
+                    for (const uint32_t s : seg) emitted[s] = snapE[s];
+                }
+                pendingGuards = snapG;
+            }
+            MLK_TRYV(emitSplitBody(bodies[bi], pivotDim, r));
+        }
+        return {};
+    }
+
     Result<void> emitLevel(SmallVector<uint32_t, 8> stmts, uint32_t r) {
         if (failed) return {};
         SmallVector<uint32_t, 8> alive;
@@ -491,28 +826,44 @@ struct Emitter {
                 // before the loop preserves the lexicographic order.
                 before.push_back(item);
             } else {
-                // CLAST-lite guarded re-entry: the statement's row value
-                // sits inside the loop range (or hoisting is unsafe), so
-                // its remaining schedule rows continue INSIDE the loop
-                // under the guard "pivot var == value". Soundness: the
-                // scheduler's shape contract pins the pivot for every
-                // row-constant statement (its instances occupy exactly
-                // that coordinate) and the realizability gate keeps the
-                // pivot-coordinate order forward on every live pair, so
-                // the guard fires at the statement's schedule position
-                // and the fused deeper loops replay it exactly once.
+                // CLAST re-entry: the statement's row value sits inside
+                // the loop range (or hoisting is unsafe), so its
+                // remaining schedule rows continue INSIDE the loop at
+                // the pivot coordinate "value". Realized by the
+                // PIECEWISE SPLIT (emitSplitNest): the loop range is
+                // cut at every re-entry value and the statement joins
+                // only the singleton segment [v, v], where the guard
+                // condition "pivot var == value" holds structurally —
+                // the hot segments lose the branch entirely. The
+                // per-iteration Guard form remains as the fallback when
+                // the split's replay budget would be exceeded.
+                // Soundness: the scheduler's shape contract pins the
+                // pivot for every row-constant statement (its instances
+                // occupy exactly that coordinate) and the realizability
+                // gate keeps the pivot-coordinate order forward on every
+                // live pair, so the segment (or guard) fires at the
+                // statement's schedule position and the fused deeper
+                // loops replay it exactly once. Segment enumeration in
+                // ascending pivot order preserves the guarded
+                // execution order bit-exactly.
                 reentry.push_back(item);
             }
         }
-        for (const auto& item : reentry) {
-            pendingGuards[item.second].push_back({pivot, item.first});
-        }
-        SmallVector<uint32_t, 8> loopStmts = varStmts;
-        for (const auto& item : reentry) {
-            loopStmts.push_back(item.second);
-        }
         MLK_TRYV(emitConstItems(std::move(before)));
-        MLK_TRYV(emitLoop(std::move(loopStmts), pivot, lo, hi, r));
+        if (reentry.empty()) {
+            SmallVector<uint32_t, 8> nestStmts = varStmts;
+            MLK_TRYV(emitLoop(std::move(nestStmts), pivot, lo, hi, r));
+        } else {
+            // Piecewise split: realize every re-entry guard
+            // structurally (singleton point segments — the guard
+            // condition holds for the WHOLE segment); the hot segments
+            // lose the branch. Falls back to the guarded form above
+            // when the replay budget would be exceeded.
+            SmallVector<std::pair<int64_t, uint32_t>, 8> reentryItems =
+                reentry;
+            MLK_TRYV(emitSplitNest(varStmts, pivot, lo, hi, r,
+                                   reentryItems));
+        }
         if (failed) return {};
         MLK_TRYV(emitConstItems(std::move(after)));
         return {};

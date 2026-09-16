@@ -48,8 +48,15 @@ public:
         }
 
         // 2. Structural sanity: the transformed forest references valid
-        // buffer ids and every statement got emitted (payload count ==
-        // statement count via Compute nodes carrying the chains).
+        // buffer ids and every statement got emitted. The piecewise
+        // split (CLAST range splitting) emits a statement's payload once
+        // per containing loop segment over DISJOINT ranges, so the
+        // compute count is BETWEEN the statement count (nothing dropped)
+        // and statements * kPolyMaxCodegenCopies (no runaway replay:
+        // codegen's copy budget bounds the duplication; "every statement
+        // emitted at least once" is proven inside codegen by its
+        // exhaustive emission marks — this check is the independent
+        // structural net).
         uint32_t computeCount = 0;
         for (const KernelNode& n : ctx.kernelOut->nodes) {
             if (n.op == KernelOp::Compute) ++computeCount;
@@ -63,12 +70,16 @@ public:
                            47);
             }
         }
-        if (computeCount != ws.scop.statements.size()) {
+        const uint64_t maxComputes =
+            static_cast<uint64_t>(ws.scop.statements.size()) *
+            static_cast<uint64_t>(constants::kPolyMaxCodegenCopies);
+        if (computeCount < ws.scop.statements.size() ||
+            static_cast<uint64_t>(computeCount) > maxComputes) {
             *ctx.kernelOut = ws.baselineKernel;
             ws.codegenValid = false;
             return err(ErrorCode::VerificationFailed,
-                       "poly.verify: emitted compute count does not match "
-                       "the statement count",
+                       "poly.verify: emitted compute count outside the "
+                       "split-aware statement bounds",
                        47);
         }
         return r;

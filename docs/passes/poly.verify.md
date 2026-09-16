@@ -2,7 +2,7 @@
 
 **Kind**: Verify (Tier 2/3, kill switch: `poly.verify`)
 
-re-prove schedule legality + structural sanity; restore the baseline kernel on failure (Rules 62/102)
+re-prove schedule legality + structural sanity (payload count within the split-aware bounds: every statement emitted at least once — proven by codegen's exhaustive emission marks — and no runaway duplication beyond statements x kPolyMaxCodegenCopies); restore the baseline kernel on failure (Rules 62/102)
 
 ## Contract (Rule 142)
 

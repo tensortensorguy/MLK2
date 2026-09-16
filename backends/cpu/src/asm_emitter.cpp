@@ -23,6 +23,7 @@
 
 #include "mlk/backend/cpp_emitter.h"
 #include "mlk/core/constants.h"
+#include "mlk/support/math_families.h"
 
 namespace mlk {
 
@@ -50,6 +51,7 @@ struct AsmEmitter {
     const KernelModule& km;
     SymbolTable& symbols;
     bool multiDim{false};
+    bool needsPoly7{false};  // a Sin site applies the verified poly7 family
     std::size_t parallelLoops{0};
     std::size_t simdLoops{0};
     std::string text{};    // .text section (prologue comments + function)
@@ -95,16 +97,18 @@ struct AsmEmitter {
     }
 
     /// Loads argument k (0-based, System V AMD64) into a GP register.
-    /// k < 6 lives in the argument registers; k >= 6 on the stack frame
-    /// (at 16 + (k-6)*8(%rbp) after the pushq %rbp prologue).
+    /// Every argument lives in a HOME STACK SLOT spilled by the
+    /// prologue: argument registers are caller-saved, and a libm PLT
+    /// call inside a compute (sin/exp/tanh/poly7 helpers) clobbers
+    /// %rdi..%r9 — reading an argument register after such a call would
+    /// silently use a clobbered pointer. Home slots survive every call.
     void emitLoadArg(const int k, const char* reg) {
-        static const char* kArgRegs[] = {"%rdi", "%rsi", "%rdx",
-                                         "%rcx", "%r8",  "%r9"};
-        if (k < 6) {
-            text += std::string("movq ") + kArgRegs[k] + ", " + reg + "\n";
-            return;
-        }
-        text += "movq " + i64(16 + 8 * (k - 6)) + "(%rbp), " + reg + "\n";
+        text += "movq " + argSlot(k) + ", " + reg + "\n";
+    }
+
+    /// Home slot of argument k (above the var/temp/scratch slots).
+    [[nodiscard]] std::string argSlot(const int k) const {
+        return i64(-8 * (maxDepth + maxTemps + 2 + k)) + "(%rbp)";
     }
 
     /// Loads an int64 immediate into %rax.
@@ -318,15 +322,17 @@ struct AsmEmitter {
             auto bv = emitOperand(e.b, compute, "%xmm1");
             if (!bv.has_value()) return std::unexpected<Error>(bv.error());
         }
-        // Family dispatch: the walker applies "poly7" to Sin only. The
-        // inline family body is a C++-emitter capability for now (the
-        // assembly form rejects it honestly rather than approximating).
+        // Family dispatch: the walker applies "poly7" to Sin only
+        // (verified family, math_families.h certificate). The artifact
+        // calls the local helper below — the SAME reduction/polynomial
+        // operation order as the C reference, so the rounding steps are
+        // identical and the differential stays bit-exact (Rules 33/90).
         if (e.op == MathOp::Sin &&
             compute.family != kInvalidSymbolId &&
             symbols.text(compute.family) == "poly7") {
-            return err(ErrorCode::UnsupportedCapability,
-                       "asm emitter: poly7 family has no assembly "
-                       "artifact form (use the C++ emitter; roadmap)");
+            needsPoly7 = true;
+            text += "call mlk_poly_sin\n";
+            return {};
         }
         switch (e.op) {  // Rule 78: exhaustive over scalar-realizable ops
             case MathOp::Add:
@@ -793,6 +799,142 @@ struct AsmEmitter {
         }
         return {};
     }
+
+    /// Emits the "poly7" (Sin) family helpers once per module: local
+    /// routines mirroring mlk/support/math_families.h OPERATION FOR
+    /// OPERATION (Cody-Waite quadrant reduction, degree-13 minimax
+    /// Horner evaluation, per-quadrant sin/cos residual selection with
+    /// exact sign flips). Constants come from the SAME header (Rule 77:
+    /// one coefficient source); floor/fmod go through the PLT exactly
+    /// like every other libm reference. Deterministic text (Rule 53).
+    void emitPoly7Helpers() {
+        // Literal pool entries (RIP-relative; bit-exact doubles).
+        const std::string lPiHalf = rodataDouble(families::kPiHalf);
+        const std::string lPio2Hi = rodataDouble(families::kPio2Hi);
+        const std::string lPio2Lo = rodataDouble(families::kPio2Lo);
+        const std::string lHalf = rodataDouble(0.5);
+        const std::string lFour = rodataDouble(4.0);
+        const std::string lOne = rodataDouble(1.0);
+        // Sign flips use the REGISTER-mediated Neg pattern (movabsq +
+        // movq + xorpd) — xorpd with a MEMORY operand is a 16-byte SSE
+        // access and would require literal-pool alignment the quad pool
+        // does not guarantee.
+        const std::string lSinC[6] = {rodataDouble(families::kSinC0),
+                                      rodataDouble(families::kSinC1),
+                                      rodataDouble(families::kSinC2),
+                                      rodataDouble(families::kSinC3),
+                                      rodataDouble(families::kSinC4),
+                                      rodataDouble(families::kSinC5)};
+        const std::string lCosC[6] = {rodataDouble(families::kCosC0),
+                                      rodataDouble(families::kCosC1),
+                                      rodataDouble(families::kCosC2),
+                                      rodataDouble(families::kCosC3),
+                                      rodataDouble(families::kCosC4),
+                                      rodataDouble(families::kCosC5)};
+        // Quadrant-reduced residual polynomial (shared shape; the C
+        // reference is polySinReduced/polyCosReduced):
+        //   r2 = x*x; p = C0; p = p*r2 + Ci (x5); return <combine>
+        // The combine step differs per family and is emitted by the
+        // caller-provided epilogue lines.
+        const auto horner = [&](const std::string (&lc)[6]) {
+            text += "    movaps %xmm0, %xmm1\n";
+            text += "    mulsd  %xmm1, %xmm1\n";  // r2 = x*x
+            text += "    movsd  " + lc[0] + ", %xmm2\n";  // p = C0
+            for (int i = 1; i < 6; ++i) {
+                text += "    mulsd  %xmm1, %xmm2\n";
+                text += "    addsd  " + lc[i] + ", %xmm2\n";
+            }
+        };
+        text += "\n# Family \"poly7\" (Sin): snapshot of "
+                "mlk/support/math_families.h — Cody-Waite quadrant\n";
+        text += "# reduction + degree-13 minimax residuals; verified "
+                "single-digit ULP vs libm on [-pi, pi]\n";
+        text += "# (Rule 34 certificate; Rule 77: constants from the "
+                "same header).\n";
+        text += "    .type   mlk_poly_sin_reduced,@function\n";
+        text += "mlk_poly_sin_reduced:\n";
+        horner(lSinC);
+        // return x + x * r2 * p   (left-associative: x + ((x*r2)*p))
+        text += "    movaps %xmm0, %xmm3\n";
+        text += "    mulsd  %xmm1, %xmm3\n";
+        text += "    mulsd  %xmm2, %xmm3\n";
+        text += "    addsd  %xmm3, %xmm0\n";
+        text += "    ret\n";
+        text += "    .type   mlk_poly_cos_reduced,@function\n";
+        text += "mlk_poly_cos_reduced:\n";
+        horner(lCosC);
+        // return 1.0 - r2 * 0.5 + r2 * r2 * p
+        text += "    movsd  " + lHalf + ", %xmm3\n";
+        text += "    mulsd  %xmm1, %xmm3\n";   // r2*0.5
+        text += "    movsd  " + lOne + ", %xmm4\n";
+        text += "    subsd  %xmm3, %xmm4\n";   // 1.0 - r2*0.5
+        text += "    movaps %xmm1, %xmm5\n";
+        text += "    mulsd  %xmm1, %xmm5\n";   // r2*r2
+        text += "    mulsd  %xmm2, %xmm5\n";   // (r2*r2)*p
+        text += "    addsd  %xmm5, %xmm4\n";
+        text += "    movaps %xmm4, %xmm0\n";
+        text += "    ret\n";
+        text += "    .type   mlk_poly_sin,@function\n";
+        text += "mlk_poly_sin:\n";
+        text += "    pushq  %rbp\n";
+        text += "    movq   %rsp, %rbp\n";
+        text += "    subq   $32, %rsp\n";  // x:-8  n:-16  r:-24 (aligned)
+        text += "    movsd  %xmm0, -8(%rbp)\n";  // save x
+        // n = floor(x / kPiHalf + 0.5)
+        text += "    divsd  " + lPiHalf + ", %xmm0\n";
+        text += "    addsd  " + lHalf + ", %xmm0\n";
+        text += "    call   floor@PLT\n";
+        text += "    movsd  %xmm0, -16(%rbp)\n";
+        // r = (x - n*kPio2Hi) - n*kPio2Lo
+        text += "    movsd  -8(%rbp), %xmm1\n";
+        text += "    movsd  -16(%rbp), %xmm2\n";
+        text += "    mulsd  " + lPio2Hi + ", %xmm2\n";
+        text += "    subsd  %xmm2, %xmm1\n";
+        text += "    movsd  -16(%rbp), %xmm2\n";
+        text += "    mulsd  " + lPio2Lo + ", %xmm2\n";
+        text += "    subsd  %xmm2, %xmm1\n";
+        text += "    movsd  %xmm1, -24(%rbp)\n";
+        // q = (int) fmod(n, 4.0); quadrant = q < 0 ? q + 4 : q
+        text += "    movsd  -16(%rbp), %xmm0\n";
+        text += "    movsd  " + lFour + ", %xmm1\n";
+        text += "    call   fmod@PLT\n";
+        text += "    cvttsd2si %xmm0, %eax\n";
+        text += "    testl  %eax, %eax\n";
+        text += "    jns    .Lmlkq_ok\n";
+        text += "    addl   $4, %eax\n";
+        text += ".Lmlkq_ok:\n";
+        // Per-quadrant residual selection (Rule 78: exhaustive).
+        text += "    testl  %eax, %eax\n";
+        text += "    je     .Lmlkq0\n";
+        text += "    cmpl   $1, %eax\n";
+        text += "    je     .Lmlkq1\n";
+        text += "    cmpl   $2, %eax\n";
+        text += "    je     .Lmlkq2\n";
+        // q == 3: -polyCosReduced(r)
+        text += "    movsd  -24(%rbp), %xmm0\n";
+        text += "    call   mlk_poly_cos_reduced\n";
+        text += "    movabsq $-9223372036854775808, %rax\n";
+        text += "    movq   %rax, %xmm7\n";
+        text += "    xorpd  %xmm7, %xmm0\n";
+        text += "    jmp    .Lmlkq_done\n";
+        text += ".Lmlkq0:\n";
+        text += "    movsd  -24(%rbp), %xmm0\n";
+        text += "    call   mlk_poly_sin_reduced\n";
+        text += "    jmp    .Lmlkq_done\n";
+        text += ".Lmlkq1:\n";
+        text += "    movsd  -24(%rbp), %xmm0\n";
+        text += "    call   mlk_poly_cos_reduced\n";
+        text += "    jmp    .Lmlkq_done\n";
+        text += ".Lmlkq2:\n";
+        text += "    movsd  -24(%rbp), %xmm0\n";
+        text += "    call   mlk_poly_sin_reduced\n";
+        text += "    movabsq $-9223372036854775808, %rax\n";
+        text += "    movq   %rax, %xmm7\n";
+        text += "    xorpd  %xmm7, %xmm0\n";
+        text += ".Lmlkq_done:\n";
+        text += "    leave\n";
+        text += "    ret\n";
+    }
 };
 
 }  // namespace
@@ -854,10 +996,12 @@ Result<std::string> emitAsmSource(const KernelModule& kernel,
                    "cap");
     }
 
-    // Frame: var slots + temp slots + one call-surviving scratch double,
-    // rounded to the 16-byte ABI alignment.
-    const int64_t slots =
-        static_cast<int64_t>(em.maxDepth + em.maxTemps + 1);
+    // Frame: var slots + temp slots + one call-surviving scratch double
+    // + one HOME SLOT per argument (spilled in the prologue — argument
+    // registers are caller-saved and do not survive PLT calls), rounded
+    // to the 16-byte ABI alignment.
+    const int64_t slots = static_cast<int64_t>(em.maxDepth + em.maxTemps +
+                                               1 + em.totalArgs);
     const int64_t frame = ((slots * 8 + 15) / 16) * 16;
 
     // Function prologue. The header comment block is assembled AFTER the
@@ -871,6 +1015,24 @@ Result<std::string> emitAsmSource(const KernelModule& kernel,
     em.text += "    movq    %rsp, %rbp\n";
     if (frame > 0) {
         em.text += "    subq    $" + i64(frame) + ", %rsp\n";
+    }
+
+    // Argument home spill: register args move to their frame slots
+    // before any body code runs; incoming stack args (k >= 6) are
+    // copied through %rax. After this, argument reads are call-safe.
+    {
+        static const char* kArgRegs[] = {"%rdi", "%rsi", "%rdx",
+                                         "%rcx", "%r8",  "%r9"};
+        for (int k = 0; k < em.totalArgs; ++k) {
+            if (k < 6) {
+                em.text += std::string("movq ") + kArgRegs[k] + ", " +
+                           em.argSlot(k) + "\n";
+            } else {
+                em.text += "movq " + i64(16 + 8 * (k - 6)) + "(%rbp), "
+                           "%rax\n";
+                em.text += "movq %rax, " + em.argSlot(k) + "\n";
+            }
+        }
     }
 
     // Body: walk the forest roots.
@@ -977,6 +1139,12 @@ Result<std::string> emitAsmSource(const KernelModule& kernel,
         em.text += "    ret\n";
     }
 
+    // Family helpers: local .text routines emitted after the kernel
+    // body (still in the .text section), before the literal pool.
+    if (em.needsPoly7) {
+        em.emitPoly7Helpers();
+    }
+
     // Literal pool + non-executable stack note. The header lands first
     // (comments only), then the function, then the literal pool.
     std::string header;
@@ -1002,6 +1170,12 @@ Result<std::string> emitAsmSource(const KernelModule& kernel,
     header += "# Rule 96: trace points are recorded as comments. "
               "Rule 5: speculative guards are rejected. Rule 121: Call "
               "nodes must be lowered (poly.synth) before emission.\n";
+    header += std::string("# Family: ") +
+              (em.needsPoly7
+                   ? "poly7 (verified sin family, math_families.h "
+                     "certificate; local helper routines)"
+                   : "libm") +
+              ".\n";
     header += "# Assembled out-of-process (ADR-0003/0006): no "
               "in-process machine codegen anywhere in this backend.\n";
     std::string out = header + em.text;

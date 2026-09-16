@@ -137,7 +137,9 @@ lexicographic order (equal prefixes force equal spent coords by
 induction — valid for arbitrary pivot SEQUENCES, which is what makes the
 order search codegen-safe). Rows are emitted until every varying dim is
 spent (TOTALITY: each instance maps to a distinct schedule vector, so
-codegen replays each payload exactly once). Dependences still live at
+codegen replays each payload at least once — the piecewise split
+(§codegen) duplicates a payload only across DISJOINT loop segments,
+one per containing range). Dependences still live at
 that point are schedule-tied and resolve by statement order
 (`origOrder`); `verifyScheduleLegality` proves exactly that tie-break
 rule. Candidate LPs that error (budget/overflow, e.g. an LCM-realized row
@@ -148,9 +150,8 @@ Whole-schedule shape contract (order-search rejection): every statement
 is either a foldable constant (all nonzero coefficients on pinned dims —
 its instances occupy exactly one pivot coordinate) or varies on the
 row's pivot with a positive coefficient. Row-constant statements MAY
-vary again at later rows: the emitter re-enters them under an
-affine-equality `Guard` at their folded value inside the loop (CLAST-
-style guarded re-entry — see §codegen). Two conditions keep the
+vary again at later rows: the emitter re-enters them at their folded
+value via the PIECEWISE SPLIT (see §codegen). Two conditions keep the
 realized nest order equal to the schedule order:
 
 1. **Const-slot normalization** — every pivot-varying statement's
@@ -195,20 +196,29 @@ Emission walks schedule levels over the statement group (CLAST-lite):
   (`canEmitBefore`, conservative box check). Pin-folding also applies to
   payload re-indexing: coefficients on pinned dims fold into the ElemIdx
   / store offset.
-- **Guarded re-entry** — a row-constant statement whose folded value
-  falls INSIDE the loop range (or whose hoisting is unsafe) re-enters
-  the loop: a `Guard` node with the affine-equality form
-  `1*var - value == 0` wraps its payload, and its remaining schedule
-  rows continue in the fused deeper loops (`for k { for i { for j {
-  if (k == 0) init; acc } } }` — the vectorized fused GEMM the suffix
-  shape contract used to reject). Guards accumulate per statement and
-  materialize as nested Guard nodes at every payload emission (tile
-  part duplication replays them). Soundness: the pivot is PINNED for
+- **Piecewise-split re-entry (CLAST range splitting)** — a row-constant
+  statement whose folded value falls INSIDE the loop range (or whose
+  hoisting is unsafe) re-enters at its coordinate: the loop range is
+  CUT at every re-entry value and the statement joins only the
+  singleton segment `[v, v]`, where the guard condition
+  `1*var - value == 0` holds for the WHOLE segment — its payload emits
+  UNGUARDED there, and its remaining schedule rows continue in the
+  fused deeper loops of that segment (`for i { for k in [0,1) { for j {
+  init; acc } } for k in [1,K) { for j { acc } } }` — the vectorized
+  fused GEMM, branch-free in the hot k range). Tiled levels cut the
+  TILE range at `floor(v/t)`; the singleton tile emits constant-bound
+  point segments. Segment enumeration in ascending pivot order plus the
+  unchanged deeper recursion realize EXACTLY the guarded form's
+  instance order, so the split is bit-exact by construction and the
+  per-iteration branch disappears from every hot segment. Emission
+  marks restore between replayed bodies PER-STATEMENT (only the
+  statements a body replays) so single-segment payloads keep their
+  emitted marks. The runtime `Guard` form remains as the FALLBACK when
+  the split's replay budget would exceed `kPolyMaxCodegenCopies`
+  (correct, retains the branch). Soundness: the pivot is PINNED for
   every row-constant statement (its instances occupy exactly one
   coordinate), and the realizability gate (§scheduling) keeps every
-  live pair's pivot-coordinate order forward, so the guard fires at the
-  statement's schedule position and the exhaust-level emission replays
-  statement pairs in origOrder (the tie-break the schedule proves).
+  live pair's pivot-coordinate order forward.
 - **Tiled band levels** emit a TILE loop (constant bounds
   `floor(lo/t)`, `floor(hi/t)`) plus a POINT loop with affine bounds
   `t*ti … t*ti + t - 1`; a trailing partial tile (when `(hi+1) % t != 0`)
@@ -238,7 +248,8 @@ Bail conditions (conservative, baseline preserved): statements neither
 pin-foldable-with-pinned-pivot nor pivot-varying (scheduler shape
 contract violation), unaligned tile lower bounds, copy-budget
 exhaustion, unbounded levels, accesses referencing unpinned unspent
-dims, guard dims unbound at emission.
+dims, guard dims unbound at emission (guards arise only on the budget
+fallback path).
 
 ## Executor
 
@@ -317,11 +328,25 @@ buffer-dim bounds), ElemIdx affine addressing, accumulate stores,
 affine-equality guards, temp chains (cap = the executor's 64 slots),
 and the legacy 1-D form are all supported; multi-dim artifacts check
 store-address sign at runtime and report a nonzero ABI code where the
-walker raises InvalidGraph (the driver maps it back). Unsupported nodes
-fail emission honestly: Call (lower by poly.synth first, Rule 121),
+walker raises InvalidGraph (the driver maps it back). The verified
+"poly7" Sin family (math_families.h certificate) emits LOCAL helper
+routines in the assembly artifact — Cody-Waite quadrant reduction and
+degree-13 minimax Horner residuals mirrored OPERATION FOR OPERATION
+from the C reference, constants taken from the same header (Rule 77),
+sign flips via the register-mediated Neg pattern (xorpd with a memory
+operand would demand 16-byte literal-pool alignment the quad pool does
+not guarantee), floor/fmod through the PLT. Unsupported nodes fail
+emission honestly: Call (lower by poly.synth first, Rule 121),
 speculative guards (Rule 5), AllocBuffer/CopyBuffer, non-unit steps,
-the poly7 Sin family in the assembly form, and legacy dynamic bounds
-inside multi-dim modules.
+and legacy dynamic bounds inside multi-dim modules.
+
+Every ARGUMENT lives in a home stack slot spilled by the prologue:
+argument registers are caller-saved, and a PLT call inside a compute
+(sin/exp/tanh, the poly7 helpers) clobbers %rdi..%r9 — reading an
+argument register after such a call silently uses a clobbered pointer
+(a REAL bug the poly7 test exposed: every earlier asm artifact was
+PLT-free, so the latent clobber never fired). Argument reads are now
+call-safe by construction.
 
 The **backend driver** (`backend_driver.h`) runs emit -> write ->
 `cc -shared` (C++ artifacts additionally get `-O2 -fPIC
@@ -350,11 +375,12 @@ artifact text and optionally the built `.so`.
 - Softmax/multi-input elementwise synthesis classes; >2-input elementwise
   (needs the baseline buffer-materialization limit lifted).
 - Multiple SCoP regions per kernel.
-- Piecewise (split) codegen for guarded bands: the guard predicate is
-  correct but runs per iteration; splitting the separator iteration out
-  of the loop range removes the branch from hot loops.
 - Per-statement loop-bound generalization: fused statements currently
   share the intersection of their pivot bounds (the synth classes agree;
   disagreeing domains bail via the shape contract).
 - `poly_tile_size` autotuner integration over the order dimension (the
   search is compile-time exact; tile sizes remain the measured knob).
+- Split for tiled levels currently keeps the guard-free point segments
+  only inside singleton tiles; a point-level split that removes the
+  affine point-loop bound machinery for partial tiles could shrink the
+  emitted forest further.

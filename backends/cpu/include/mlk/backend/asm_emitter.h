@@ -12,7 +12,11 @@
 //     sqrtsd) plus libm PLT calls for transcendentals — the same
 //     operations, in the same order, the buffer executor performs, so a
 //     differential test against the walker is bit-exact by construction
-//     (no FMA contraction is ever emitted; Rules 33/90).
+//     (no FMA contraction is ever emitted; Rules 33/90),
+//   - the verified "poly7" Sin family (math_families.h certificate):
+//     local helper routines mirror the C reference operation-for-
+//     operation (Cody-Waite quadrant reduction + degree-13 minimax
+//     Horner residuals); constants come from the same header (Rule 77).
 //   - parallel/vectorHint marks are RECORDED in the header (Rule 148);
 //     the assembly artifact executes sequentially. Parallel rows write
 //     disjoint slabs, so any single-thread interleaving of the proven
@@ -50,10 +54,9 @@
 // Unsupported nodes fail the emission honestly (Result error): Call
 // (lowered by poly.synth first — Rule 121), speculative (non-affine)
 // Guards (ExecutionEngine's Rule-5 domain), AllocBuffer/CopyBuffer,
-// non-unit loop steps, the "poly7" Sin family (inline family bodies are
-// a roadmap item; use the C++ emitter for family snapshots), temp chains
-// over kMaxTempSlots, legacy dynamic bounds inside multi-dim modules,
-// and operands referencing unbound buffers.
+// non-unit loop steps, temp chains over kMaxTempSlots, legacy dynamic
+// bounds inside multi-dim modules, and operands referencing unbound
+// buffers.
 #pragma once
 
 #include "mlk/core/result.h"
