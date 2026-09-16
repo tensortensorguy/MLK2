@@ -1,6 +1,7 @@
 # ADR-0003: Kernel execution without in-process machine codegen
 
-Status: Accepted
+Status: Accepted (amended by ADR-0006: native artifacts are text-emitted
+and built by the OUT-OF-PROCESS toolchain — still no in-process codegen)
 
 ## Context
 Spec section 12: "Do not emit machine code directly from the mathematical

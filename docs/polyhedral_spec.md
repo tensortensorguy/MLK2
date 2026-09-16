@@ -264,7 +264,7 @@ order — exactly the order the transformed accumulate chain preserves.
 
 ## Verification story
 
-- Unit: 46 tests in `tests/unit/unit_poly.cpp` covering the engine
+- Unit: 53 tests in `tests/unit/unit_poly.cpp` covering the engine
   (rationals, sets, FM, lexmin, maps), extraction, dependences, LP,
   scheduling legality + determinism, FUSION EMERGENCE (producer/consumer
   single parallel row + bit-exact fused execution), wavefront dependences,
@@ -284,6 +284,60 @@ order — exactly the order the transformed accumulate chain preserves.
   no-reassociation class; accumulation order per output cell preserved).
 - `poly.verify` re-proves legality inside every Tier2/3 compilation and
   restores the baseline on failure.
+
+## Backend (native artifacts)
+
+The polyhedral layer closes the compiler loop with two standalone AOT
+artifact forms, produced by `mlk_backend_cpu` and driven out-of-process
+(ADR-0003 as amended by ADR-0006 — no in-process machine codegen exists
+anywhere; there are no emitter-owned W^X pages, Rule 118 patching is
+vacuous, and the artifact is mapped file-backed by the system loader
+like any plugin):
+
+- **C++ source** (`emitCppSource`): portable scalar C++ mirroring the
+  buffer-executor semantics verbatim, including OpenMP pragmas for the
+  scheduler-proven parallel/vector marks under `#ifdef _OPENMP`
+  (inert without the flag — Rule 148: gated and recorded).
+- **x86-64 assembly** (`emitAsmSource`): AT&T-syntax, System V AMD64,
+  position-independent (RIP-relative rodata, PLT calls), SSE2 scalar
+  IEEE-754 doubles. The emitted code performs the SAME operations in
+  the SAME order as the walker — `addsd/subsd/mulsd/divsd/sqrtsd` plus
+  libm PLT calls for transcendentals, no FMA contraction anywhere — so
+  the differential test against the executor is bit-exact by
+  construction (Rules 33/43/90). Parallel/vector marks are RECORDED in
+  the artifact header (Rule 148); the artifact executes sequentially,
+  which stays deterministic because parallel rows write disjoint slabs.
+
+Both emitters share one contract: the walker's routing decision
+(`isMultiDimModule`) selects the ABI form, and the fixed scalars tail
+(`mlk_scalars, mlk_n_scalars`) is ALWAYS part of the signature so the
+driver dispatch and the artifact can never disagree about arity.
+Loop bounds (constant / affine over the enclosing var stack /
+buffer-dim bounds), ElemIdx affine addressing, accumulate stores,
+affine-equality guards, temp chains (cap = the executor's 64 slots),
+and the legacy 1-D form are all supported; multi-dim artifacts check
+store-address sign at runtime and report a nonzero ABI code where the
+walker raises InvalidGraph (the driver maps it back). Unsupported nodes
+fail emission honestly: Call (lower by poly.synth first, Rule 121),
+speculative guards (Rule 5), AllocBuffer/CopyBuffer, non-unit steps,
+the poly7 Sin family in the assembly form, and legacy dynamic bounds
+inside multi-dim modules.
+
+The **backend driver** (`backend_driver.h`) runs emit -> write ->
+`cc -shared` (C++ artifacts additionally get `-O2 -fPIC
+-fno-exceptions -fno-rtti` — the artifact is held to the same
+no-exception contract as the host) -> `dlopen` -> invoke, with a
+per-stage error result (compiler logs are captured and reported —
+Rule 67). The C++/assembly emitters are themselves pure text
+generation: deterministic (re-emission is byte-identical, Rule 53),
+hashable inputs (Rule 24), and the whole path is verified by the
+`asm_backend_*` / `backend_*` tests, which build REAL shared objects
+and compare every output element bit-exactly against the buffer
+executor (three-way: walker vs C++ artifact vs assembly artifact).
+Tools: `mlk-poly demo --backend=asm|cpp` executes the native artifact
+inside the demo report; `mlk-poly emit <graph.mlk> [--asm|--cpp]
+[--out=<path>] [--workdir=<dir>] [--compile]` produces the standalone
+artifact text and optionally the built `.so`.
 
 ## Roadmap
 

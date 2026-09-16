@@ -1,17 +1,36 @@
 // mlk-poly — polyhedral pipeline driver (layout spec §13):
-//   mlk-poly demo   self-contained MatMul walkthrough: compiles a GEMM
-//                   graph at Tier1 (baseline) and Tier2 (polyhedral),
-//                   dumps both kernel JSONs, and executes baseline vs
-//                   transformed over dense buffers with a max-diff report
+//   mlk-poly demo [--backend=asm|cpp]
+//                 self-contained MatMul walkthrough: compiles a GEMM
+//                 graph at Tier1 (baseline) and Tier2 (polyhedral),
+//                 dumps both kernel JSONs, and executes baseline vs
+//                 transformed over dense buffers with a max-diff report;
+//                 with --backend it additionally lowers the transformed
+//                 kernel to a native artifact (x86-64 assembly or C++),
+//                 builds it OUT-OF-PROCESS (ADR-0003/0006: no in-process
+//                 machine codegen), loads it, executes it, and reports
+//                 the three-way max-diff (walker vs artifact bit-exact)
 //   mlk-poly show <graph.mlk>
-//                   compiles any graph at Tier2 and dumps the kernel
-//                   JSON (non-affine kernels report baseline fallback)
+//                 compiles any graph at Tier2 and dumps the kernel
+//                 JSON (non-affine kernels report baseline fallback)
+//   mlk-poly emit <graph.mlk> [--asm|--cpp] [--out=<path>]
+//                 [--workdir=<dir>] [--compile]
+//                 compiles the graph at Tier2 and emits the standalone
+//                 artifact text (kernel.s | kernel.cpp) to stdout or
+//                 --out; --compile additionally builds a shared object
+//                 with the system toolchain and prints its path.
+//                 Boundary: the mlk-graph text format cannot represent
+//                 tensor descriptors yet (upstream serializer), so tensor
+//                 graphs enter through the GraphBuilder API (demo) —
+//                 emit covers every graph the Tier2 lowering accepts
 // Deterministic (Rule 53); every fallback is reported (Rule 30).
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
 
+#include "mlk/backend/asm_emitter.h"
+#include "mlk/backend/backend_driver.h"
+#include "mlk/backend/cpp_emitter.h"
 #include "mlk/core/symbol_table.h"
 #include "mlk/ir/graph_builder.h"
 #include "mlk/ir/graph_json.h"
@@ -50,6 +69,20 @@ mlk::MathGraph buildGemmGraph(mlk::SymbolTable& symbols) {
     return b.graph();
 }
 
+/// The tensor CPU domain profile shared by the demo and emit verbs.
+mlk::MathDomainProfile tensorCpuProfile(mlk::SymbolTable& symbols) {
+    mlk::MathDomainProfile profile;
+    profile.name = symbols.intern("tensor_f64_cpu");
+    profile.capabilities.set(mlk::Capability::HasNumericValues);
+    profile.capabilities.set(mlk::Capability::HasFloatingPoint);
+    profile.capabilities.set(mlk::Capability::HasTensorDomain);
+    profile.capabilities.set(mlk::Capability::HasKernelFusion);
+    profile.capabilities.set(mlk::Capability::HasAlgebraicRewriting);
+    profile.capabilities.set(mlk::Capability::HasDerivatives);
+    profile.capabilities.set(mlk::Capability::HasApproximation);
+    return profile;
+}
+
 mlk::KernelModule compileAt(mlk::MathGraph& graph, mlk::SymbolTable& symbols,
                             mlk::MathDomainProfile& profile,
                             mlk::DiagnosticEngine& diag,
@@ -72,22 +105,14 @@ mlk::KernelModule compileAt(mlk::MathGraph& graph, mlk::SymbolTable& symbols,
     return kernel;
 }
 
-int runDemo() {
+int runDemo(const std::string& backendFlag) {
     mlk::SymbolTable symbols;
     mlk::passes::registerAllPasses(symbols);
     mlk::DiagnosticEngine diag;
     mlk::TelemetrySink telemetry;
     mlk::MathGraph graph = buildGemmGraph(symbols);
     mlk::AccuracyContract contract;
-    mlk::MathDomainProfile profile;
-    profile.name = symbols.intern("tensor_f64_cpu");
-    profile.capabilities.set(mlk::Capability::HasNumericValues);
-    profile.capabilities.set(mlk::Capability::HasFloatingPoint);
-    profile.capabilities.set(mlk::Capability::HasTensorDomain);
-    profile.capabilities.set(mlk::Capability::HasKernelFusion);
-    profile.capabilities.set(mlk::Capability::HasAlgebraicRewriting);
-    profile.capabilities.set(mlk::Capability::HasDerivatives);
-    profile.capabilities.set(mlk::Capability::HasApproximation);
+    mlk::MathDomainProfile profile = tensorCpuProfile(symbols);
 
     bool ok = false;
     mlk::KernelModule baseline =
@@ -143,21 +168,189 @@ int runDemo() {
     std::printf("executed baseline vs transformed: %zu outputs, max|diff| = "
                 "%g\n",
                 c1.size(), maxDiff);
-    std::printf(maxDiff == 0.0 ? "mlk-poly: PASS (bit-exact)\n"
-                               : "mlk-poly: DIFF detected\n");
-    return maxDiff == 0.0 ? 0 : 1;
+    if (maxDiff != 0.0) {
+        std::printf("mlk-poly: DIFF detected\n");
+        return 1;
+    }
+    std::printf("mlk-poly: PASS (walker bit-exact)\n");
+
+    // Native artifact path (opt-in): lower the transformed kernel to
+    // assembly or C++, build it out-of-process, load, execute, and
+    // compare against the walker bit-exactly (ADR-0003/0006).
+    if (!backendFlag.empty()) {
+        const mlk::ArtifactKind kind =
+            backendFlag == "cpp" ? mlk::ArtifactKind::Cpp
+                                 : mlk::ArtifactKind::Asm;
+        std::printf("\n-- native artifact (%s) --\n",
+                    backendFlag.c_str());
+        mlk::BackendDriverConfig cfg;
+        auto loaded = mlk::buildKernelArtifact(poly, symbols, kind, cfg);
+        if (!loaded.has_value()) {
+            std::fprintf(stderr, "mlk-poly: artifact failed: %s\n",
+                         loaded.error().message.c_str());
+            return 1;
+        }
+        std::printf("artifact: %s\nlibrary:  %s\n",
+                    loaded->artifactPath().c_str(),
+                    loaded->libraryPath().c_str());
+        mlk::SmallVector<double, 8> c3(static_cast<std::size_t>(M * N),
+                                       0.0);
+        mlk::KernelBufferBindings ioNative = ioBase;
+        ioNative.outputs[0] = c3.data();
+        auto r3 = loaded->run(poly, symbols, ioNative);
+        if (!r3.has_value()) {
+            std::fprintf(stderr, "mlk-poly: native run failed: %s\n",
+                         r3.error().message.c_str());
+            return 1;
+        }
+        double nativeDiff = 0.0;
+        for (std::size_t i = 0; i < c3.size(); ++i) {
+            const double d = std::fabs(c3[i] - c2[i]);
+            if (d > nativeDiff) nativeDiff = d;
+        }
+        std::printf("executed native vs walker: %zu outputs, max|diff| = "
+                    "%g\n",
+                    c3.size(), nativeDiff);
+        if (nativeDiff != 0.0) {
+            std::printf("mlk-poly: NATIVE DIFF detected\n");
+            return 1;
+        }
+        std::printf("mlk-poly: PASS (native bit-exact)\n");
+    }
+    return 0;
+}
+
+/// Compiles a graph file at Tier2 (the `show` pipeline) and emits the
+/// standalone artifact text; --compile additionally builds and loads the
+/// shared object out-of-process and prints the library path.
+int runEmit(const std::string& path, const bool useAsm,
+            const std::string& outPath, const std::string& workdir,
+            const bool compile) {
+    mlk::SymbolTable symbols;
+    mlk::passes::registerAllPasses(symbols);
+    mlk::DiagnosticEngine diag;
+    bool ok = false;
+    const std::string text = readFile(path.c_str(), ok);
+    if (!ok) {
+        std::fprintf(stderr, "mlk-poly: cannot read %s\n", path.c_str());
+        return 2;
+    }
+    auto graph = mlk::parseGraphFile(text, symbols);
+    if (!graph.has_value()) {
+        std::fprintf(stderr, "mlk-poly: parse error: %s\n",
+                     graph.error().message.c_str());
+        return 2;
+    }
+    mlk::TelemetrySink telemetry;
+    mlk::AccuracyContract contract;
+    mlk::MathDomainProfile profile = tensorCpuProfile(symbols);
+    mlk::KernelModule kernel;
+    mlk::PipelineRunner runner(symbols, &telemetry);
+    mlk::PassContext ctx;
+    ctx.domainProfile = &profile;
+    ctx.accuracy = &contract;
+    ctx.diag = &diag;
+    ctx.symbols = &symbols;
+    ctx.tier = mlk::Tier::Tier2;
+    ctx.kernelOut = &kernel;
+    auto r = runner.run(mlk::Tier::Tier2, ctx, *graph, &kernel);
+    if (!r.has_value()) {
+        std::fprintf(stderr, "mlk-poly: compile failed: %s\n",
+                     r.error().message.c_str());
+        return 1;
+    }
+    auto src = useAsm ? mlk::emitAsmSource(kernel, symbols)
+                      : mlk::emitCppSource(kernel, symbols);
+    if (!src.has_value()) {
+        std::fprintf(stderr, "mlk-poly: emit failed: %s\n",
+                     src.error().message.c_str());
+        return 1;
+    }
+    if (!outPath.empty()) {
+        FILE* f = std::fopen(outPath.c_str(), "wb");
+        if (f == nullptr) {
+            std::fprintf(stderr, "mlk-poly: cannot write %s\n",
+                         outPath.c_str());
+            return 1;
+        }
+        std::fwrite(src->data(), 1, src->size(), f);
+        std::fclose(f);
+        std::printf("mlk-poly: artifact written to %s\n", outPath.c_str());
+    } else {
+        std::fwrite(src->data(), 1, src->size(), stdout);
+    }
+    if (compile) {
+        mlk::BackendDriverConfig cfg;
+        if (!workdir.empty()) cfg.workdirBase = workdir;
+        auto loaded = mlk::buildKernelArtifact(
+            kernel, symbols,
+            useAsm ? mlk::ArtifactKind::Asm : mlk::ArtifactKind::Cpp, cfg);
+        if (!loaded.has_value()) {
+            std::fprintf(stderr, "mlk-poly: artifact failed: %s\n",
+                         loaded.error().message.c_str());
+            return 1;
+        }
+        std::printf("mlk-poly: compiled artifact: %s\n",
+                    loaded->artifactPath().c_str());
+        std::printf("mlk-poly: shared object:    %s\n",
+                    loaded->libraryPath().c_str());
+    }
+    return 0;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fputs("usage: mlk-poly demo | mlk-poly show <graph.mlk>\n",
+        std::fputs("usage: mlk-poly demo [--backend=asm|cpp]\n"
+                   "       mlk-poly show <graph.mlk>\n"
+                   "       mlk-poly emit <graph.mlk> [--asm|--cpp] "
+                   "[--out=<path>] [--workdir=<dir>] [--compile]\n",
                    stderr);
         return 2;
     }
     const std::string mode = argv[1];
-    if (mode == "demo") return runDemo();
+    if (mode == "demo") {
+        std::string backend;
+        for (int i = 2; i < argc; ++i) {
+            if (std::strncmp(argv[i], "--backend=", 10) == 0) {
+                backend = argv[i] + 10;
+            } else {
+                std::fprintf(stderr, "mlk-poly: unknown option %s\n",
+                             argv[i]);
+                return 2;
+            }
+        }
+        if (!backend.empty() && backend != "asm" && backend != "cpp") {
+            std::fprintf(stderr, "mlk-poly: --backend must be asm|cpp\n");
+            return 2;
+        }
+        return runDemo(backend);
+    }
+    if (mode == "emit" && argc >= 3) {
+        std::string outPath, workdir;
+        bool useAsm = true;   // the assembly form is the default artifact
+        bool compile = false;
+        for (int i = 3; i < argc; ++i) {
+            const std::string a = argv[i];
+            if (a == "--asm") {
+                useAsm = true;
+            } else if (a == "--cpp") {
+                useAsm = false;
+            } else if (a.rfind("--out=", 0) == 0) {
+                outPath = a.substr(6);
+            } else if (a.rfind("--workdir=", 0) == 0) {
+                workdir = a.substr(10);
+            } else if (a == "--compile") {
+                compile = true;
+            } else {
+                std::fprintf(stderr, "mlk-poly: unknown option %s\n",
+                             argv[i]);
+                return 2;
+            }
+        }
+        return runEmit(argv[2], useAsm, outPath, workdir, compile);
+    }
     if (mode == "show" && argc >= 3) {
         mlk::SymbolTable symbols;
         mlk::passes::registerAllPasses(symbols);
@@ -197,6 +390,9 @@ int main(int argc, char** argv) {
                     mlk::json::serializePretty(kernel.toJson(symbols)).c_str());
         return 0;
     }
-    std::fputs("usage: mlk-poly demo | mlk-poly show <graph.mlk>\n", stderr);
+    std::fputs("usage: mlk-poly demo [--backend=asm|cpp] | show <graph.mlk>"
+               " | emit <graph.mlk> [--asm|--cpp] [--out=<path>] "
+               "[--workdir=<dir>] [--compile]\n",
+               stderr);
     return 2;
 }

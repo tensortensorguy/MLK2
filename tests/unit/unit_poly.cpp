@@ -5,8 +5,12 @@
 
 #include "mlk/poly/poly.h"
 #include "mlk/runtime/execution.h"
+#include "mlk/backend/cpp_emitter.h"
+#include "mlk/backend/asm_emitter.h"
+#include "mlk/backend/backend_driver.h"
 
 #include <cmath>
+#include <cstdlib>
 
 #include "mlk_test.h"
 
@@ -2625,6 +2629,554 @@ MLK_TEST(poly, runtime_tiled_guarded_gemm_bitexact) {
         MLK_CHECK(outTiled[static_cast<std::size_t>(i * kTestN +
                                                    (kTestN - 1))] == ref);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Round 14: native AOT artifacts — the C++ and x86-64 assembly backends.
+// The pipeline here is the full compiler loop: polyhedral schedule ->
+// codegen -> emitter (C++ | x86-64 AT&T asm) -> OUT-OF-PROCESS toolchain
+// (cc -shared; ADR-0003/0006: no in-process machine codegen) -> dlopen ->
+// execute over the buffer ABI -> bit-exact comparison against the buffer
+// executor (the artifact mirrors walker semantics by construction).
+// ---------------------------------------------------------------------------
+
+/// Cold, cached probe: native-artifact tests require an out-of-process
+/// toolchain. On a platform without one the tests SKIP honestly (the
+/// skip condition itself is the recorded check); every OTHER failure
+/// fails the test — no silent green.
+bool backendToolchainReady() {
+    static const bool ready = [] {
+        mlk::BackendDriverConfig cfg;
+        return mlk::toolchainAvailable(cfg);
+    }();
+    return ready;
+}
+
+/// The full-chain GEMM module (scop -> dependences -> schedule ->
+/// codegen) shared by the native-artifact tests; tileSize 0 = untiled.
+[[nodiscard]] mlk::Result<KernelModule> buildScheduledGemm(
+    SymbolTable& symbols, const KernelModule& km, const int64_t tileSize) {
+    auto scop = mlk::poly::extractScop(km, symbols);
+    if (!scop.has_value()) return std::unexpected<mlk::Error>(scop.error());
+    auto deps = mlk::poly::computeDependences(*scop);
+    if (!deps.has_value()) return std::unexpected<mlk::Error>(deps.error());
+    auto sched = mlk::poly::computePlutoSchedule(*scop, *deps);
+    if (!sched.has_value()) return std::unexpected<mlk::Error>(sched.error());
+    mlk::poly::TiledInfo tiled;
+    if (tileSize > 0) {
+        auto t = mlk::poly::computeTiling(*scop, *deps, *sched, tileSize);
+        if (!t.has_value()) return std::unexpected<mlk::Error>(t.error());
+        tiled = *t;
+    }
+    return mlk::poly::emitScheduledKernel(*scop, *sched, tiled, km,
+                                          symbols);
+}
+
+MLK_TEST(poly, backend_legacy_elementwise_bitexact) {
+    // Legacy 1-D module: out[i] = A[i] * B[i] over a dynamic bound —
+    // the historical ABI form (n + fixed scalars tail). Both artifact
+    // forms must match the 1-D executor bit-exact.
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.isInput = true;
+    KernelBuffer b;
+    b.name = symbols.intern("B");
+    b.isInput = true;
+    KernelBuffer out;
+    out.name = symbols.intern("Out");
+    out.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufB = km.addBuffer(b);
+    const uint32_t bufOut = km.addBuffer(out);
+    const SymbolId vi = symbols.intern("i");
+
+    KernelNode loop;
+    loop.op = mlk::KernelOp::Loop;
+    loop.var = vi;
+    loop.begin = 0;
+    loop.end = mlk::constants::kKernelLoopDynamicBound;  // n
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    compute.math = mlk::MathOp::Mul;  // legacy single-op form
+    compute.bufferA = bufA;
+    compute.bufferB = bufB;
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = bufOut;
+    {
+        const uint32_t cid = km.addNode(compute);
+        const uint32_t sid = km.addNode(store);
+        loop.children.push_back(cid);
+        loop.children.push_back(sid);
+        (void)km.addNode(loop);
+    }
+
+    constexpr int64_t n = 16;
+    SmallVector<double, 8> dataA(static_cast<std::size_t>(n));
+    SmallVector<double, 8> dataB(static_cast<std::size_t>(n));
+    for (std::size_t i = 0; i < dataA.size(); ++i) {
+        dataA[i] = static_cast<double>(i) * 0.5 - 3.0;
+        dataB[i] = static_cast<double>((i * 7) % 5) + 1.0;
+    }
+    SmallVector<double, 8> refW(static_cast<std::size_t>(n), -99.0);
+    mlk::KernelBufferBindings ioW;
+    ioW.inputs.push_back(dataA.data());
+    ioW.inputs.push_back(dataB.data());
+    ioW.outputs.push_back(refW.data());
+    ioW.elements = n;
+    auto rw = mlk::executeKernelOnBuffers(km, symbols, ioW, nullptr);
+    MLK_CHECK(rw.has_value());
+    if (!rw.has_value()) return;
+
+    MLK_CHECK(backendToolchainReady());
+    if (!backendToolchainReady()) return;
+    mlk::BackendDriverConfig cfg;
+
+    SmallVector<double, 8> outCpp(static_cast<std::size_t>(n), -99.0);
+    SmallVector<double, 8> outAsm(static_cast<std::size_t>(n), -99.0);
+    for (const mlk::ArtifactKind kind : {mlk::ArtifactKind::Cpp,
+                                         mlk::ArtifactKind::Asm}) {
+        auto loaded = mlk::buildKernelArtifact(km, symbols, kind, cfg);
+        MLK_CHECK(loaded.has_value());
+        if (!loaded.has_value()) {
+            std::fprintf(stderr, "  emit/kind=%d: %s\n",
+                         static_cast<int>(kind),
+                         loaded.error().message.c_str());
+            return;
+        }
+        MLK_CHECK(!loaded->isMultiDim());
+        SmallVector<double, 8>& outC =
+            kind == mlk::ArtifactKind::Cpp ? outCpp : outAsm;
+        mlk::KernelBufferBindings io;
+        io.inputs.push_back(dataA.data());
+        io.inputs.push_back(dataB.data());
+        io.outputs.push_back(outC.data());
+        io.elements = n;
+        auto r = loaded->run(km, symbols, io);
+        MLK_CHECK(r.has_value());
+        if (!r.has_value()) {
+            std::fprintf(stderr, "  run/kind=%d: %s\n",
+                         static_cast<int>(kind),
+                         r.error().message.c_str());
+            return;
+        }
+    }
+    for (std::size_t i = 0; i < dataA.size(); ++i) {
+        // Bit-exact three-way agreement (Rule 43).
+        MLK_CHECK(outCpp[i] == refW[i]);
+        MLK_CHECK(outAsm[i] == refW[i]);
+    }
+}
+
+#if defined(__x86_64__) || defined(_M_X64)
+MLK_TEST(poly, asm_backend_gemm_full_chain_bitexact) {
+    // The flagship loop: baseline GEMM -> polyhedral schedule -> codegen
+    // -> x86-64 assembly artifact -> assembled out-of-process -> loaded
+    // -> executed -> bit-exact vs BOTH the C++ artifact and the walker.
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    auto mod = buildScheduledGemm(symbols, base, 0);
+    MLK_CHECK(mod.has_value());
+    if (!mod.has_value()) return;
+
+    constexpr std::size_t nA = static_cast<std::size_t>(kTestM * kTestK);
+    constexpr std::size_t nB = static_cast<std::size_t>(kTestK * kTestN);
+    constexpr std::size_t nC = static_cast<std::size_t>(kTestM * kTestN);
+    SmallVector<double, 8> bufA(nA), bufB(nB);
+    for (std::size_t i = 0; i < nA; ++i) {
+        bufA[i] = static_cast<double>(i % 7) * 0.25;
+    }
+    for (std::size_t i = 0; i < nB; ++i) {
+        bufB[i] = static_cast<double>(i % 5) * 0.5;
+    }
+    SmallVector<double, 8> outW(nC, 0.0), outCpp(nC, 0.0),
+        outAsm(nC, 0.0);
+
+    auto bind = [&](SmallVector<double, 8>& outC) {
+        mlk::KernelBufferBindings io;
+        io.inputs.push_back(bufA.data());
+        io.inputs.push_back(bufB.data());
+        io.outputs.push_back(outC.data());
+        io.elements = nC;
+        return io;
+    };
+    auto rw =
+        mlk::executeKernelOnBuffers(*mod, symbols, bind(outW), nullptr);
+    MLK_CHECK(rw.has_value());
+    if (!rw.has_value()) return;
+
+    MLK_CHECK(backendToolchainReady());
+    if (!backendToolchainReady()) return;
+    mlk::BackendDriverConfig cfg;
+
+    auto cppArt =
+        mlk::buildKernelArtifact(*mod, symbols, mlk::ArtifactKind::Cpp,
+                                 cfg);
+    MLK_CHECK(cppArt.has_value());
+    if (!cppArt.has_value()) {
+        std::fprintf(stderr, "  emit/cpp: %s\n",
+                     cppArt.error().message.c_str());
+        return;
+    }
+    auto rCpp = cppArt->run(*mod, symbols, bind(outCpp));
+    MLK_CHECK(rCpp.has_value());
+    if (!rCpp.has_value()) {
+        std::fprintf(stderr, "  run/cpp: %s\n",
+                     rCpp.error().message.c_str());
+        return;
+    }
+
+    auto asmArt =
+        mlk::buildKernelArtifact(*mod, symbols, mlk::ArtifactKind::Asm,
+                                 cfg);
+    MLK_CHECK(asmArt.has_value());
+    if (!asmArt.has_value()) {
+        std::fprintf(stderr, "  emit/asm: %s\n",
+                     asmArt.error().message.c_str());
+        return;
+    }
+    MLK_CHECK(asmArt->isMultiDim());
+    auto rAsm = asmArt->run(*mod, symbols, bind(outAsm));
+    MLK_CHECK(rAsm.has_value());
+    if (!rAsm.has_value()) {
+        std::fprintf(stderr, "  run/asm: %s\n",
+                     rAsm.error().message.c_str());
+        return;
+    }
+    for (std::size_t i = 0; i < nC; ++i) {
+        // Three-way bit-exact agreement (Rules 33/43/90).
+        MLK_CHECK(outAsm[i] == outW[i]);
+        MLK_CHECK(outCpp[i] == outW[i]);
+    }
+}
+
+MLK_TEST(poly, asm_backend_tiled_guarded_gemm_bitexact) {
+    // Tiled schedule (tile 2: full tiles + partial tails) with the
+    // guarded k==0 init re-entry — the hardest codegen shape — lowered
+    // to assembly and executed natively; bit-exact vs the untiled
+    // transformed kernel executed by the walker.
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    auto flatMod = buildScheduledGemm(symbols, base, 0);
+    MLK_CHECK(flatMod.has_value());
+    if (!flatMod.has_value()) return;
+    auto tiledMod = buildScheduledGemm(symbols, base, 2);
+    MLK_CHECK(tiledMod.has_value());
+    if (!tiledMod.has_value()) return;
+
+    constexpr std::size_t nA = static_cast<std::size_t>(kTestM * kTestK);
+    constexpr std::size_t nB = static_cast<std::size_t>(kTestK * kTestN);
+    constexpr std::size_t nC = static_cast<std::size_t>(kTestM * kTestN);
+    SmallVector<double, 8> bufA(nA), bufB(nB);
+    for (std::size_t i = 0; i < nA; ++i) {
+        bufA[i] = static_cast<double>(i % 7) * 0.25;
+    }
+    for (std::size_t i = 0; i < nB; ++i) {
+        bufB[i] = static_cast<double>(i % 5) * 0.5;
+    }
+    SmallVector<double, 8> outRef(nC, 0.0), outAsm(nC, 0.0);
+    auto bind = [&](SmallVector<double, 8>& outC) {
+        mlk::KernelBufferBindings io;
+        io.inputs.push_back(bufA.data());
+        io.inputs.push_back(bufB.data());
+        io.outputs.push_back(outC.data());
+        io.elements = nC;
+        return io;
+    };
+    auto rw =
+        mlk::executeKernelOnBuffers(*flatMod, symbols, bind(outRef),
+                                    nullptr);
+    MLK_CHECK(rw.has_value());
+    if (!rw.has_value()) return;
+
+    MLK_CHECK(backendToolchainReady());
+    if (!backendToolchainReady()) return;
+    mlk::BackendDriverConfig cfg;
+    auto asmArt =
+        mlk::buildKernelArtifact(*tiledMod, symbols,
+                                 mlk::ArtifactKind::Asm, cfg);
+    MLK_CHECK(asmArt.has_value());
+    if (!asmArt.has_value()) {
+        std::fprintf(stderr, "  emit/asm: %s\n",
+                     asmArt.error().message.c_str());
+        return;
+    }
+    auto rAsm = asmArt->run(*tiledMod, symbols, bind(outAsm));
+    MLK_CHECK(rAsm.has_value());
+    if (!rAsm.has_value()) {
+        std::fprintf(stderr, "  run/asm: %s\n",
+                     rAsm.error().message.c_str());
+        return;
+    }
+    for (std::size_t i = 0; i < nC; ++i) {
+        MLK_CHECK(outAsm[i] == outRef[i]);  // bit-exact (Rule 43)
+    }
+}
+
+MLK_TEST(poly, asm_backend_guarded_accumulate_bitexact) {
+    // Affine-equality guard (i == 2) + unguarded sibling, executed as an
+    // assembly artifact: exactly one guarded write lands; the unguarded
+    // write covers every element — the walker's per-element truth.
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer y;
+    y.name = symbols.intern("y");
+    y.dims = SmallVector<int64_t, 4>{6};
+    y.isOutput = true;
+    KernelBuffer z;
+    z.name = symbols.intern("z");
+    z.dims = SmallVector<int64_t, 4>{6};
+    z.isOutput = true;
+    const uint32_t by = km.addBuffer(y);
+    const uint32_t bz = km.addBuffer(z);
+    const SymbolId vi = symbols.intern("i");
+
+    KernelNode computeG;
+    computeG.op = mlk::KernelOp::Compute;
+    KernelExpr five;
+    five.op = mlk::MathOp::Add;
+    five.a.kind = KernelOperand::Kind::Const;
+    five.a.constValue = 5.0;
+    computeG.exprs.push_back(five);
+    KernelNode storeG;
+    storeG.op = mlk::KernelOp::Store;
+    storeG.bufferOut = by;
+    storeG.outIndexCoeffs = SmallVector<int64_t, 4>{1};
+
+    KernelNode computeZ;
+    computeZ.op = mlk::KernelOp::Compute;
+    KernelExpr two;
+    two.op = mlk::MathOp::Add;
+    two.a.kind = KernelOperand::Kind::Const;
+    two.a.constValue = 2.0;
+    computeZ.exprs.push_back(two);
+    KernelNode storeZ;
+    storeZ.op = mlk::KernelOp::Store;
+    storeZ.bufferOut = bz;
+    storeZ.outIndexCoeffs = SmallVector<int64_t, 4>{1};
+
+    KernelNode guard;
+    guard.op = mlk::KernelOp::Guard;
+    guard.guardCoeffs = SmallVector<int64_t, 4>{1};
+    guard.guardOffset = -2;  // i - 2 == 0
+
+    KernelNode loop;
+    loop.op = mlk::KernelOp::Loop;
+    loop.var = vi;
+    loop.begin = 0;
+    loop.end = 6;
+    {
+        const uint32_t cg = km.addNode(computeG);
+        const uint32_t sg = km.addNode(storeG);
+        guard.children.push_back(cg);
+        guard.children.push_back(sg);
+        const uint32_t gid = km.addNode(guard);
+        const uint32_t cz = km.addNode(computeZ);
+        const uint32_t sz = km.addNode(storeZ);
+        loop.children.push_back(gid);
+        loop.children.push_back(cz);
+        loop.children.push_back(sz);
+        (void)km.addNode(loop);
+    }
+
+    MLK_CHECK(backendToolchainReady());
+    if (!backendToolchainReady()) return;
+    mlk::BackendDriverConfig cfg;
+    auto asmArt =
+        mlk::buildKernelArtifact(km, symbols, mlk::ArtifactKind::Asm, cfg);
+    MLK_CHECK(asmArt.has_value());
+    if (!asmArt.has_value()) {
+        std::fprintf(stderr, "  emit/asm: %s\n",
+                     asmArt.error().message.c_str());
+        return;
+    }
+    SmallVector<double, 8> bufY(6, 0.0), bufZ(6, 0.0);
+    mlk::KernelBufferBindings io;
+    io.outputs.push_back(bufY.data());
+    io.outputs.push_back(bufZ.data());
+    io.elements = 6;
+    auto r = asmArt->run(km, symbols, io);
+    MLK_CHECK(r.has_value());
+    if (!r.has_value()) {
+        std::fprintf(stderr, "  run/asm: %s\n",
+                     r.error().message.c_str());
+        return;
+    }
+    for (std::size_t i = 0; i < 6; ++i) {
+        MLK_CHECK(bufY[i] == (i == 2 ? 5.0 : 0.0));  // guarded write
+        MLK_CHECK(bufZ[i] == 2.0);                   // unguarded write
+    }
+}
+
+MLK_TEST(poly, asm_backend_reducesum_bitexact) {
+    // ReduceSum synthesis class (init + accumulate nests, reduction dim
+    // carried) lowered to assembly; the artifact must reproduce the
+    // ascending-k accumulation order bit-exactly (Rule 90).
+    SymbolTable symbols;
+    mlk::DiagnosticEngine diag;
+    mlk::PassContext ctx;
+    ctx.symbols = &symbols;
+    ctx.diag = &diag;
+    ctx.tier = mlk::Tier::Tier2;
+    mlk::poly::PolyWorkspace* ws = mlk::poly::createPolyWorkspace();
+    ctx.polyWorkspace = ws;
+    mlk::MathGraph graph(&symbols);
+    mlk::passes::registerAllPasses(symbols);
+
+    constexpr int64_t M = 32, K = 16;
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{M, K};
+    a.isInput = true;
+    KernelBuffer y;
+    y.name = symbols.intern("Y");
+    y.dims = SmallVector<int64_t, 4>{M};
+    y.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufY = km.addBuffer(y);
+    KernelNode call;
+    call.op = mlk::KernelOp::Call;
+    call.math = mlk::MathOp::ReduceSum;
+    call.bufferA = bufA;
+    call.bufferOut = bufY;
+    (void)km.addNode(call);
+    ctx.kernelOut = &km;
+
+    mlk::MathGraph g2(&symbols);
+    auto passFn = [&](const char* name) -> mlk::Pass* {
+        return mlk::PassRegistry::instance().byName(symbols.intern(name));
+    };
+    for (const char* name :
+         {"poly.synth", "poly.scop_detect", "poly.dependence",
+          "poly.schedule", "poly.tile", "poly.codegen", "poly.verify"}) {
+        auto r = passFn(name)->run(ctx, g2);
+        MLK_CHECK(r.has_value());
+    }
+    MLK_CHECK(ws->codegenValid);
+
+    const std::size_t nA = static_cast<std::size_t>(M * K);
+    SmallVector<double, 8> bufInA(nA);
+    for (std::size_t i = 0; i < nA; ++i) {
+        bufInA[i] = static_cast<double>((i * 11) % 17) * 0.125;
+    }
+    SmallVector<double, 8> outW(static_cast<std::size_t>(M), -1.0),
+        outAsm(static_cast<std::size_t>(M), -1.0);
+    auto bind = [&](SmallVector<double, 8>& outC) {
+        mlk::KernelBufferBindings io;
+        io.inputs.push_back(bufInA.data());
+        io.outputs.push_back(outC.data());
+        io.elements = nA;
+        return io;
+    };
+    auto rw = mlk::executeKernelOnBuffers(km, symbols, bind(outW), nullptr);
+    MLK_CHECK(rw.has_value());
+    if (!rw.has_value()) {
+        mlk::poly::destroyPolyWorkspace(ws);
+        return;
+    }
+
+    MLK_CHECK(backendToolchainReady());
+    if (!backendToolchainReady()) {
+        mlk::poly::destroyPolyWorkspace(ws);
+        return;
+    }
+    mlk::BackendDriverConfig cfg;
+    auto asmArt =
+        mlk::buildKernelArtifact(km, symbols, mlk::ArtifactKind::Asm, cfg);
+    MLK_CHECK(asmArt.has_value());
+    if (!asmArt.has_value()) {
+        std::fprintf(stderr, "  emit/asm: %s\n",
+                     asmArt.error().message.c_str());
+        mlk::poly::destroyPolyWorkspace(ws);
+        return;
+    }
+    auto rAsm = asmArt->run(km, symbols, bind(outAsm));
+    MLK_CHECK(rAsm.has_value());
+    if (!rAsm.has_value()) {
+        std::fprintf(stderr, "  run/asm: %s\n",
+                     rAsm.error().message.c_str());
+        mlk::poly::destroyPolyWorkspace(ws);
+        return;
+    }
+    for (std::size_t i = 0; i < outW.size(); ++i) {
+        MLK_CHECK(outAsm[i] == outW[i]);  // bit-exact (Rule 43)
+    }
+    mlk::poly::destroyPolyWorkspace(ws);
+}
+
+#endif  // x86-64 native execution tests
+
+MLK_TEST(poly, backend_rejects_lowered_first_nodes) {
+    // Honest failure contract: Call nodes (Rule 121) and speculative
+    // guards (Rule 5) are rejected by BOTH emitters — never approximated
+    // silently.
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{4, 4};
+    a.isInput = true;
+    KernelBuffer y;
+    y.name = symbols.intern("Y");
+    y.dims = SmallVector<int64_t, 4>{4};
+    y.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufY = km.addBuffer(y);
+    KernelNode call;
+    call.op = mlk::KernelOp::Call;
+    call.math = mlk::MathOp::MatMul;
+    call.bufferA = bufA;
+    call.bufferOut = bufY;
+    (void)km.addNode(call);
+    auto cppR = mlk::emitCppSource(km, symbols);
+    MLK_CHECK(!cppR.has_value());
+    auto asmR = mlk::emitAsmSource(km, symbols);
+    MLK_CHECK(!asmR.has_value());
+}
+
+MLK_TEST(poly, asm_backend_text_snapshot) {
+    // Deterministic text contract of the assembly artifact (pure string
+    // generation — no toolchain needed): the GEMM nest must show the
+    // SSE2 scalar kernel, the affine addressing, the negative-store
+    // guard, the ABI frame, and the recorded parallelism marks.
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    auto mod = buildScheduledGemm(symbols, base, 0);
+    MLK_CHECK(mod.has_value());
+    if (!mod.has_value()) return;
+    auto s = mlk::emitAsmSource(*mod, symbols);
+    MLK_CHECK(s.has_value());
+    if (!s.has_value()) {
+        std::fprintf(stderr, "  emit/asm: %s\n",
+                     s.error().message.c_str());
+        return;
+    }
+    MLK_CHECK(s->find(".globl  mlk_kernel") != std::string::npos);
+    MLK_CHECK(s->find(".type   mlk_kernel,@function") !=
+              std::string::npos);
+    MLK_CHECK(s->find("pushq   %rbp") != std::string::npos);
+    MLK_CHECK(s->find("mulsd %xmm1, %xmm0") != std::string::npos);
+    MLK_CHECK(s->find("addsd %xmm1, %xmm0") != std::string::npos);
+    MLK_CHECK(s->find("movsd (%r10,%rax,1), %xmm0") !=
+              std::string::npos);  // ElemIdx load
+    MLK_CHECK(s->find("movsd %xmm0, (%r10,%rax,1)") !=
+              std::string::npos);  // overwrite store
+    MLK_CHECK(s->find("movsd (%r10,%rax,1), %xmm1") !=
+              std::string::npos);  // accumulate load
+    MLK_CHECK(s->find("testq %rax, %rax\njs .Lmlk_neg_store") !=
+              std::string::npos);  // negative-flat guard
+    MLK_CHECK(s->find(".Lmlk_neg_store:") != std::string::npos);
+    MLK_CHECK(s->find("call ") == std::string::npos);  // pure arithmetic
+    MLK_CHECK(s->find(".section .note.GNU-stack") != std::string::npos);
+    // The schedule's parallel outer rows are RECORDED (Rule 148).
+    MLK_CHECK(s->find("# Rule 148 recorded: parallel loops=") !=
+              std::string::npos);
+    // Determinism: re-emission is byte-identical (Rule 53).
+    auto s2 = mlk::emitAsmSource(*mod, symbols);
+    MLK_CHECK(s2.has_value() && *s2 == *s);
 }
 
 MLK_TEST_MAIN("poly")

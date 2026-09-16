@@ -33,7 +33,7 @@ ctest --test-dir build
 | `autotuner/` | Declarative search spaces, verify-before-benchmark harness, roofline pruning, noise filtering, complete-key caching |
 | `superopt/` | Certificated candidate generators: scalar peephole, math-function approximation (measured-ULP degree-13 sin: max 2 ULPs vs libm), algebraic e-graph optimizer |
 | `polyhedral/` | Hermetic polyhedral engine (Presburger sets, Fourier-Motzkin, exact lexmin, rational simplex) + the poly.* pass family: SCoP extraction, exact dependence analysis, affine scheduling, tiling, Kernel IR code generation, schedule verification (docs/polyhedral_spec.md) |
-| `backends/` | Tier 0 interpreter backend, CPU backend (KernelModule execution + C++ source emission for AOT) |
+| `backends/` | Tier 0 interpreter backend, CPU backend (KernelModule execution + native AOT artifacts: C++ source and x86-64 assembly emission, out-of-process build + dlopen driver — docs/polyhedral_spec.md §backend) |
 | `tools/` | `mlkc`, `mlk-poly`, `mlk-verify`, `mlk-tune`, `mlk-bench`, `mlk-profile`, `mlk-replay`, `mlk-generate-profiles` |
 | `tests/` | unit (10 suites), differential (Rule 43), fallback (Rule 102), fuzz (Rule 152), security (Rule 124), replay (Rule 158) |
 | `docs/` | architecture, IR/property/effect/profile/autotuner/superoptimizer/bytecode/ABI/cache specs, 47 pass docs, ADRs, compliance matrix |
