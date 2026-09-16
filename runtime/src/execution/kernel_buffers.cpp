@@ -29,8 +29,9 @@ namespace mlk {
 namespace {
 
 /// Hot-path knobs (Rule 27: named, documented constants only).
-inline constexpr std::size_t kKernelExecMaxThreads = 4;
-inline constexpr int64_t kParallelChunkElements = 16384;
+/// kKernelExecMaxThreads / kParallelChunkElements live in constants.h —
+/// the fast-kernel launch-coverage certificate mirrors the chunking
+/// arithmetic and must read the SAME values.
 inline constexpr std::size_t kMaxTempSlots = 64;
 /// Upper bound on ONE temp buffer's element count (DoS guard for
 /// executor-allocated scratch; 16M doubles = 128 MiB).
@@ -184,14 +185,16 @@ struct ExprEvaluator {
                                         const int64_t elements) {
     std::size_t threads = std::thread::hardware_concurrency();
     if (threads == 0) threads = 1;
-    if (threads > kKernelExecMaxThreads) threads = kKernelExecMaxThreads;
+    if (threads > constants::kKernelExecMaxThreads) {
+        threads = constants::kKernelExecMaxThreads;
+    }
     const SymbolId threadsKey = symbols.intern("threads");
     if (const int64_t* v = kernel.scheduleParams.find(threadsKey)) {
         if (*v >= 1) {
             threads = static_cast<std::size_t>(*v);
         }
     }
-    if (elements < kParallelChunkElements) threads = 1;
+    if (elements < constants::kParallelChunkElements) threads = 1;
     return threads;
 }
 

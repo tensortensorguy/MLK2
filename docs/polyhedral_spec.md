@@ -432,6 +432,114 @@ inside the demo report; `mlk-poly emit <graph.mlk> [--asm|--cpp]
 [--out=<path>] [--workdir=<dir>] [--compile]` produces the standalone
 artifact text and optionally the built `.so`.
 
+## Fast-kernel search (OEIA/Refined/FastKernels)
+
+The `mlk_fastkernel` component (`fastkernel/`) makes kernel runtime
+speed a first-class, CERTIFIED optimization objective under a hard
+compile-time budget, implementing the uploaded OEIA/Refined/FastKernels
+axiom set (sections XIV-XVIII). The search is a driver-level
+orchestrator: it owns no IR of itself and composes the pipeline (per-
+variant Tier2 compiles), the out-of-process artifact driver, and the
+buffer executor.
+
+**Certificate requirement (Meta-Axiom 0.1).** No claim without a
+certificate; every candidate outcome carries a machine-checkable bundle
+(`VariantCertificate`), and the whole report serializes to JSON
+(`FastKernelReport::toJson`) so the audit does not require the search
+process.
+
+**Policy (Axioms 0.2/1.4/14.17).** The search policy is
+`bitexact-f64-cpu-v1`: exact f64 kernel identity. Reassociation, FMA
+contraction, approximate reductions — the entire Axiom-14.17 numerical
+relaxation menu — are ILLEGAL under this policy, so a candidate that
+diverges by one ulp is REJECTED (`IdentityMismatch`), never tolerated.
+
+**Kernel variants (Axioms 14.1/14.3).** The declared variant space is
+tile sizes (0 = untiled, via the `poly.tile` kill switch) x execution
+paths (buffer executor / native assembly artifact / native C++ artifact)
+x walker thread overrides. Repeated declarations deduplicate in
+declaration order. Launch configuration is part of the kernel object
+(Axiom 14.13): thread overrides live in `scheduleParams["threads"]`.
+
+**Compile-time accounting (Axioms 14.5/15.2).** Per candidate: the
+stage-accounted Tier2 compile, artifact emission + out-of-process build
+(coalesced into `build_sec` for first use), and load. Cache reuse
+reports `M^reuse` = load time alone with `comptimeFromCache` set
+(Axiom 15.8).
+
+**Budget modes (Axiom 15.1) and the regression guard (Axiom 15.6).**
+`SameComptime` (B_allowed = B_K^0), `BoundedExtra` (B_K^0 + dB_K <=
+dB_max; extra comptime admissible only through the justification gate),
+`Amortized` (objective U^run + M^kernel/N). B_K^0 = 0 means AUTO: max of
+3 declared samples of the default-pipeline compile time (a single
+sample's ~0.3% noise would decide admissibility by measurement luck at
+the boundary; the max is the conservative estimate, and the provenance
+string says so). A candidate with M^kernel > B_allowed is INADMISSIBLE —
+recorded as `ComptimeBudgetExceeded`, never a silent overrun (Rule 17.5:
+compile-time is a kernel constraint).
+
+**Extra-comptime justification (Axioms 14.9/15.7).** The pure decision
+function `evaluateExtraComptimeJustification` certifies one of:
+absolute runtime improvement (U_new <= U_base - tau), amortized payoff
+(alpha*dM <= N*dR), or Pareto improvement (strict runtime gain, compile
+time the only excused dimension). U_base is the best certified
+same-comptime candidate; when none exists it falls back to the
+specification's own measured runtime. Without a certificate the extra
+comptime is refused (`NoJustification`) and the search prefers the
+same-comptime kernel (Rule 17.2).
+
+**Identity and runtime certificates (Axioms 14.2/14.4).** The oracle is
+the Tier1 reference execution; identity is a bit-exact differential
+(max|diff| = 0 element-for-element; NaN never matches). U^run is the
+declared benchmark method (median of `benchReps` timed runs after
+`warmupReps` warmups; min/max recorded alongside).
+
+**Launch-coverage certificate (Axioms 14.13/14.14).**
+`certifyLaunchCoverage` mirrors the buffer executor's `decideThreads` +
+chunk decomposition (the same named constants from constants.h) and
+proves the worker slabs cover the loop domain exactly and pairwise
+disjointly — no dropped, duplicated, or out-of-bounds work. A threads
+override above `kKernelExecMaxThreads` is a resource violation
+(Axiom 14.16) reported in the certificate.
+
+**Roofline lower bound (Axioms 14.11/14.12).** The essential-work model
+is DECLARED: B_min = non-temp buffers moved once (temps assumed
+cache-resident), O_min = 2*M*K*N (MatMul), M*K (ReduceSum), 5*M*K
+(softmax max/sub/exp/add/div row model), 1 per fused Compute expression,
+1 per accumulate store. Unknown buffer extents mark the model UNKNOWN —
+the roofline certificate is then omitted (tri-state, Rule 22), never
+guessed. Environment peaks BW_h / T_h are measured once per search
+(calibrated stream triad / four independent multiply-add chains with
+volatile sinks; sub-clock-resolution reps are scaled until measurable —
+an uncalibrated probe reads as an absurd peak, which is a broken
+certificate). The winner's certified gap U^run/L - 1 is reported, never
+hidden.
+
+**Honest claims (Axiom 14.21).** Every candidate evaluated and
+certified (or rejected for budget/identity/justification/resource) =>
+"fastest certified kernel within the declared searched space (exhaustive
+finite search)". Any build/capability failure => "best certified kernel
+in searched space". No feasible kernel => "budget failure" (Axiom 15.6).
+"Fastest possible" is never claimed.
+
+**Cache validity (Axioms 14.22/15.8).** Artifacts cache under
+`<cacheDir>/fk-<fingerprint>/` where the fingerprint binds the kernel
+source hash, artifact kind, compiler, policy, budget mode, and the
+environment (descriptor AND measured peak values — two environments
+sharing a label but differing in peaks are different environments). A
+matching entry is dlopened directly (`loadKernelLibrary`); any change
+invalidates by fingerprint.
+
+**CLI.** `mlk-poly autotune [--m=--k=--n=] [--tiles=..] [--exec=..]
+[--budget-mode=same|extra|amortized] [--comptime-budget-ms=X]
+[--extra-budget-ms=X] [--tau-ms=X] [--alpha=A] [--executions=N]
+[--reps=R] [--warmup=W] [--cache-dir=D] [--json-out=F]` prints the
+certificate table and (optionally) the full JSON report. Tests:
+`tests/unit/unit_fastkernel.cpp` (9 cases: coverage certificate, exact
+roofline model, unknown-extent tri-state, justification forms, full
+same-comptime search, budget-failure report, refused extra comptime,
+cache reuse + invalidation).
+
 ## Roadmap
 
 - **Band-shift scheduling** (per-statement constant offsets on varying
@@ -458,8 +566,6 @@ artifact text and optionally the built `.so`.
 - Per-statement loop-bound generalization: fused statements currently
   share the intersection of their pivot bounds (the synth classes agree;
   disagreeing domains bail via the shape contract).
-- `poly_tile_size` autotuner integration over the order dimension (the
-  search is compile-time exact; tile sizes remain the measured knob).
 - Split for tiled levels currently keeps the guard-free point segments
   only inside singleton tiles; a point-level split that removes the
   affine point-loop bound machinery for partial tiles could shrink the

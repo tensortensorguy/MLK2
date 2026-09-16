@@ -307,6 +307,87 @@ LoadedKernel& LoadedKernel::operator=(LoadedKernel&& other) noexcept {
     return *this;
 }
 
+Result<LoadedKernel> buildKernelArtifactInDir(
+    const KernelModule& kernel, SymbolTable& symbols,
+    const ArtifactKind kind, const BackendDriverConfig& config,
+    const std::string& artifactDir) {
+#if !defined(_WIN32)
+    // Stage 1: emit.
+    Result<std::string> source = kind == ArtifactKind::Asm
+                                     ? emitAsmSource(kernel, symbols)
+                                     : emitCppSource(kernel, symbols);
+    if (!source.has_value()) {
+        return std::unexpected<Error>(source.error());
+    }
+    // Stage 2: pin the artifact directory (created 0755 if missing; the
+    // cache layer owns the per-fingerprint naming).
+    if (::mkdir(artifactDir.c_str(), 0755) != 0 && errno != EEXIST) {
+        return err(ErrorCode::IoError,
+                   "driver: cannot create artifact dir: " + artifactDir);
+    }
+    // Stage 3: write.
+    const bool isAsm = kind == ArtifactKind::Asm;
+    const std::string artifactPath =
+        joinPath(artifactDir, isAsm ? "kernel.s" : "kernel.cpp");
+    auto wrote = writeFile(artifactPath, *source);
+    if (!wrote.has_value()) {
+        return std::unexpected<Error>(wrote.error());
+    }
+    // Stage 4: out-of-process toolchain.
+    const std::string libraryPath = joinPath(artifactDir, "libmlk_kernel.so");
+    auto built = runCompiler(config, artifactDir, artifactPath, libraryPath,
+                             isAsm);
+    if (!built.has_value()) {
+        return std::unexpected<Error>(built.error());
+    }
+    // Stage 5: load.
+    auto lib = loadLibrary(libraryPath);
+    if (!lib.has_value()) {
+        return std::unexpected<Error>(lib.error());
+    }
+    LoadedKernel loaded;
+    loaded.handle_ = lib->handle;
+    loaded.fn_ = lib->fn;
+    loaded.multiDim_ = isMultiDimModule(kernel);
+    loaded.artifactPath_ = artifactPath;
+    loaded.libraryPath_ = libraryPath;
+    return loaded;
+#else
+    (void)kernel;
+    (void)symbols;
+    (void)kind;
+    (void)config;
+    (void)artifactDir;
+    return err(ErrorCode::UnsupportedCapability,
+               "driver: no POSIX toolchain on this platform");
+#endif
+}
+
+Result<LoadedKernel> loadKernelLibrary(const KernelModule& kernel,
+                                       SymbolTable& symbols,
+                                       const std::string& libraryPath) {
+#if !defined(_WIN32)
+    (void)symbols;
+    auto lib = loadLibrary(libraryPath);
+    if (!lib.has_value()) {
+        return std::unexpected<Error>(lib.error());
+    }
+    LoadedKernel loaded;
+    loaded.handle_ = lib->handle;
+    loaded.fn_ = lib->fn;
+    loaded.multiDim_ = isMultiDimModule(kernel);
+    loaded.artifactPath_ = libraryPath;
+    loaded.libraryPath_ = libraryPath;
+    return loaded;
+#else
+    (void)kernel;
+    (void)symbols;
+    (void)libraryPath;
+    return err(ErrorCode::UnsupportedCapability,
+               "driver: no POSIX toolchain on this platform");
+#endif
+}
+
 Result<LoadedKernel> buildKernelArtifact(const KernelModule& kernel,
                                          SymbolTable& symbols,
                                          const ArtifactKind kind,

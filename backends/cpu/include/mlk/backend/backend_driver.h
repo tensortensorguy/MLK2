@@ -102,12 +102,36 @@ private:
     friend Result<LoadedKernel> buildKernelArtifact(
         const KernelModule& kernel, SymbolTable& symbols,
         ArtifactKind kind, const BackendDriverConfig& config);
+    friend Result<LoadedKernel> buildKernelArtifactInDir(
+        const KernelModule& kernel, SymbolTable& symbols,
+        ArtifactKind kind, const BackendDriverConfig& config,
+        const std::string& artifactDir);
+    friend Result<LoadedKernel> loadKernelLibrary(
+        const KernelModule& kernel, SymbolTable& symbols,
+        const std::string& libraryPath);
     void* handle_{nullptr};
     void* fn_{nullptr};
     bool multiDim_{false};
     std::string artifactPath_{};
     std::string libraryPath_{};
 };
+
+/// Emits the artifact (per kind), compiles it out-of-process, and
+/// dlopens it — with the artifact pinned to `artifactDir` (created if
+/// missing) instead of a fresh mkdtemp workdir. The fast-kernel search
+/// uses this so compiled artifacts live at stable, cache-addressable
+/// paths (docs/polyhedral_spec.md §fast-kernel-search; Axiom 14.22).
+[[nodiscard]] Result<LoadedKernel> buildKernelArtifactInDir(
+    const KernelModule& kernel, SymbolTable& symbols, ArtifactKind kind,
+    const BackendDriverConfig& config, const std::string& artifactDir);
+
+/// Stage-5-only entry point: dlopens an existing shared object and binds
+/// it. This is the kernel-artifact cache reuse path — no emit, no
+/// compiler spawn (the reused artifact's compile-time cost is the load
+/// time alone; Axiom 15.8 M^reuse vs M^first).
+[[nodiscard]] Result<LoadedKernel> loadKernelLibrary(
+    const KernelModule& kernel, SymbolTable& symbols,
+    const std::string& libraryPath);
 
 /// Emits the artifact (per kind), compiles it out-of-process in a fresh
 /// workdir, and dlopens it. Every failure carries its stage: emit /

@@ -50,12 +50,13 @@ add_subdirectory(compiler)
 add_subdirectory(polyhedral)
 
 # ---------------------------------------------------------------------------
-# Runtime, autotuner, superoptimizer, backends
+# Runtime, autotuner, superoptimizer, backends, fast-kernel search
 # ---------------------------------------------------------------------------
 add_subdirectory(runtime)
 add_subdirectory(autotuner)
 add_subdirectory(superopt)
 add_subdirectory(backends)
+add_subdirectory(fastkernel)
 
 # ---------------------------------------------------------------------------
 # Tools, tests, bench, examples

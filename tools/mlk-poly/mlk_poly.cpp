@@ -12,6 +12,17 @@
 //   mlk-poly show <graph.mlk>
 //                 compiles any graph at Tier2 and dumps the kernel
 //                 JSON (non-affine kernels report baseline fallback)
+//   mlk-poly autotune [--m=M --k=K --n=N] [--tiles=0,16,32]
+//                 [--exec=walker,asm,cpp] [--budget-mode=same|extra|
+//                 amortized] [--comptime-budget-ms=X] [--extra-budget-ms=X]
+//                 [--tau-ms=X] [--alpha=A] [--executions=N] [--warmup=W]
+//                 [--reps=R] [--cache-dir=D] [--workdir=D] [--json-out=F]
+//                 runs the OEIA/Refined/FastKernels budgeted search over
+//                 the declared GEMM variant space: per-variant Tier2
+//                 compile, bit-exact identity certificates, benchmarked
+//                 runtime upper bounds, roofline lower bound + gap,
+//                 budget gates, and the honest winner claim (Axiom 14.21).
+//                 --json-out writes the full machine-readable report.
 //   mlk-poly emit <graph.mlk> [--asm|--cpp] [--out=<path>]
 //                 [--workdir=<dir>] [--compile]
 //                 compiles the graph at Tier2 and emits the standalone
@@ -31,6 +42,7 @@
 #include "mlk/backend/asm_emitter.h"
 #include "mlk/backend/backend_driver.h"
 #include "mlk/backend/cpp_emitter.h"
+#include "mlk/fastkernel/fast_kernel.h"
 #include "mlk/core/symbol_table.h"
 #include "mlk/ir/graph_builder.h"
 #include "mlk/ir/graph_json.h"
@@ -62,6 +74,23 @@ mlk::MathGraph buildGemmGraph(mlk::SymbolTable& symbols) {
     mlk::GraphBuilder b(symbols);  // builds into its internal graph_
     const auto tA = mlk::MathType::tensorValue(mlk::Dtype::F64, {8, 6});
     const auto tB = mlk::MathType::tensorValue(mlk::Dtype::F64, {6, 7});
+    const mlk::ValueId pa = b.placeholder("A", tA);
+    const mlk::ValueId pb = b.placeholder("B", tB);
+    auto mm = b.op(mlk::MathOp::MatMul, {pa, pb});
+    if (mm.has_value()) b.output(*mm);
+    return b.graph();
+}
+
+/// Builds an M*K*N MatMul graph for the autotune verb (the searched
+/// specification s; Axiom 14.2).
+mlk::MathGraph buildGemmGraphShaped(mlk::SymbolTable& symbols,
+                                    const int64_t m, const int64_t k,
+                                    const int64_t n) {
+    mlk::GraphBuilder b(symbols);
+    const auto tA = mlk::MathType::tensorValue(mlk::Dtype::F64,
+                                               {m, k});
+    const auto tB = mlk::MathType::tensorValue(mlk::Dtype::F64,
+                                               {k, n});
     const mlk::ValueId pa = b.placeholder("A", tA);
     const mlk::ValueId pb = b.placeholder("B", tB);
     auto mm = b.op(mlk::MathOp::MatMul, {pa, pb});
@@ -298,12 +327,245 @@ int runEmit(const std::string& path, const bool useAsm,
     return 0;
 }
 
+
+/// Parses a comma-separated int64 list ("0,16,32").
+bool parseIntList(const std::string& s,
+                  mlk::SmallVector<int64_t, 8>& out) {
+    std::size_t pos = 0;
+    while (pos <= s.size()) {
+        const std::size_t next = s.find(',', pos);
+        const std::string tok = s.substr(
+            pos, next == std::string::npos ? std::string::npos : next - pos);
+        if (tok.empty()) return false;
+        char* end = nullptr;
+        const long long v = std::strtoll(tok.c_str(), &end, 10);
+        if (end == nullptr || *end != '\0') return false;
+        out.push_back(static_cast<int64_t>(v));
+        if (next == std::string::npos) break;
+        pos = next + 1;
+    }
+    return !out.empty();
+}
+
+/// The OEIA/Refined/FastKernels budgeted search over a GEMM variant
+/// space (Axioms 14.1-15.10); every claim in the printed summary traces
+/// to a certificate in the JSON report.
+int runAutotune(int argc, char** argv) {
+    int64_t m = 64, k = 48, n = 56;
+    mlk::SmallVector<int64_t, 8> tiles{0, 16, 32};
+    bool execSet = false;
+    std::string execArg;
+    mlk::fastkernel::FastKernelSearchConfig cfg;
+    std::string jsonOut, cacheDir, workdir;
+    double comptimeBudgetMs = 0.0, extraBudgetMs = 0.0, tauMs = 0.0,
+           alpha = 1.0;
+    int64_t executions = 1;
+    std::string mode = "same";
+    for (int i = 2; i < argc; ++i) {
+        const std::string a = argv[i];
+        auto val = [&a](const char* key) -> std::string {
+            const std::string prefix = std::string("--") + key + "=";
+            return a.rfind(prefix, 0) == 0 ? a.substr(prefix.size())
+                                           : std::string();
+        };
+        if (!val("m").empty()) {
+            m = std::atoll(val("m").c_str());
+        } else if (!val("k").empty()) {
+            k = std::atoll(val("k").c_str());
+        } else if (!val("n").empty()) {
+            n = std::atoll(val("n").c_str());
+        } else if (!val("tiles").empty()) {
+            tiles.clear();
+            if (!parseIntList(val("tiles"), tiles)) {
+                std::fprintf(stderr, "mlk-poly: bad --tiles\n");
+                return 2;
+            }
+        } else if (!val("exec").empty()) {
+            execSet = true;
+            execArg = val("exec");
+        } else if (!val("budget-mode").empty()) {
+            mode = val("budget-mode");
+        } else if (!val("comptime-budget-ms").empty()) {
+            comptimeBudgetMs = std::atof(val("comptime-budget-ms").c_str());
+        } else if (!val("extra-budget-ms").empty()) {
+            extraBudgetMs = std::atof(val("extra-budget-ms").c_str());
+        } else if (!val("tau-ms").empty()) {
+            tauMs = std::atof(val("tau-ms").c_str());
+        } else if (!val("alpha").empty()) {
+            alpha = std::atof(val("alpha").c_str());
+        } else if (!val("executions").empty()) {
+            executions = std::atoll(val("executions").c_str());
+        } else if (!val("warmup").empty()) {
+            cfg.warmupReps =
+                static_cast<uint32_t>(std::atoll(val("warmup").c_str()));
+        } else if (!val("reps").empty()) {
+            cfg.benchReps =
+                static_cast<uint32_t>(std::atoll(val("reps").c_str()));
+        } else if (!val("cache-dir").empty()) {
+            cacheDir = val("cache-dir");
+        } else if (!val("workdir").empty()) {
+            workdir = val("workdir");
+        } else if (!val("json-out").empty()) {
+            jsonOut = val("json-out");
+        } else {
+            std::fprintf(stderr, "mlk-poly: unknown option %s\n", argv[i]);
+            return 2;
+        }
+    }
+    if (m <= 0 || k <= 0 || n <= 0) {
+        std::fprintf(stderr, "mlk-poly: --m/--k/--n must be positive\n");
+        return 2;
+    }
+    if (mode != "same" && mode != "extra" && mode != "amortized") {
+        std::fprintf(stderr,
+                     "mlk-poly: --budget-mode must be same|extra|amortized\n");
+        return 2;
+    }
+    if (execSet) {
+        mlk::SmallVector<mlk::fastkernel::ExecPath, 4> paths{};
+        std::size_t pos = 0;
+        while (pos <= execArg.size()) {
+            const std::size_t next = execArg.find(',', pos);
+            const std::string tok = execArg.substr(
+                pos,
+                next == std::string::npos ? std::string::npos : next - pos);
+            if (tok == "walker") {
+                paths.push_back(mlk::fastkernel::ExecPath::Walker);
+            } else if (tok == "asm") {
+                paths.push_back(mlk::fastkernel::ExecPath::NativeAsm);
+            } else if (tok == "cpp") {
+                paths.push_back(mlk::fastkernel::ExecPath::NativeCpp);
+            } else if (!tok.empty()) {
+                std::fprintf(stderr, "mlk-poly: bad --exec token %s\n",
+                             tok.c_str());
+                return 2;
+            }
+            if (next == std::string::npos) break;
+            pos = next + 1;
+        }
+        if (paths.empty()) {
+            std::fprintf(stderr, "mlk-poly: --exec must be non-empty\n");
+            return 2;
+        }
+        cfg.execPaths = std::move(paths);
+    }
+    cfg.tileSizes = std::move(tiles);
+    cfg.budget.mode = mode == "same"
+                          ? mlk::fastkernel::BudgetMode::SameComptime
+                          : mode == "extra"
+                                ? mlk::fastkernel::BudgetMode::BoundedExtra
+                                : mlk::fastkernel::BudgetMode::Amortized;
+    cfg.budget.baselineComptimeSec = comptimeBudgetMs / 1000.0;
+    cfg.budget.extraComptimeMaxSec = extraBudgetMs / 1000.0;
+    cfg.budget.minRuntimeImprovementSec = tauMs / 1000.0;
+    cfg.budget.alpha = alpha;
+    cfg.budget.amortizedExecutions = executions;
+    cfg.driver.workdirBase = workdir;
+    cfg.cacheDir = cacheDir;
+
+    mlk::SymbolTable symbols;
+    mlk::passes::registerAllPasses(symbols);
+    mlk::DiagnosticEngine diag;
+    mlk::TelemetrySink telemetry;
+    mlk::MathGraph graph = buildGemmGraphShaped(symbols, m, k, n);
+    mlk::AccuracyContract contract;
+    mlk::MathDomainProfile profile = tensorCpuProfile(symbols);
+
+    auto report =
+        mlk::fastkernel::runFastKernelSearch(graph, symbols, profile, cfg);
+    if (!report.has_value()) {
+        std::fprintf(stderr, "mlk-poly: autotune failed: %s\n",
+                     report.error().message.c_str());
+        return 1;
+    }
+
+    // Human summary (every line traces to a certificate in the JSON).
+    const mlk::fastkernel::FastKernelReport& r = *report;
+    std::printf("== mlk-poly fast-kernel search ==\n");
+    std::printf("policy: %s\nenvironment: %s\n",
+                mlk::fastkernel::kFastKernelPolicy,
+                r.env.descriptor.c_str());
+    std::printf("budget mode: %s (B_K^0 = %.3f ms, %s)\n",
+                mlk::fastkernel::budgetModeName(cfg.budget.mode),
+                r.baselineComptimeSec * 1000.0,
+                r.budgetProvenance.c_str());
+    if (r.rooflineLowerSec > 0.0) {
+        std::printf("roofline lower bound: %.3f ms (B_min=%lld B, "
+                    "O_min=%lld ops); winner gap: %.2fx over L\n",
+                    r.rooflineLowerSec * 1000.0,
+                    static_cast<long long>(r.work.minBytes),
+                    static_cast<long long>(r.work.minOps),
+                    1.0 + r.winnerGapOverLower);
+    }
+    std::printf("\n%-24s %-11s %-12s %-10s %-9s %s\n",
+                "variant(tile/exec/thr)", "identity", "U_run(ms)",
+                "M(ms)", "objective", "status");
+    for (const auto& o : r.candidates) {
+        char row[256];
+        if (o.admissible) {
+            std::snprintf(row, sizeof(row), "%lld/%s/%u",
+                          static_cast<long long>(o.config.tileSize),
+                          mlk::fastkernel::execPathName(o.config.exec),
+                          o.config.threads);
+            std::printf("%-24s %-11s %-12.3f %-10.3f %-9.3f %s\n", row,
+                        o.cert.identityCertified ? "bit-exact" : "-",
+                        o.cert.runtimeUpperBoundSec * 1000.0,
+                        o.cert.comptimeTotalSec * 1000.0,
+                        o.objectiveSec * 1000.0, "admissible");
+        } else {
+            std::snprintf(row, sizeof(row), "%lld/%s/%u",
+                          static_cast<long long>(o.config.tileSize),
+                          mlk::fastkernel::execPathName(o.config.exec),
+                          o.config.threads);
+            std::printf("%-24s %-11s %-12s %-10s %-9s %s: %s\n", row, "-",
+                        "-", "-", "-",
+                        mlk::fastkernel::rejectReasonName(o.reject),
+                        o.rejectDetail.c_str());
+        }
+    }
+    if (r.winnerIndex >= 0) {
+        const auto& w = r.candidates[static_cast<std::size_t>(
+            r.winnerIndex)];
+        std::printf("\nwinner: tile=%lld exec=%s threads=%u "
+                    "(U_run = %.3f ms, speedup vs spec = %.2fx, "
+                    "cache hits=%u misses=%u)\n",
+                    static_cast<long long>(w.config.tileSize),
+                    mlk::fastkernel::execPathName(w.config.exec),
+                    w.config.threads,
+                    w.cert.runtimeUpperBoundSec * 1000.0,
+                    report->baselineRuntimeSec > 0.0
+                        ? report->baselineRuntimeSec /
+                              w.cert.runtimeUpperBoundSec
+                        : 0.0,
+                    r.cacheHits, r.cacheMisses);
+    }
+    std::printf("claim: %s\n", r.claim.c_str());
+
+    if (!jsonOut.empty()) {
+        FILE* f = std::fopen(jsonOut.c_str(), "wb");
+        if (f == nullptr) {
+            std::fprintf(stderr, "mlk-poly: cannot write %s\n",
+                         jsonOut.c_str());
+            return 1;
+        }
+        const std::string text = mlk::json::serializePretty(r.toJson());
+        std::fwrite(text.data(), 1, text.size(), f);
+        std::fclose(f);
+        std::printf("report: %s\n", jsonOut.c_str());
+    }
+    return r.budgetFailure ? 1 : 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fputs("usage: mlk-poly demo [--backend=asm|cpp]\n"
                    "       mlk-poly show <graph.mlk>\n"
+                   "       mlk-poly autotune [--m=M --k=K --n=N] "
+                   "[--tiles=..] [--exec=..] [--budget-mode=..]\n"
+                   "                         [--comptime-budget-ms=X] "
+                   "[--extra-budget-ms=X] [--tau-ms=X] [--json-out=F]\n"
                    "       mlk-poly emit <graph.mlk> [--asm|--cpp] "
                    "[--out=<path>] [--workdir=<dir>] [--compile]\n",
                    stderr);
@@ -326,6 +588,9 @@ int main(int argc, char** argv) {
             return 2;
         }
         return runDemo(backend);
+    }
+    if (mode == "autotune") {
+        return runAutotune(argc, argv);
     }
     if (mode == "emit" && argc >= 3) {
         std::string outPath, workdir;
@@ -390,7 +655,8 @@ int main(int argc, char** argv) {
                     mlk::json::serializePretty(kernel.toJson(symbols)).c_str());
         return 0;
     }
-    std::fputs("usage: mlk-poly demo [--backend=asm|cpp] | show <graph.mlk>"
+    std::fputs("usage: mlk-poly demo [--backend=asm|cpp] | show "
+               "<graph.mlk> | autotune [...]\n"
                " | emit <graph.mlk> [--asm|--cpp] [--out=<path>] "
                "[--workdir=<dir>] [--compile]\n",
                stderr);

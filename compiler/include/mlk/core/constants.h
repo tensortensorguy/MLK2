@@ -126,6 +126,14 @@ inline constexpr uint32_t kSafepointPollIntervalIterations = 4096;
 inline constexpr std::size_t kTelemetryRingCapacity = 1024;
 /// Rule 103: repeated fallback at the same site is throttled past this count.
 inline constexpr uint32_t kFallbackThrottleThreshold = 8;
+/// Hard cap on worker threads per parallel-marked loop (the buffer
+/// executor and the fast-kernel launch-coverage certificate must agree
+/// on this — docs/polyhedral_spec.md §fast-kernel-search).
+inline constexpr std::size_t kKernelExecMaxThreads = 4;
+/// Minimum loop trip count before a parallel-marked loop is threaded at
+/// all (spawn amortization; shared by the executor and the launch
+/// certificate, Axiom 14.14).
+inline constexpr int64_t kParallelChunkElements = 16384;
 
 // --- Realization cache (Rule 57: complete keys; Rule 37: versioning) --------
 inline constexpr uint32_t kRealizationCacheFormatVersion = 1;
