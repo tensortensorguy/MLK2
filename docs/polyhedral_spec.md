@@ -64,6 +64,18 @@ the baseline kernel (Rules 62/102/115).
 - Dependence relations are purified with the original program order
   (intra-statement: sink >lex source with distinct instances;
   cross-statement: sink >=lex source with statement-order tie-break).
+  CHAIN-FINAL READS are the documented exception: a cross-statement RAW
+  whose source write is an ACCUMULATE store (AccumMode Add/Max) feeds a
+  reduction chain, and a plain reader consumes the chain's FINAL value —
+  it may depend on every chain writer, so the lexicographic narrowing
+  (which models per-iteration flow for init/accumulate pairs) is
+  UNSOUND there and the FULL tie relation is kept (a conservative
+  superset of the true dataflow). Any row varying a chain dim then
+  carries distances of both signs and is rejected — reading a completed
+  reduction chain requires band separation (softmax synthesis exposed
+  this: the old narrowing let the scheduler fuse the exp band into the
+  rowmax band, emitting kernels that read the RUNNING max; the
+  differential caught it and the rule is now structural).
 - Accumulate stores carry an implicit read access — the accumulator chain
   is the reduction-order legality gate (Rules 33/90: reassociation only
   with a contract).
@@ -80,6 +92,47 @@ the baseline kernel (Rules 62/102/115).
   ElemA/ElemB/Store forms synthesize innermost-loop coefficients.
 - Eligibility: unit steps, constant bounds within the magnitude limit,
   statement/access/depth budgets from `core/constants.h` (Rule 10).
+
+## Synthesis
+
+`poly.synth` upgrades baseline tensor work into the multi-dim nests the
+SCoP extractor lifts (the "MathGraph -> Kernel IR -> SCoP" chained path).
+Recognized classes: Call(MatMul) and Call(ReduceSum) (init + accumulate
+nests), 1-D elementwise over rank >= 2 outputs (broadcast-aware R-dim
+nest), and — new — **Call(Softmax)**, the stable-form statement chain:
+
+    Y[M,K] = softmax_rows(A[M,K])
+    S0: RM[m] = -inf                    (depth 1)
+    S1: RM[m] max= x[m,k]               (AccumMode::Max; k band)
+    S2: E[m,k] = exp(x[m,k] - RM[m])    (k band)
+    S3: S[m] = 0                        (depth 1)
+    S4: S[m] += E[m,k]                  (AccumMode::Add; k band)
+    S5: Y[m,k] = E[m,k] / S[m]          (k band)
+
+with three MATERIALIZED TEMP BUFFERS (`KernelBuffer::isTemp`: rowmax [M],
+exp [M,K], sum [M]) — the first synthesis class that needs the baseline
+buffer-materialization limit lifted. Key exactness contracts:
+
+- The reference kernel (`execSoftmaxCall`) and the synthesized chain
+  replay the SAME operations in the SAME order per row (ascending-k max,
+  ascending-k exp, ascending-k sum, divide) — bit-exact by construction
+  (Rules 43/90).
+- The value passthrough is `Sub(x, 0)`, which is the EXACT identity for
+  every IEEE-754 double including -0.0 (Add would flip -0.0 to +0.0);
+  with `Add(-inf, 0)` as the -inf carrier, no synthesized value differs
+  from the reference value.
+- `AccumMode::Max` stores are the order-insensitive row-max primitive:
+  `out = (value > out) ? value : out`. NaN never replaces the running
+  value ((NaN > cur) is false); ±0 ties keep the current slot.
+- The four sibling k-bands execute sequentially as emitted (the walker
+  runs children in order). FUSING the bands is the scheduler's
+  band-shift roadmap item: the chain-final-read dependences above
+  (S1->S2, S4->S5) carry distances of both signs on k, so no schedule
+  row may vary k while both bands are live — the current scheduler
+  reports "no schedule found" and the synthesized (correct) nests are
+  kept (Rules 62/102/115). The optimizer loses fusion, never
+  correctness; `poly.schedule` reports the fallback as an Info
+  diagnostic instead of failing the pipeline.
 
 ## Scheduling
 
@@ -256,7 +309,12 @@ fallback path).
 `executeKernelOnBuffers` routes any module containing multi-dim features
 through a recursive tree walker (loop-var stack, affine bounds, ElemIdx
 resolution, accumulate stores); the legacy 1-D fast path keeps its
-chunked threading. Multi-dim loops marked `parallel` (zero-distance rows
+chunked threading. `isTemp` buffers are MATERIALIZED by the executor:
+one zero-initialized allocation per temp (bufferId-indexed in the
+bindings' `temps` array, element count bounded by
+`kKernelTempElementsLimit`), alive for the duration of the call — every
+element must be written before it is read (the synthesized init
+statements guarantee that). Multi-dim loops marked `parallel` (zero-distance rows
 proven by the scheduler) run disjoint index chunks on threads — same
 executor-owned thread decision as the 1-D path (`kKernelExecMaxThreads`,
 the `threads` schedule param, the `kParallelChunkElements` amortization
@@ -272,10 +330,13 @@ nonzero; Guard belongs to the thread-safe emission alphabet (the
 predicate reads only the var stack).
 `Call(ReduceSum)` executes as a row-wise trailing-dim sum in ascending-k
 order — exactly the order the transformed accumulate chain preserves.
+`Call(Softmax)` executes as the four-pass stable form (rowwise: max,
+exp into the output row, sum, divide — all ascending-k), which is the
+reference order the synthesized chain replays.
 
 ## Verification story
 
-- Unit: 53 tests in `tests/unit/unit_poly.cpp` covering the engine
+- Unit: 59 tests in `tests/unit/unit_poly.cpp` covering the engine
   (rationals, sets, FM, lexmin, maps), extraction, dependences, LP,
   scheduling legality + determinism, FUSION EMERGENCE (producer/consumer
   single parallel row + bit-exact fused execution), wavefront dependences,
@@ -286,10 +347,12 @@ order — exactly the order the transformed accumulate chain preserves.
   chunked threads), the ReduceSum synthesis class, INTEGER-EXACT
   parallel marking (a parity-tight slice keeps its parallel row where
   the rational hull marks it sequential), GUARD predicate execution
-  (the affine-equality form filters children), and the TILED GUARDED
+  (the affine-equality form filters children), the TILED GUARDED
   GEMM (full tiles + partial tails across two levels, bit-exact vs the
   untiled schedule — the tile-part replay and stack-absolute point
-  bounds).
+  bounds), and the SOFTMAX synthesis class (pipeline + K==1/shape sweep,
+  Max-accumulate store semantics incl. the NaN/±0 select rules, and the
+  native-artifact temp rejection).
 - Differential (Rules 43/85/90): the transformed GEMM executes over dense
   buffers and matches a straightforward reference (bit-exact for the
   no-reassociation class; accumulation order per output cell preserved).
@@ -328,7 +391,12 @@ buffer-dim bounds), ElemIdx affine addressing, accumulate stores,
 affine-equality guards, temp chains (cap = the executor's 64 slots),
 and the legacy 1-D form are all supported; multi-dim artifacts check
 store-address sign at runtime and report a nonzero ABI code where the
-walker raises InvalidGraph (the driver maps it back). The verified
+walker raises InvalidGraph (the driver maps it back). Temp buffers and
+Max-accumulate stores are NOT yet realizable in native artifacts: both
+emitters reject them with an actionable UnsupportedCapability error
+(`backend_rejects_softmax_temps`) instead of emitting a silently wrong
+artifact — the softmax class keeps running through the buffer walker
+(roadmap: temp-binding ABI extension, round 17). The verified
 "poly7" Sin family (math_families.h certificate) emits LOCAL helper
 routines in the assembly artifact — Cody-Waite quadrant reduction and
 degree-13 minimax Horner residuals mirrored OPERATION FOR OPERATION
@@ -366,14 +434,26 @@ artifact text and optionally the built `.so`.
 
 ## Roadmap
 
+- **Band-shift scheduling** (per-statement constant offsets on varying
+  rows): the machinery that lets the scheduler express SEPARATE bands
+  over the same loop dim — softmax's rowmax/exp/sum/div phases over k
+  (the chain-final-read dependences demand it), and generally any
+  kernel whose phases must complete per region before the next starts.
+  Requires per-statement loop bounds in codegen (the min/max-of-affine
+  forms CLAST emits) alongside the piecewise split.
+- Native artifacts for temp buffers + Max-accumulate stores: a
+  temp-binding ABI extension (the driver materializes scratch exactly
+  like the walker) and the compare/select sequence mirroring the
+  walker's Max store in both emitters — then the softmax class runs
+  three-way bit-exact like GEMM.
 - Full Pluto ILP locality objective over all rows simultaneously (the
   order search composes exact per-row scores; an ILP with memory-reuse
   terms could weight fusion across nests beyond the carried-distance
   proxy).
 - Parametric SCoPs (symbolic dims with runtime guards) — currently
   requires constant bounds after workload specialization.
-- Softmax/multi-input elementwise synthesis classes; >2-input elementwise
-  (needs the baseline buffer-materialization limit lifted).
+- Multi-input elementwise synthesis classes beyond softmax; >2-input
+  elementwise (temp materialization infrastructure now exists).
 - Multiple SCoP regions per kernel.
 - Per-statement loop-bound generalization: fused statements currently
   share the intersection of their pivot bounds (the synth classes agree;

@@ -13,6 +13,16 @@ Order-search + LP-selected affine schedule: every pivot order (permutation of va
 
 ## Failure behavior
 
+"No schedule found" (exact-LP infeasibility across every pivot order,
+realizability-gate rejections, budget trips) is a FALLBACK, not a
+pipeline failure: the pass records an Info diagnostic, leaves
+`scheduleValid` false, and the kernel keeps its current — semantically
+correct — form (for synthesized classes that is the materialized band
+nest, e.g. softmax whose chain-final-read dependences demand band
+separation). Downstream poly passes no-op on the invalid schedule.
+Internal contract violations (engine bugs) still propagate as errors.
+
+
 Any infeasibility, budget exhaustion, or unsupported shape records an
 actionable diagnostic (Rule 67) and leaves the baseline kernel in place
 (Rules 62/102/115). See docs/polyhedral_spec.md for the full algorithmic

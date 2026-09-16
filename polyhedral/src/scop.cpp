@@ -100,7 +100,7 @@ struct WalkState {
     s.storeBuffer = store.bufferOut;
     for (const int64_t c : store.outIndexCoeffs) s.storeCoeffs.push_back(c);
     s.storeOffset = store.outIndexOffset;
-    s.accumulate = store.accumulate;
+    s.accum = store.accum;
     for (const int64_t v : loopBegin) s.ownLower.push_back(v);
     for (const int64_t v : loopEnd) s.ownUpper.push_back(v - 1);
 
@@ -158,11 +158,13 @@ struct WalkState {
         w.isWrite = true;
         w.flatIndex = flatMap(VarSpace{depth, 0}, wcoeffs, s.storeOffset);
         s.accesses.push_back(std::move(w));
-        if (s.accumulate) {
-            // Accumulate = read-modify-write: the implicit read feeds the
-            // accumulator chain across iterations (RAW S(k) -> S(k'))
-            // which is exactly the reduction-order legality gate for
-            // Rule 33/90 — model it as a first-class read access.
+        if (s.accum != AccumMode::None) {
+            // Accumulate/Max stores are read-modify-write: the implicit
+            // read feeds the reduction chain across iterations (RAW
+            // S(k) -> S(k')) which is exactly the reduction-order
+            // legality gate for Rule 33/90 (order-insensitive for Max,
+            // but modeled uniformly to keep the legality argument one
+            // chain) — model it as a first-class read access.
             MemoryAccess r;
             r.bufferId = s.storeBuffer;
             r.isWrite = false;

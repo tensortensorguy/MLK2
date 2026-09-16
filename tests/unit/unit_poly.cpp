@@ -661,7 +661,7 @@ constexpr int64_t kTestN = 5;
     store1.op = mlk::KernelOp::Store;
     store1.bufferOut = bufC;
     store1.outIndexCoeffs = SmallVector<int64_t, 4>{kTestN, 1, 0};
-    store1.accumulate = true;
+    store1.accum = mlk::AccumMode::Add;
 
     // Loop tree: i { j { [S0 pair] , k { [S1 pair] } } }.
     KernelNode kLoop;
@@ -723,7 +723,7 @@ MLK_TEST(poly, scop_extract_gemm) {
     MLK_CHECK(!s1.accesses[1].isWrite);
     MLK_CHECK(s1.accesses[2].isWrite);
     MLK_CHECK(!s1.accesses[3].isWrite);  // accumulate's implicit read
-    MLK_CHECK(s1.accumulate);
+    MLK_CHECK(s1.accum == mlk::AccumMode::Add);
 
     // Domain spot checks (full rank; deeper dims pinned to 0 for S0).
     SmallVector<int64_t, 8> p0;
@@ -1015,7 +1015,7 @@ MLK_TEST(poly, dependence_reduction_chain) {
     store.bufferOut = by;
     // y[j]: one coefficient per enclosing loop var (i, j) → y flat = j.
     store.outIndexCoeffs = SmallVector<int64_t, 4>{0, 1};
-    store.accumulate = true;
+    store.accum = mlk::AccumMode::Add;
     KernelNode jLoop;
     jLoop.op = mlk::KernelOp::Loop;
     jLoop.var = symbols.intern("j");
@@ -1718,9 +1718,9 @@ MLK_TEST(poly, codegen_gemm_fused_nest) {
     const KernelNode& accS0 = km2.nodes[j0.children[3]];
     MLK_CHECK_EQ(initC.op, mlk::KernelOp::Compute);
     MLK_CHECK_EQ(initS.op, mlk::KernelOp::Store);
-    MLK_CHECK(!initS.accumulate);
+    MLK_CHECK(initS.accum == mlk::AccumMode::None);
     MLK_CHECK_EQ(accC0.op, mlk::KernelOp::Compute);
-    MLK_CHECK_EQ(accS0.accumulate, true);
+    MLK_CHECK_EQ(accS0.accum, mlk::AccumMode::Add);
     // k segment 1: the hot range [1, K) — acc only, no branch.
     const KernelNode& k1 = km2.nodes[iLoop.children[1]];
     MLK_CHECK_EQ(k1.op, mlk::KernelOp::Loop);
@@ -1737,7 +1737,7 @@ MLK_TEST(poly, codegen_gemm_fused_nest) {
     const KernelNode& accC = km2.nodes[j1.children[0]];
     const KernelNode& accS = km2.nodes[j1.children[1]];
     MLK_CHECK_EQ(accC.op, mlk::KernelOp::Compute);
-    MLK_CHECK_EQ(accS.accumulate, true);
+    MLK_CHECK_EQ(accS.accum, mlk::AccumMode::Add);
     // Acc chain: [A load, B load, mul] with stack-mapped operands:
     // stack = [i, k, j] -> A coeffs [K, 1, 0] (unit stride along k).
     MLK_CHECK_EQ(accC.exprs.size(), 3);
@@ -3322,6 +3322,356 @@ MLK_TEST(poly, asm_backend_text_snapshot) {
     // Determinism: re-emission is byte-identical (Rule 53).
     auto s2 = mlk::emitAsmSource(*mod, symbols);
     MLK_CHECK(s2.has_value() && *s2 == *s);
+}
+
+MLK_TEST(poly, softmax_synth_pipeline_bitexact) {
+    // Softmax synthesis milestone: baseline Call(Softmax) -> poly.synth
+    // (stable-form chain with materialized rowmax/exp/sum temps, four
+    // sibling k-bands) -> SCoP with the chain-final-read dependences ->
+    // the scheduler finds NO legal fused schedule (reading a completed
+    // reduction chain requires band separation; the band-shift roadmap
+    // item) -> the kernel keeps its synthesized form -> bit-exact vs
+    // BOTH the reference kernel and a hand-computed stable softmax
+    // (Rule 90: identical ops in identical order).
+    SymbolTable symbols;
+    mlk::DiagnosticEngine diag;
+    mlk::PassContext ctx;
+    ctx.symbols = &symbols;
+    ctx.diag = &diag;
+    ctx.tier = mlk::Tier::Tier2;
+    mlk::poly::PolyWorkspace* ws = mlk::poly::createPolyWorkspace();
+    ctx.polyWorkspace = ws;
+    mlk::MathGraph graph(&symbols);
+    mlk::passes::registerAllPasses(symbols);
+
+    constexpr int64_t M = 24, K = 16;
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{M, K};
+    a.isInput = true;
+    KernelBuffer y;
+    y.name = symbols.intern("Y");
+    y.dims = SmallVector<int64_t, 4>{M, K};
+    y.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufY = km.addBuffer(y);
+    KernelNode call;
+    call.op = mlk::KernelOp::Call;
+    call.math = mlk::MathOp::Softmax;
+    call.bufferA = bufA;
+    call.bufferOut = bufY;
+    (void)km.addNode(call);
+    ctx.kernelOut = &km;
+
+    const std::size_t n = static_cast<std::size_t>(M * K);
+    SmallVector<double, 8> bufIn(n), baseY(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+        bufIn[i] = static_cast<double>((i * 13) % 19) * 0.25 - 2.0;
+    }
+    // Baseline execution first (Call path: rowwise max/exp/sum/div in
+    // ascending-k order).
+    {
+        mlk::KernelBufferBindings io;
+        io.inputs.push_back(bufIn.data());
+        io.outputs.push_back(baseY.data());
+        io.elements = n;
+        auto br = mlk::executeKernelOnBuffers(km, symbols, io, nullptr);
+        MLK_CHECK(br.has_value());
+        if (!br.has_value()) {
+            mlk::poly::destroyPolyWorkspace(ws);
+            return;
+        }
+    }
+
+    mlk::MathGraph g2(&symbols);
+    auto passFn = [&](const char* name) -> mlk::Pass* {
+        return mlk::PassRegistry::instance().byName(symbols.intern(name));
+    };
+    for (const char* name :
+         {"poly.synth", "poly.scop_detect", "poly.dependence",
+          "poly.schedule", "poly.tile", "poly.codegen", "poly.verify"}) {
+        auto r = passFn(name)->run(ctx, g2);
+        MLK_CHECK(r.has_value());
+        if (!r.has_value()) {
+            mlk::poly::destroyPolyWorkspace(ws);
+            return;
+        }
+    }
+    // Synthesis structure: three materialized temps + the six-statement
+    // band nest (16 nodes: 6 compute + 6 store + 4 k-loops + 1 m-loop).
+    MLK_CHECK_EQ(km.buffers.size(), std::size_t{5});
+    MLK_CHECK_EQ(km.nodes.size(), std::size_t{17});
+    int tempCount = 0;
+    for (const auto& b : km.buffers) {
+        if (b.isTemp) ++tempCount;
+    }
+    MLK_CHECK_EQ(tempCount, 3);
+    // Honest schedule boundary: the chain-final-read dependences force
+    // band separation (roadmap); no fused schedule is claimed.
+    MLK_CHECK(!ws->scheduleValid);
+    MLK_CHECK(!ws->codegenValid);
+    MLK_CHECK_EQ(ws->scop.statements.size(), std::size_t{6});
+
+    // Transformed (synthesized, unfused) execution: bit-exact vs BOTH
+    // the baseline call and the hand-computed reference.
+    SmallVector<double, 8> bufOutY(n, -1.0);
+    mlk::KernelBufferBindings io;
+    io.inputs.push_back(bufIn.data());
+    io.outputs.push_back(bufOutY.data());
+    io.elements = n;
+    auto r = mlk::executeKernelOnBuffers(km, symbols, io, nullptr);
+    MLK_CHECK(r.has_value());
+    if (!r.has_value()) {
+        mlk::poly::destroyPolyWorkspace(ws);
+        return;
+    }
+    int mismatches = 0;
+    for (int64_t i = 0; i < M && mismatches == 0; ++i) {
+        double mx = -INFINITY;
+        for (int64_t k = 0; k < K; ++k) {
+            const double v = bufIn[static_cast<std::size_t>(i * K + k)];
+            mx = (v > mx) ? v : mx;
+        }
+        double s = 0.0;
+        SmallVector<double, 8> es(static_cast<std::size_t>(K));
+        for (int64_t k = 0; k < K; ++k) {
+            es[static_cast<std::size_t>(k)] =
+                std::exp(bufIn[static_cast<std::size_t>(i * K + k)] - mx);
+            s += es[static_cast<std::size_t>(k)];
+        }
+        for (int64_t k = 0; k < K; ++k) {
+            const double ref = s != 0.0
+                                   ? es[static_cast<std::size_t>(k)] / s
+                                   : 0.0;
+            const double got =
+                bufOutY[static_cast<std::size_t>(i * K + k)];
+            const double base =
+                baseY[static_cast<std::size_t>(i * K + k)];
+            if (got != ref || base != ref) ++mismatches;  // Rule 43
+        }
+    }
+    MLK_CHECK_EQ(mismatches, 0);
+    mlk::poly::destroyPolyWorkspace(ws);
+}
+
+MLK_TEST(poly, softmax_shapes_k1_edge_bitexact) {
+    // Shape sweep of the synthesized class, including the K == 1 edge
+    // (rowmax == x, e == exp(0) == 1, s == 1, out == 1 exactly) and a
+    // tall row (K == 7 over M == 3).
+    SymbolTable symbols;
+    struct Dim {
+        int64_t m, k;
+    };
+    const Dim dims[] = {{5, 1}, {3, 7}, {8, 4}};
+    for (const Dim& d : dims) {
+        KernelModule km;
+        KernelBuffer a;
+        a.name = symbols.intern("A");
+        a.dims = SmallVector<int64_t, 4>{d.m, d.k};
+        a.isInput = true;
+        KernelBuffer y;
+        y.name = symbols.intern("Y");
+        y.dims = SmallVector<int64_t, 4>{d.m, d.k};
+        y.isOutput = true;
+        const uint32_t bufA = km.addBuffer(a);
+        const uint32_t bufY = km.addBuffer(y);
+        KernelNode call;
+        call.op = mlk::KernelOp::Call;
+        call.math = mlk::MathOp::Softmax;
+        call.bufferA = bufA;
+        call.bufferOut = bufY;
+        (void)km.addNode(call);
+
+        const std::size_t n = static_cast<std::size_t>(d.m * d.k);
+        SmallVector<double, 8> in(n), base(n, 0.0), out(n, -1.0);
+        for (std::size_t i = 0; i < n; ++i) {
+            in[i] = static_cast<double>((i * 7) % 11) * 0.5 - 2.5;
+        }
+        mlk::KernelBufferBindings baseIo;
+        baseIo.inputs.push_back(in.data());
+        baseIo.outputs.push_back(base.data());
+        baseIo.elements = static_cast<int64_t>(n);
+        auto br = mlk::executeKernelOnBuffers(km, symbols, baseIo, nullptr);
+        MLK_CHECK(br.has_value());
+
+        // Synth only (the pipeline outcome is covered by the flagship
+        // test; here the synthesized nest itself must be exact for every
+        // shape).
+        mlk::PassContext ctx;
+        ctx.symbols = &symbols;
+        ctx.tier = mlk::Tier::Tier2;
+        mlk::poly::PolyWorkspace* ws = mlk::poly::createPolyWorkspace();
+        ctx.polyWorkspace = ws;
+        ctx.kernelOut = &km;
+        mlk::MathGraph g(&symbols);
+        mlk::passes::registerAllPasses(symbols);
+        auto* synth = mlk::PassRegistry::instance().byName(
+            symbols.intern("poly.synth"));
+        auto r = synth->run(ctx, g);
+        MLK_CHECK(r.has_value() && r->changed);
+        if (r.has_value() && r->changed) {
+            mlk::KernelBufferBindings io;
+            io.inputs.push_back(in.data());
+            io.outputs.push_back(out.data());
+            io.elements = static_cast<int64_t>(n);
+            auto er = mlk::executeKernelOnBuffers(km, symbols, io, nullptr);
+            MLK_CHECK(er.has_value());
+            if (er.has_value()) {
+                int mismatches = 0;
+                for (std::size_t i = 0; i < n && mismatches == 0; ++i) {
+                    if (out[i] != base[i]) ++mismatches;  // Rule 43
+                }
+                MLK_CHECK_EQ(mismatches, 0);
+            }
+        }
+        mlk::poly::destroyPolyWorkspace(ws);
+    }
+}
+
+MLK_TEST(poly, max_accumulate_store_semantics) {
+    // The Max-accumulate store is the rowmax primitive: the running
+    // value survives unless the incoming value compares GREATER. NaN
+    // never replaces it ((NaN > cur) is false); +/-0 ties keep the
+    // current slot; -inf init loses to the first finite value. The
+    // hand-built module below exercises each case per row.
+    SymbolTable symbols;
+    KernelModule km;
+    // in[m][0]: row 0 = NaN (never replaces the +inf... see below),
+    // row 1 = -0.0 tie, row 2 = normal max.
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{3, 1};
+    a.isInput = true;
+    KernelBuffer o;
+    o.name = symbols.intern("O");
+    o.dims = SmallVector<int64_t, 4>{3, 1};
+    o.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufO = km.addBuffer(o);
+    // m { O[m] = -inf; k { O[m] max= A[m,k] } }
+    KernelNode c0;
+    c0.op = mlk::KernelOp::Compute;
+    {
+        KernelExpr e;
+        e.op = mlk::MathOp::Add;
+        e.a.kind = KernelOperand::Kind::Const;
+        e.a.constValue = -INFINITY;
+        e.b.kind = KernelOperand::Kind::Const;
+        e.b.constValue = 0.0;
+        c0.exprs.push_back(e);
+    }
+    KernelNode s0;
+    s0.op = mlk::KernelOp::Store;
+    s0.bufferOut = bufO;
+    s0.outIndexCoeffs = SmallVector<int64_t, 4>{1};
+    KernelNode c1;
+    c1.op = mlk::KernelOp::Compute;
+    {
+        KernelExpr e;
+        e.op = mlk::MathOp::Sub;
+        e.a.kind = KernelOperand::Kind::ElemIdx;
+        e.a.index = static_cast<int64_t>(bufA);
+        e.a.idxCoeffs = SmallVector<int64_t, 4>{1, 0};  // A[m,k]
+        e.b.kind = KernelOperand::Kind::Const;
+        e.b.constValue = 0.0;
+        c1.exprs.push_back(e);
+    }
+    KernelNode s1;
+    s1.op = mlk::KernelOp::Store;
+    s1.bufferOut = bufO;
+    s1.outIndexCoeffs = SmallVector<int64_t, 4>{1, 0};
+    s1.accum = mlk::AccumMode::Max;
+    KernelNode kl;
+    kl.op = mlk::KernelOp::Loop;
+    kl.var = symbols.intern("k");
+    kl.begin = 0;
+    kl.end = 1;
+    kl.children.push_back(2);
+    kl.children.push_back(3);
+    KernelNode ml;
+    ml.op = mlk::KernelOp::Loop;
+    ml.var = symbols.intern("m");
+    ml.begin = 0;
+    ml.end = 3;
+    ml.children.push_back(0);
+    ml.children.push_back(1);
+    ml.children.push_back(4);
+    KernelNode nodes[6] = {c0, s0, c1, s1, kl, ml};
+    for (const auto& nd : nodes) (void)km.addNode(nd);
+
+    SmallVector<double, 8> in{NAN, -0.0, 2.5};
+    SmallVector<double, 8> out(3, 0.0);
+    mlk::KernelBufferBindings io;
+    io.inputs.push_back(in.data());
+    io.outputs.push_back(out.data());
+    io.elements = 3;
+    auto r = mlk::executeKernelOnBuffers(km, symbols, io, nullptr);
+    MLK_CHECK(r.has_value());
+    if (!r.has_value()) return;
+    // Exact select semantics (documented in kernel_ir.h):
+    //   row 0: (NaN > -inf) is false -> -inf survives (NaN never
+    //          replaces the running value);
+    //   row 1: (-0.0 > -inf) is true -> the slot becomes -0.0 (and the
+    //          +/-0 tie rule would keep an existing ±0 on equal compare);
+    //   row 2: plain maximum.
+    MLK_CHECK(std::isnan(in[0]));
+    MLK_CHECK(out[0] == -INFINITY);  // NaN never replaces
+    MLK_CHECK(out[1] == -0.0);       // -0.0 > -inf replaces exactly
+    MLK_CHECK(out[2] == 2.5);
+}
+
+MLK_TEST(poly, backend_rejects_softmax_temps) {
+    // Native artifacts have no temp-binding story yet (round-17): both
+    // emitters must REJECT the synthesized softmax module with an
+    // actionable UnsupportedCapability error instead of emitting a
+    // silently wrong artifact (Rule 67).
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{4, 4};
+    a.isInput = true;
+    KernelBuffer y;
+    y.name = symbols.intern("Y");
+    y.dims = SmallVector<int64_t, 4>{4, 4};
+    y.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufY = km.addBuffer(y);
+    KernelNode call;
+    call.op = mlk::KernelOp::Call;
+    call.math = mlk::MathOp::Softmax;
+    call.bufferA = bufA;
+    call.bufferOut = bufY;
+    (void)km.addNode(call);
+
+    mlk::PassContext ctx;
+    ctx.symbols = &symbols;
+    ctx.tier = mlk::Tier::Tier2;
+    mlk::poly::PolyWorkspace* ws = mlk::poly::createPolyWorkspace();
+    ctx.polyWorkspace = ws;
+    ctx.kernelOut = &km;
+    mlk::MathGraph g(&symbols);
+    mlk::passes::registerAllPasses(symbols);
+    auto* synth =
+        mlk::PassRegistry::instance().byName(symbols.intern("poly.synth"));
+    auto r = synth->run(ctx, g);
+    MLK_CHECK(r.has_value() && r->changed);
+    if (!r.has_value() || !r->changed) {
+        mlk::poly::destroyPolyWorkspace(ws);
+        return;
+    }
+    auto asmR = mlk::emitAsmSource(km, symbols);
+    MLK_CHECK(!asmR.has_value());
+    if (!asmR.has_value()) {
+        MLK_CHECK(asmR.error().code == mlk::ErrorCode::UnsupportedCapability);
+    }
+    auto cppR = mlk::emitCppSource(km, symbols);
+    MLK_CHECK(!cppR.has_value());
+    if (!cppR.has_value()) {
+        MLK_CHECK(cppR.error().code == mlk::ErrorCode::UnsupportedCapability);
+    }
+    mlk::poly::destroyPolyWorkspace(ws);
 }
 
 MLK_TEST_MAIN("poly")

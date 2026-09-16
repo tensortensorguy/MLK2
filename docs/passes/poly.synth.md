@@ -2,7 +2,7 @@
 
 **Kind**: Lowering (Tier 2/3, kill switch: `poly.synth`)
 
-synthesize multi-dim affine nests from baseline kernels (GEMM and Call(ReduceSum) row-reduction (init + accumulate nests; reduction dim carried, outer dim parallel) Call -> init+accumulate nest; 1-D elementwise over rank>=2 outputs -> R-dim broadcast-aware nest)
+synthesize multi-dim affine nests from baseline kernels (GEMM and Call(ReduceSum) row-reduction (init + accumulate nests; reduction dim carried, outer dim parallel) Call -> init+accumulate nest; 1-D elementwise over rank>=2 outputs -> R-dim broadcast-aware nest; Call(Softmax) -> the stable-form six-statement chain with three MATERIALIZED TEMP BUFFERS (rowmax [M] via AccumMode::Max, exp [M,K], sum [M] via AccumMode::Add) and four sibling k-bands — every chain replays the reference order op-for-op (Sub(x,0) is the exact -0.0-preserving passthrough), bit-exact vs execSoftmaxCall; band FUSION needs the scheduler's band-shift roadmap item, so poly.schedule reports 'no schedule found' and the synthesized nests are kept)
 
 ## Contract (Rule 142)
 

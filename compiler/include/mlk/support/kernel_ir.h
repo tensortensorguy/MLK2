@@ -35,6 +35,17 @@ enum class KernelOp : uint8_t {
 
 const char* kernelOpName(KernelOp op) noexcept;
 
+/// Store update mode (polyhedral extension). `Add` is the reduction
+/// primitive (out += value, Rule 90 accumulation order); `Max` is the
+/// order-insensitive row-max primitive used by stable softmax synthesis
+/// (out = (value > out) ? value : out — NaN never replaces the running
+/// value; see docs/polyhedral_spec.md §synthesis).
+enum class AccumMode : uint8_t {
+    None = 0,
+    Add = 1,
+    Max = 2,
+};
+
 /// Elementwise math performed by a Compute node (subset of MathOp that has
 /// a scalar realization in the CPU backend).
 [[nodiscard]] bool isScalarRealizable(MathOp op) noexcept;
@@ -117,10 +128,12 @@ struct KernelNode {
     /// legacy 1-D semantics (out[i]).
     SmallVector<int64_t, 4> outIndexCoeffs{};
     int64_t outIndexOffset{0};
-    /// Polyhedral extension (Store): accumulate instead of overwrite
-    /// (out[flat] += value) — the reduction primitive for polyhedral
-    /// statements (Rule 90: same accumulation order as the reference).
-    bool accumulate{false};
+    /// Polyhedral extension (Store): update mode for the affine target
+    /// (AccumMode::Add = out[flat] += value, the reduction primitive,
+    /// Rule 90: same accumulation order as the reference; AccumMode::Max
+    /// = out[flat] = (value > out[flat]) ? value : out[flat], the
+    /// order-insensitive row-max primitive).
+    AccumMode accum{AccumMode::None};
     /// Polyhedral extension (Loop): the scheduler proved every
     /// dependence distance identically zero at this level — instances
     /// with different induction values are independent, so the executor
@@ -165,6 +178,13 @@ struct KernelBuffer {
     Dtype dtype{Dtype::F32};
     bool isInput{false};
     bool isOutput{false};
+    /// Polyhedral extension: executor-allocated scratch (neither bound
+    /// as input nor output). Synthesis classes that materialize
+    /// intermediate values (softmax rowmax/exp/sum temps) declare their
+    /// temporaries this way; the buffer executors zero-initialize the
+    /// storage and every element must be written before it is read
+    /// (the init statements of the synthesized nests guarantee that).
+    bool isTemp{false};
     int64_t elements{constants::kKernelLoopDynamicBound};
     uint32_t alignment{static_cast<uint32_t>(
         constants::kDefaultAlignmentBytes)};

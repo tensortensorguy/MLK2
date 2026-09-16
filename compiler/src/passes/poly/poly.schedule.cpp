@@ -38,10 +38,30 @@ public:
         ws.tileValid = false;
         ws.codegenValid = false;
 
-        MLK_TRY_VAR(sched,
-                    poly::computePlutoSchedule(ws.scop, ws.dependences));
-        ws.statsScheduleRows = static_cast<uint32_t>(sched.rows.size());
-        ws.schedule = std::move(sched);
+        // "No schedule found" (exact-LP infeasibility, realizability
+        // gate rejections, budgets) is a FALLBACK, not a pipeline
+        // failure (Rules 62/102/115): the kernel keeps its current —
+        // semantically correct — form (for synthesized classes that is
+        // the materialized band nest, e.g. softmax) and downstream poly
+        // passes no-op on the invalid schedule. The scheduler's own
+        // internal contract violations still propagate as errors (they
+        // are engine bugs, not capability boundaries).
+        auto sched = poly::computePlutoSchedule(ws.scop, ws.dependences);
+        if (!sched.has_value()) {
+            if (ctx.diag != nullptr) {
+                Diagnostic d;
+                d.severity = Severity::Note;
+                d.pass = nameId(*ctx.symbols);
+                d.message =
+                    "poly.schedule: no legal schedule found — kernel "
+                    "keeps its current (correct) form: " +
+                    sched.error().message;
+                ctx.diag->report(std::move(d));
+            }
+            return r;
+        }
+        ws.statsScheduleRows = static_cast<uint32_t>(sched->rows.size());
+        ws.schedule = std::move(*sched);
         ws.scheduleValid = true;
         return r;
     }

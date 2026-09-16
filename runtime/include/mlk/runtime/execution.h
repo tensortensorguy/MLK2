@@ -112,6 +112,12 @@ struct KernelBufferBindings {
     SmallVector<double, 8> scalars{};
     /// Element count for dynamic loop bounds (kKernelLoopDynamicBound).
     int64_t elements{0};
+    /// Executor-allocated scratch for isTemp buffers (bufferId-indexed;
+    /// null for every non-temp id). Zero-initialized; filled by
+    /// executeKernelOnBuffers before execution, never by external
+    /// callers. Every element must be written before it is read (the
+    /// synthesized init statements guarantee that).
+    SmallVector<double*, 8> temps{};
 };
 
 /// Executes a KernelModule directly over dense f64 buffers: fused

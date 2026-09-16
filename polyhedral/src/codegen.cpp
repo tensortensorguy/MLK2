@@ -145,7 +145,7 @@ struct Emitter {
         KernelNode store;
         store.op = KernelOp::Store;
         store.bufferOut = s.storeBuffer;
-        store.accumulate = s.accumulate;
+        store.accum = s.accum;
         SmallVector<int64_t, 4> stack;
         int64_t off = 0;
         MLK_TRYV(mapCoeffs(s, s.storeCoeffs, stack, &off));

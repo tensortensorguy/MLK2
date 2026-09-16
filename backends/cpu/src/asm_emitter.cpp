@@ -525,10 +525,14 @@ struct AsmEmitter {
             text += "salq $3, %rax\n";
             text += "testq %rax, %rax\n";
             text += "js .Lmlk_neg_store\n";
-            if (store.accumulate) {
+            if (store.accum == AccumMode::Add) {
                 text += "movsd (%r10,%rax,1), %xmm1\n";
                 text += "addsd %xmm0, %xmm1\n";
                 text += "movsd %xmm1, (%r10,%rax,1)\n";
+            } else if (store.accum == AccumMode::Max) {
+                return err(ErrorCode::UnsupportedCapability,
+                           "asm emitter: max-accumulate stores are not "
+                           "supported yet (roadmap; round-17)");
             } else {
                 text += "movsd %xmm0, (%r10,%rax,1)\n";
             }
@@ -577,10 +581,14 @@ struct AsmEmitter {
         emitLoadArg(ptrArgIdx[store.bufferOut], "%r10");
         text += "movq " + varSlot(depth - 1) + ", %rax\n";
         text += "salq $3, %rax\n";
-        if (store.accumulate) {
+        if (store.accum == AccumMode::Add) {
             text += "movsd (%r10,%rax,1), %xmm1\n";
             text += "addsd %xmm0, %xmm1\n";
             text += "movsd %xmm1, (%r10,%rax,1)\n";
+        } else if (store.accum == AccumMode::Max) {
+            return err(ErrorCode::UnsupportedCapability,
+                       "asm emitter: max-accumulate stores are not "
+                       "supported yet (roadmap; round-17)");
         } else {
             text += "movsd %xmm0, (%r10,%rax,1)\n";
         }
@@ -960,6 +968,14 @@ Result<std::string> emitAsmSource(const KernelModule& kernel,
     int nextArg = 0;
     for (uint32_t bid = 0; bid < kernel.buffers.size(); ++bid) {
         const KernelBuffer& b = kernel.buffers[bid];
+        if (b.isTemp) {
+            // Temp scratch has no ABI binding yet; the C++ artifact and
+            // the buffer walker materialize it, the assembly artifact
+            // does not (round-17 roadmap item).
+            return err(ErrorCode::UnsupportedCapability,
+                       "asm emitter: temp buffers are not supported yet "
+                       "(roadmap; round-17)");
+        }
         if (!b.isInput && !b.isOutput) continue;
         em.bindable[bid] = true;
         em.ptrArgIdx[bid] = nextArg;

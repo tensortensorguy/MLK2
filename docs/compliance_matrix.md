@@ -175,6 +175,7 @@ expiry).
 | 164 | Parallel/vector marks follow INTEGER instance points, not the rational hull; guard execution is thread-safe (var-stack predicate only) | arch (integerLeFormFeasible tri-state, Rule 22), test (unit_poly parity-tight marking + guard predicate execution) |
 | 165 | Native artifacts (C++ / x86-64 asm) mirror the buffer executor exactly; assembled artifacts are verified bit-exact against the walker (no silent semantic drift in the backend) | arch (polyhedral_spec §backend, kernel_abi form 3), test (unit_poly asm_backend_* three-way bit-exact suites) |
 | 166 | No in-process machine codegen: artifacts are emitted as text and built/loaded out-of-process (file-backed mapping); parallel marks recorded per Rule 148; unsupported nodes fail emission honestly | arch (ADR-0003/0006, backend_driver stage errors), test (backend_rejects_lowered_first_nodes + recorded-marks assertions) |
+| 167 | Reads of a reduction chain's location depend on the WHOLE chain (chain-final reads are not per-iteration flow); unschedulable kernels fall back gracefully, never break the pipeline; native artifacts reject unmaterializable features instead of emitting wrong code | arch (polyhedral_spec §soundness/§synthesis, ADR-0005 decision 10), test (unit_poly softmax_synth_pipeline_bitexact, max_accumulate_store_semantics, backend_rejects_softmax_temps) |
 
 ## Slop checklist (Rule 84) — verified for this tree
 

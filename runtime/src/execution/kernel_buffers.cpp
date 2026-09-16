@@ -32,6 +32,9 @@ namespace {
 inline constexpr std::size_t kKernelExecMaxThreads = 4;
 inline constexpr int64_t kParallelChunkElements = 16384;
 inline constexpr std::size_t kMaxTempSlots = 64;
+/// Upper bound on ONE temp buffer's element count (DoS guard for
+/// executor-allocated scratch; 16M doubles = 128 MiB).
+inline constexpr int64_t kKernelTempElementsLimit = 1 << 24;
 
 enum class SinFamily { Libm, Poly7 };
 
@@ -86,7 +89,9 @@ struct ExprEvaluator {
         }
         const uint32_t bid = static_cast<uint32_t>(o.index);
         const double* base = nullptr;
-        if (module->buffers[bid].isInput) {
+        if (module->buffers[bid].isTemp) {
+            base = bid < io->temps.size() ? io->temps[bid] : nullptr;
+        } else if (module->buffers[bid].isInput) {
             base = bid < io->inputs.size() ? io->inputs[bid] : nullptr;
         } else {
             const uint32_t outIdx =
@@ -264,6 +269,69 @@ struct ExprEvaluator {
             acc += row[p];
         }
         y[i] = acc;
+    }
+    return {};
+}
+
+/// Row-wise stable softmax for Call(Softmax) nodes (shared reference
+/// kernel; Rule 90: this IS the order contract the polyhedral chain
+/// must reproduce). Per row m, four ascending-k passes:
+///   rowmax: r = -inf; r = (x[m,k] > r) ? x[m,k] : r
+///   exp:    Y[m,k] = exp(x[m,k] - r)   (Sub then Exp — the exact chain
+///           the synthesized statement evaluates)
+///   sum:    s = 0.0; s += Y[m,k]
+///   div:    Y[m,k] = (s != 0.0) ? Y[m,k] / s : 0.0
+/// The exp pass materializes into the OUTPUT row (allocation-free); the
+/// synthesized chain reads the same values from its materialized e-temp,
+/// so both forms evaluate identical operations on identical values.
+[[nodiscard]] Result<void> execSoftmaxCall(const KernelModule& kernel,
+                                           const KernelBufferBindings& io,
+                                           CancellationToken* cancel,
+                                           const KernelNode& top) {
+    if (top.bufferA >= kernel.buffers.size() ||
+        top.bufferOut >= kernel.buffers.size()) {
+        return err(ErrorCode::InvalidGraph,
+                   "softmax buffer id out of range");
+    }
+    const KernelBuffer& ba = kernel.buffers[top.bufferA];
+    const KernelBuffer& by = kernel.buffers[top.bufferOut];
+    if (ba.dims.size() != 2 || by.dims.size() != 2) {
+        return err(ErrorCode::InvalidGraph,
+                   "softmax requires rank-2 operand and output");
+    }
+    const double* a = resolveInput(kernel, io, top.bufferA);
+    double* y = resolveOutput(kernel, io, top.bufferOut);
+    if (a == nullptr || y == nullptr) {
+        return err(ErrorCode::InvalidArgument,
+                   "softmax buffers not bound by the caller");
+    }
+    const int64_t m = ba.dims[0];
+    const int64_t k = ba.dims[1];
+    if (by.dims[0] != m || by.dims[1] != k || k <= 0 || m <= 0) {
+        return err(ErrorCode::InvalidGraph,
+                   "softmax operand shapes incompatible");
+    }
+    for (int64_t i = 0; i < m; ++i) {
+        if (cancel != nullptr && cancel->cancelled()) {
+            return err(ErrorCode::Cancelled,
+                       "kernel execution cancelled", 130);
+        }
+        const double* row = a + i * k;
+        double* yrow = y + i * k;
+        double r = -INFINITY;
+        for (int64_t p = 0; p < k; ++p) {
+            r = (row[p] > r) ? row[p] : r;
+        }
+        for (int64_t p = 0; p < k; ++p) {
+            yrow[p] = std::exp(row[p] - r);
+        }
+        double s = 0.0;
+        for (int64_t p = 0; p < k; ++p) {
+            s += yrow[p];
+        }
+        for (int64_t p = 0; p < k; ++p) {
+            yrow[p] = s != 0.0 ? yrow[p] / s : 0.0;
+        }
     }
     return {};
 }
@@ -633,7 +701,12 @@ struct MultiDimWalker {
                 }
             }
         }
-        double* outP = resolveOutput(kernel, io, store.bufferOut);
+        double* outP = store.bufferOut < kernel.buffers.size() &&
+                               kernel.buffers[store.bufferOut].isTemp
+                           ? (store.bufferOut < io.temps.size()
+                                  ? io.temps[store.bufferOut]
+                                  : nullptr)
+                           : resolveOutput(kernel, io, store.bufferOut);
         if (outP == nullptr) {
             return err(ErrorCode::InvalidArgument,
                        "walker: output buffer not bound");
@@ -666,8 +739,14 @@ struct MultiDimWalker {
         // shared evaluator's array accesses trivially in-bounds.
         const double value = ev.run(0);
         double& slot = outP[flat];
-        if (store.accumulate) {
+        if (store.accum == AccumMode::Add) {
             slot += value;
+        } else if (store.accum == AccumMode::Max) {
+            // Order-insensitive row-max primitive: NaN never replaces
+            // the running value ((NaN > cur) is false); +/-0 ties keep
+            // the current slot. Identical select in both emitters'
+            // roadmap forms and the reference kernels.
+            slot = (value > slot) ? value : slot;
         } else {
             slot = value;
         }
@@ -675,10 +754,14 @@ struct MultiDimWalker {
     }
 
     /// Legacy blocked GEMM for Call(MatMul) nodes (shared with the 1-D
-    /// executor); ReduceSum calls delegate to the shared free function.
+    /// executor); ReduceSum/Softmax calls delegate to the shared free
+    /// functions.
     [[nodiscard]] Result<void> execGemm(const KernelNode& top) {
         if (top.math == MathOp::ReduceSum) {
             return execReduceSumCall(kernel, io, cancel, top);
+        }
+        if (top.math == MathOp::Softmax) {
+            return execSoftmaxCall(kernel, io, cancel, top);
         }
         if (top.math != MathOp::MatMul) {
             return err(ErrorCode::UnsupportedCapability,
@@ -735,13 +818,45 @@ Result<void> executeKernelOnBuffers(const KernelModule& kernel,
     if (kernel.nodes.empty()) {
         return err(ErrorCode::InvalidGraph, "kernel module has no nodes");
     }
+    // Temp scratch materialization (polyhedral synthesis classes): one
+    // zero-initialized allocation per isTemp buffer, bufferId-indexed.
+    // The storage dies with this function; every element must be
+    // written before it is read (the synthesized init statements
+    // guarantee that — otherwise the run is defined-but-garbage, never
+    // a crash: the flat-index bounds checks still apply).
+    KernelBufferBindings exec = io;
+    std::vector<std::vector<double>> tempStorage;
+    for (uint32_t bid = 0; bid < kernel.buffers.size(); ++bid) {
+        const KernelBuffer& b = kernel.buffers[bid];
+        if (!b.isTemp) continue;
+        int64_t n = b.elements;
+        if (!b.dims.empty()) {
+            n = 1;
+            for (const int64_t d : b.dims) {
+                if (d <= 0 || n > kKernelTempElementsLimit / d) {
+                    return err(ErrorCode::InvalidGraph,
+                               "temp buffer element count out of range");
+                }
+                n *= d;
+            }
+        }
+        if (n <= 0 || n > kKernelTempElementsLimit) {
+            return err(ErrorCode::InvalidGraph,
+                       "temp buffer element count out of range");
+        }
+        if (exec.temps.size() < kernel.buffers.size()) {
+            exec.temps.resize(kernel.buffers.size(), nullptr);
+        }
+        tempStorage.emplace_back(static_cast<std::size_t>(n), 0.0);
+        exec.temps[bid] = tempStorage.back().data();
+    }
     // Multi-dim detection: any ElemIdx operand, affine loop bound,
-    // accumulate store, buffer-dim loop bound, affine store target, or
-    // affine guard routes the whole module through the tree walker
-    // (uniform handling of mixed forests).
+    // accumulate/max store, buffer-dim loop bound, affine store target,
+    // affine guard, or temp buffer routes the whole module through the
+    // tree walker (uniform handling of mixed forests).
     bool multiDim = false;
     for (const KernelNode& n : kernel.nodes) {
-        if (n.accumulate || !n.beginCoeffs.empty() ||
+        if (n.accum != AccumMode::None || !n.beginCoeffs.empty() ||
             !n.endCoeffs.empty() ||
             (n.end == constants::kKernelLoopDynamicBound &&
              n.endBuf != constants::kInvalidId)) {
@@ -759,7 +874,7 @@ Result<void> executeKernelOnBuffers(const KernelModule& kernel,
         }
     }
     if (multiDim) {
-        MultiDimWalker walker{kernel, symbols, io, cancel, {}};
+        MultiDimWalker walker{kernel, symbols, exec, cancel, {}};
         for (uint32_t i = 0; i < kernel.nodes.size(); ++i) {
             // Flat-forest roots only (children execute via their parents).
             bool referenced = false;
@@ -807,7 +922,7 @@ Result<void> executeKernelOnBuffers(const KernelModule& kernel,
                             runElementwiseRange(c, store != nullptr
                                                        ? *store
                                                        : c,
-                                                kernel, symbols, io, begin,
+                                                kernel, symbols, exec, begin,
                                                 end, cancel);
                         }
                     }
@@ -825,7 +940,7 @@ Result<void> executeKernelOnBuffers(const KernelModule& kernel,
                             static_cast<int64_t>(t) * chunk;
                         const int64_t e = std::min(b + chunk, end);
                         if (b >= e) break;
-                        pool.emplace_back([&kernel, &symbols, &io, &top,
+                        pool.emplace_back([&kernel, &symbols, &exec, &top,
                                            b, e, cancel]() {
                             for (const uint32_t cid : top.children) {
                                 if (cid >= kernel.nodes.size()) return;
@@ -844,7 +959,7 @@ Result<void> executeKernelOnBuffers(const KernelModule& kernel,
                                                     store != nullptr
                                                         ? *store
                                                         : c,
-                                                    kernel, symbols, io, b,
+                                                    kernel, symbols, exec, b,
                                                     e, cancel);
                             }
                         });
@@ -859,7 +974,11 @@ Result<void> executeKernelOnBuffers(const KernelModule& kernel,
             }
             case KernelOp::Call: {
                 if (top.math == MathOp::ReduceSum) {
-                    MLK_TRYV(execReduceSumCall(kernel, io, cancel, top));
+                    MLK_TRYV(execReduceSumCall(kernel, exec, cancel, top));
+                    break;
+                }
+                if (top.math == MathOp::Softmax) {
+                    MLK_TRYV(execSoftmaxCall(kernel, exec, cancel, top));
                     break;
                 }
                 if (top.math != MathOp::MatMul) {
@@ -890,9 +1009,9 @@ Result<void> executeKernelOnBuffers(const KernelModule& kernel,
                     return err(ErrorCode::InvalidGraph,
                                "matmul operand shapes incompatible");
                 }
-                const double* a = resolveInput(kernel, io, top.bufferA);
-                const double* b = resolveInput(kernel, io, top.bufferB);
-                double* c = resolveOutput(kernel, io, top.bufferOut);
+                const double* a = resolveInput(kernel, exec, top.bufferA);
+                const double* b = resolveInput(kernel, exec, top.bufferB);
+                double* c = resolveOutput(kernel, exec, top.bufferOut);
                 if (a == nullptr || b == nullptr || c == nullptr) {
                     return err(ErrorCode::InvalidArgument,
                                "matmul buffers not bound by the caller");

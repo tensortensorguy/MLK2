@@ -52,7 +52,8 @@ struct Statement {
     uint32_t storeBuffer{constants::kInvalidId};
     SmallVector<int64_t, 4> storeCoeffs{};  // flat target coefficients
     int64_t storeOffset{0};
-    bool accumulate{false};
+    AccumMode accum{AccumMode::None};  // store update mode (Add/Max are
+                                       // read-modify-write reductions)
     uint32_t origOrder{0};  // program order tie-break (determinism, 53)
     uint32_t depth{0};      // own nest depth (dims that actually vary)
     /// Constant bounds per OWN dim [lower, upper] (inclusive), recorded at

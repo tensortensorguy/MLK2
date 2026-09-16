@@ -17,7 +17,18 @@
 //       rebuilt as an R-dim nest with broadcast-aware flat operand
 //       coefficients (numpy-style trailing-dim alignment; a dim of size 1
 //       in the input contributes coefficient 0),
-//   - softmax/elementwise multi-input classes are roadmap items.
+//   - Call(MathOp::Softmax) over rank-2 buffers:
+//       Y[M,K] = softmax_rows(A[M,K])  →  the stable-form statement chain
+//       with TEMP BUFFER MATERIALIZATION (rowmax/exp/sum temps declared
+//       isTemp in the buffer table): S0 RM[m] = -inf; S1 RM[m] max= x
+//       (AccumMode::Max); S2 E = exp(x - RM[m]); S3 S[m] = 0;
+//       S4 S[m] += E; S5 Y = E / S[m] — four sibling k-bands under m,
+//       each an exact op-for-op replay of the reference order
+//       (execSoftmaxCall; Rule 90). The scheduler's band-shift roadmap
+//       item (per-statement offsets on varying rows) gates FUSED
+//       scheduling of this class; until it lands the synthesized nests
+//       run as emitted (still exact, still materialized).
+//   - elementwise multi-input classes beyond softmax are roadmap items.
 //
 // Contract (Rule 142):
 //   required  : kernel.built
@@ -101,7 +112,7 @@ constexpr Tier kPolyTiers[] = {Tier::Tier2, Tier::Tier3};
     store1.op = KernelOp::Store;
     store1.bufferOut = call.bufferOut;
     store1.outIndexCoeffs = SmallVector<int64_t, 4>{N, 1, 0};
-    store1.accumulate = true;
+    store1.accum = AccumMode::Add;
 
     KernelNode kLoop;
     kLoop.op = KernelOp::Loop;
@@ -171,7 +182,7 @@ constexpr Tier kPolyTiers[] = {Tier::Tier2, Tier::Tier3};
     store1.op = KernelOp::Store;
     store1.bufferOut = call.bufferOut;
     store1.outIndexCoeffs = SmallVector<int64_t, 4>{1, 0};  // Y[i]
-    store1.accumulate = true;
+    store1.accum = AccumMode::Add;
 
     // S0 (init): Y[i] = 0 over the depth-1 nest (i).
     KernelNode compute0;
@@ -301,7 +312,7 @@ constexpr Tier kPolyTiers[] = {Tier::Tier2, Tier::Tier3};
     newStore.bufferOut = store.bufferOut;
     newStore.outIndexCoeffs = outCoeffs;
     newStore.outIndexOffset = 0;
-    newStore.accumulate = store.accumulate;
+    newStore.accum = store.accum;
 
     // Loop nest over the output dims (outermost first).
     SmallVector<uint32_t, 8> loopIds;
@@ -341,6 +352,176 @@ constexpr Tier kPolyTiers[] = {Tier::Tier2, Tier::Tier3};
     return true;
 }
 
+/// Builds the stable-form softmax statement chain for Call(Softmax)
+/// nodes: Y[M,K] = softmax_rows(A[M,K]). Six statements over four
+/// sibling k-bands under m, with three materialized temp buffers
+/// (rowmax [M], exp [M,K], sum [M]). Every chain replays the reference
+/// kernel's operations in the reference order (execSoftmaxCall; the
+/// Sub(x, 0) form is the EXACT identity passthrough — unlike Add it
+/// preserves -0.0 — so the differential stays bit-exact by
+/// construction, Rule 90).
+[[nodiscard]] bool buildSoftmaxNodes(KernelModule& km,
+                                     const KernelNode& call,
+                                     SymbolTable& symbols,
+                                     SmallVector<KernelNode, 8>& out) {
+    if (call.bufferA >= km.buffers.size() ||
+        call.bufferOut >= km.buffers.size()) {
+        return false;
+    }
+    const auto& da = km.buffers[call.bufferA].dims;
+    const auto& dy = km.buffers[call.bufferOut].dims;
+    if (da.size() != 2 || dy.size() != 2) return false;
+    const int64_t M = da[0];
+    const int64_t K = da[1];
+    if (M <= 0 || K <= 0 || dy[0] != M || dy[1] != K) return false;
+
+    // Temp buffer table: rowmax [M], exp [M,K], sum [M] (Rule 24: the
+    // temps are part of the serializable module).
+    KernelBuffer rm;
+    rm.name = symbols.intern("softmax_rowmax");
+    rm.isTemp = true;
+    rm.dims = SmallVector<int64_t, 4>{M};
+    rm.elements = M;
+    KernelBuffer eb;
+    eb.name = symbols.intern("softmax_exp");
+    eb.isTemp = true;
+    eb.dims = SmallVector<int64_t, 4>{M, K};
+    eb.elements = M * K;
+    KernelBuffer sb;
+    sb.name = symbols.intern("softmax_sum");
+    sb.isTemp = true;
+    sb.dims = SmallVector<int64_t, 4>{M};
+    sb.elements = M;
+    const uint32_t bufRM = km.addBuffer(rm);
+    const uint32_t bufE = km.addBuffer(eb);
+    const uint32_t bufS = km.addBuffer(sb);
+
+    auto elem = [&](uint32_t bid, SmallVector<int64_t, 4> coeffs) {
+        KernelOperand o;
+        o.kind = KernelOperand::Kind::ElemIdx;
+        o.index = static_cast<int64_t>(bid);
+        o.idxCoeffs = std::move(coeffs);
+        return o;
+    };
+    auto konst = [&](double v) {
+        KernelOperand o;
+        o.kind = KernelOperand::Kind::Const;
+        o.constValue = v;
+        return o;
+    };
+    SmallVector<KernelExpr, 8> es;
+    auto pushExpr = [&](MathOp op, KernelOperand a, KernelOperand b) {
+        KernelExpr e;
+        e.op = op;
+        e.a = std::move(a);
+        e.b = std::move(b);
+        es.push_back(std::move(e));
+    };
+    auto compute = [&](SymbolId family) {
+        KernelNode c;
+        c.op = KernelOp::Compute;
+        c.family = family;
+        return c;
+    };
+    auto store = [&](uint32_t bid, SmallVector<int64_t, 4> coeffs) {
+        KernelNode s;
+        s.op = KernelOp::Store;
+        s.bufferOut = bid;
+        s.outIndexCoeffs = std::move(coeffs);
+        return s;
+    };
+
+    // S0 (depth 1): RM[m] = -inf.  Add(-inf, 0.0) == -inf exactly.
+    KernelNode c0 = compute(call.family);
+    pushExpr(MathOp::Add, konst(-INFINITY), konst(0.0));
+    c0.exprs = es;
+    es.clear();
+    KernelNode s0 = store(bufRM, SmallVector<int64_t, 4>{1});  // RM[m]
+
+    // S1 (depth 2): RM[m] max= Sub(x[m,k], 0)  (exact x passthrough).
+    KernelNode c1 = compute(call.family);
+    pushExpr(MathOp::Sub, elem(call.bufferA, {K, 1}), konst(0.0));
+    c1.exprs = es;
+    es.clear();
+    KernelNode s1 = store(bufRM, SmallVector<int64_t, 4>{1, 0});  // RM[m]
+    s1.accum = AccumMode::Max;
+
+    // S2 (depth 2): E[m,k] = Exp(Sub(x[m,k], RM[m])).
+    KernelNode c2 = compute(call.family);
+    pushExpr(MathOp::Sub, elem(call.bufferA, {K, 1}), elem(bufRM, {1, 0}));
+    pushExpr(MathOp::Exp, KernelOperand{KernelOperand::Kind::Temp, 0},
+             konst(0.0));
+    c2.exprs = es;
+    es.clear();
+    KernelNode s2 = store(bufE, SmallVector<int64_t, 4>{K, 1});  // E[m,k]
+
+    // S3 (depth 1): S[m] = 0.
+    KernelNode c3 = compute(call.family);
+    pushExpr(MathOp::Add, konst(0.0), konst(0.0));
+    c3.exprs = es;
+    es.clear();
+    KernelNode s3 = store(bufS, SmallVector<int64_t, 4>{1});  // S[m]
+
+    // S4 (depth 2): S[m] += Sub(E[m,k], 0)  (exact passthrough).
+    KernelNode c4 = compute(call.family);
+    pushExpr(MathOp::Sub, elem(bufE, {K, 1}), konst(0.0));
+    c4.exprs = es;
+    es.clear();
+    KernelNode s4 = store(bufS, SmallVector<int64_t, 4>{1, 0});  // S[m]
+    s4.accum = AccumMode::Add;
+
+    // S5 (depth 2): Y[m,k] = Div(E[m,k], S[m]).
+    KernelNode c5 = compute(call.family);
+    pushExpr(MathOp::Div, elem(bufE, {K, 1}), elem(bufS, {1, 0}));
+    c5.exprs = es;
+    es.clear();
+    KernelNode s5 = store(call.bufferOut, SmallVector<int64_t, 4>{K, 1});
+
+    // Nest: m { S0; kRM { S1 }; kE { S2 }; S3; kS { S4 }; kD { S5 } }.
+    // Sibling k-loops keep every band's instances sequential in the
+    // emitted form (the walker executes children in order); the SCoP
+    // model sees six statements over dims (m, k) whose FUSED scheduling
+    // is the band-shift roadmap item — until it lands the synthesized
+    // nests run as emitted (still exact, still materialized).
+    // Static node ids (fixed emission order):
+    //   0:c1 1:s1 2:kRM 3:c2 4:s2 5:kE 6:c3 7:s3 8:kS 9:c4 10:s4
+    //   11:kD 12:c5 13:s5 14:c0 15:s0 16:m
+    auto kloop = [&](const char* name, uint32_t c, uint32_t s) {
+        KernelNode l;
+        l.op = KernelOp::Loop;
+        l.var = symbols.intern(name);
+        l.begin = 0;
+        l.end = K;
+        l.children.push_back(c);
+        l.children.push_back(s);
+        return l;
+    };
+    out.push_back(c1);                                    // 0
+    out.push_back(s1);                                    // 1
+    out.push_back(kloop("sk_rm", 0, 1));                  // 2
+    out.push_back(c2);                                    // 3
+    out.push_back(s2);                                    // 4
+    out.push_back(kloop("sk_e", 3, 4));                   // 5
+    out.push_back(c3);                                    // 6
+    out.push_back(s3);                                    // 7
+    out.push_back(kloop("sk_s", 9, 10));                  // 8
+    out.push_back(c4);                                    // 9
+    out.push_back(s4);                                    // 10
+    out.push_back(kloop("sk_d", 12, 13));                 // 11
+    out.push_back(c5);                                    // 12
+    out.push_back(s5);                                    // 13
+    out.push_back(c0);                                    // 14
+    out.push_back(s0);                                    // 15
+    KernelNode mLoop;
+    mLoop.op = KernelOp::Loop;
+    mLoop.var = symbols.intern("sm");
+    mLoop.begin = 0;
+    mLoop.end = M;
+    mLoop.children = SmallVector<uint32_t, 4>{14, 15, 2, 5, 6, 7, 8, 11};
+    out.push_back(std::move(mLoop));                      // 16
+    return true;
+}
+
 }  // namespace
 
 class PolySynthPass final : public PassBase {
@@ -376,6 +557,9 @@ public:
         } else if (root.op == KernelOp::Call &&
                    root.math == MathOp::ReduceSum) {
             ok = buildReduceSumNodes(km, root, *ctx.symbols, rebuilt);
+        } else if (root.op == KernelOp::Call &&
+                   root.math == MathOp::Softmax) {
+            ok = buildSoftmaxNodes(km, root, *ctx.symbols, rebuilt);
         } else if (root.op == KernelOp::Loop) {
             // Locate the first Compute+Store pair in the children.
             const KernelNode* compute = nullptr;

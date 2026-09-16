@@ -39,6 +39,7 @@ HashValue KernelModule::hash() const noexcept {
     for (const auto& b : buffers) {
         h = hashCombine(h, hashU64(b.name));
         h = hashCombine(h, hashU64(static_cast<uint64_t>(b.dtype)));
+        h = hashCombine(h, b.isTemp ? 0xC3C3C3C3C3C3C3C3ULL : 0ULL);
         h = hashCombine(h, hashI64(b.elements));
         for (const int64_t d : b.dims) h = hashCombine(h, hashI64(d));
     }
@@ -57,7 +58,7 @@ HashValue KernelModule::hash() const noexcept {
         h = hashCombine(h, hashU64(n.family));
         for (const int64_t c : n.outIndexCoeffs) h = hashCombine(h, hashI64(c));
         h = hashCombine(h, hashI64(n.outIndexOffset));
-        h = hashCombine(h, n.accumulate ? 0x9E3779B97F4A7C15ULL : 0ULL);
+        h = hashCombine(h, hashU64(static_cast<uint64_t>(n.accum)));
         h = hashCombine(h, n.parallel ? 0xA5A5A5A5A5A5A5A5ULL : 0ULL);
         h = hashCombine(h, n.vectorHint ? 0x5C5C5C5C5C5C5C5CULL : 0ULL);
         for (const int64_t c : n.guardCoeffs) h = hashCombine(h, hashI64(c));
@@ -109,6 +110,7 @@ json::Value KernelModule::toJson(SymbolTable& symbols) const {
         bo.set("dtype", json::Value{dtypeName(b.dtype)});
         bo.set("input", json::Value{b.isInput});
         bo.set("output", json::Value{b.isOutput});
+        if (b.isTemp) bo.set("temp", json::Value{true});
         bo.set("elements", json::Value{b.elements});
         if (!b.dims.empty()) {
             json::Value ds = json::Array{};
@@ -158,7 +160,12 @@ json::Value KernelModule::toJson(SymbolTable& symbols) const {
             }
             no.set("out_index_coeffs", std::move(cs));
             no.set("out_index_offset", json::Value{n.outIndexOffset});
-            if (n.accumulate) no.set("accumulate", json::Value{true});
+            if (n.accum != AccumMode::None) {
+                no.set("accumulate", json::Value{true});
+                if (n.accum == AccumMode::Max) {
+                    no.set("accum_mode", json::Value{"max"});
+                }
+            }
         }
         if (n.op == KernelOp::Loop && n.parallel) {
             no.set("parallel", json::Value{true});

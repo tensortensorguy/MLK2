@@ -182,9 +182,30 @@ Result<SmallVector<Dependence, 16>> computeDependences(const Scop& scop) {
                     MLK_TRYV(addTieRow(a, b, depth, rel.sys));
                     if (rel.sys.isEmptyFlag) continue;
                     // Original-order purification.
+                    //
+                    // CHAIN-FINAL READS (softmax class): a RAW whose
+                    // SOURCE write is an ACCUMULATE store (AccumMode
+                    // Add/Max) feeds a reduction chain; a plain reader
+                    // of that location consumes the CHAIN's FINAL value
+                    // — in instance terms it may depend on EVERY chain
+                    // writer, so the lexicographic "sink >=lex source"
+                    // narrowing (which models per-iteration flow for
+                    // init/accumulate pairs) would be UNSOUND here: it
+                    // let the scheduler interleave reader and chain and
+                    // emitted kernels reading the RUNNING reduction
+                    // value. Keep the FULL tie relation for this class
+                    // (a conservative superset of the true dataflow):
+                    // any schedule row varying a chain dim then carries
+                    // distances of both signs and is rejected, which
+                    // forces band separation (or the honest "no
+                    // schedule found" fallback) for chain-reading
+                    // kernels.
                     PresburgerSet partial;
                     partial.space = rel.space;
                     partial.disjuncts.push_back(std::move(rel.sys));
+                    const bool chainFinalRead =
+                        kind == DepKind::Raw && src.id != dst.id &&
+                        src.accum != AccumMode::None;
                     if (src.id == dst.id) {
                         MLK_TRY_VAR(purified,
                                     PresburgerSet::intersect(partial, lexGt));
@@ -197,6 +218,23 @@ Result<SmallVector<Dependence, 16>> computeDependences(const Scop& scop) {
                         dep.dstAccess = bi;
                         dep.kind = kind;
                         dep.relation = std::move(purified);
+                        if (out.size() >= kPolyMaxDependences) {
+                            return err(ErrorCode::ResourceExhausted,
+                                       "dependence budget exceeded");
+                        }
+                        out.push_back(std::move(dep));
+                    } else if (chainFinalRead) {
+                        // Full relation: every (chain writer, reader)
+                        // instance pair is a potential dataflow edge.
+                        MLK_TRY_VAR(f, partial.feasibility());
+                        if (f == Feasibility::Empty) continue;
+                        Dependence dep;
+                        dep.srcStmt = src.id;
+                        dep.dstStmt = dst.id;
+                        dep.srcAccess = ai;
+                        dep.dstAccess = bi;
+                        dep.kind = kind;
+                        dep.relation = std::move(partial);
                         if (out.size() >= kPolyMaxDependences) {
                             return err(ErrorCode::ResourceExhausted,
                                        "dependence budget exceeded");

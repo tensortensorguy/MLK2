@@ -86,6 +86,28 @@ arithmetic:
    if-block scope disappeared) — compute pairs now emit in explicit
    per-pair block scopes mirroring the walker's execPair temp lifetime.
 
+10. **Softmax synthesis class + chain-final-read soundness (round 16).**
+   `poly.synth` recognizes Call(Softmax) and emits the stable-form
+   six-statement chain (rowmax via a NEW AccumMode::Max store, exp into a
+   materialized temp, sum, divide) over four sibling k-bands with three
+   `KernelBuffer::isTemp` temporaries — the first class requiring temp
+   buffer materialization (the buffer walker allocates zero-initialized
+   scratch; the executors' bindings gained a bufferId-indexed `temps`
+   array). The passthrough `Sub(x, 0)` preserves -0.0 exactly (Add would
+   not), so the differential stays bit-exact by construction. The class
+   exposed a REAL dependence-analysis soundness gap: the cross-statement
+   lexicographic purification modeled per-iteration flow, but a reader of
+   an accumulate chain's location consumes the chain's FINAL value — the
+   scheduler could legally interleave the exp band into the rowmax band
+   and emit a kernel reading the RUNNING max (the differential caught it;
+   verifyScheduleLegality missed it because the narrowed relation hid the
+   violation). RAW edges from accumulate writes now keep the FULL tie
+   relation (conservative superset), any row varying a chain dim carries
+   both-sign distances and is rejected, and "no schedule found" became a
+   GRACEFUL pipeline fallback (Info diagnostic, kernel keeps its correct
+   form — Rules 62/102/115) instead of aborting the Tier2 pipeline.
+   Fusing the softmax bands is the band-shift roadmap item.
+
 ## Consequences
 
 - Zero dependency risk; the engine's limitations are explicit and

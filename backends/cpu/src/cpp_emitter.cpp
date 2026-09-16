@@ -147,6 +147,11 @@ struct CppEmitter {
                        "emitter: buffer id out of range");
         }
         const KernelBuffer& b = km.buffers[bid];
+        if (b.isTemp) {
+            return err(ErrorCode::UnsupportedCapability,
+                       "emitter: temp buffers are not supported yet in "
+                       "native artifacts (roadmap; round-17)");
+        }
         if (!b.isInput && !b.isOutput) {
             return err(ErrorCode::InvalidGraph,
                        "emitter: reference to an unbindable buffer "
@@ -341,6 +346,14 @@ struct CppEmitter {
         if (!ptr.has_value()) {
             return std::unexpected<Error>(ptr.error());
         }
+        if (store.accum == AccumMode::Max) {
+            // Overwriting here would be silently WRONG (the Max store is
+            // a read-modify-write reduction); reject until the native
+            // artifact story for temps/Max lands (round-17 roadmap).
+            return err(ErrorCode::UnsupportedCapability,
+                       "emitter: max-accumulate stores are not supported "
+                       "yet (roadmap; round-17)");
+        }
         std::string target;
         if (multiDim) {
             MLK_TRY_VAR(flat,
@@ -353,7 +366,8 @@ struct CppEmitter {
             }
             target = *ptr + "[" + varNames.back() + "]";
         }
-        body += indent() + target + (store.accumulate ? " += " : " = ") +
+        body += indent() + target +
+                (store.accum == AccumMode::Add ? " += " : " = ") +
                 value + ";\n";
         --depth;
         body += indent() + "}\n";
@@ -598,7 +612,7 @@ void emitPoly7Prologue(std::string& out) {
 
 bool isMultiDimModule(const KernelModule& kernel) noexcept {
     for (const KernelNode& n : kernel.nodes) {
-        if (n.accumulate || !n.beginCoeffs.empty() ||
+        if (n.accum != AccumMode::None || !n.beginCoeffs.empty() ||
             !n.endCoeffs.empty() ||
             (n.end == constants::kKernelLoopDynamicBound &&
              n.endBuf != constants::kInvalidId)) {
