@@ -583,3 +583,52 @@ cache reuse + invalidation).
   only inside singleton tiles; a point-level split that removes the
   affine point-loop bound machinery for partial tiles could shrink the
   emitted forest further.
+
+## GPU backend (next phase — design contract)
+
+The pipeline extends to GPU targets with NO structural change: the
+polyhedral layer already owns the schedule, the parallel marks are
+proven, and the artifact driver already treats "emit text → external
+toolchain → load → invoke through the buffer ABI → differential vs
+the walker" as the only sanctioned publication model (ADR-0003/0006 —
+never in-process machine codegen). The GPU phase reuses every stage
+and swaps the emission + invocation tail:
+
+- **Artifact form.** CUDA C++ (`.cu`) first, PTX later if a use case
+  demands it — nvcc compiles out-of-process exactly like `cc` today;
+  the artifact is a `.so` exposing the SAME `mlk_kernel` ABI, where
+  the host-side function manages device memory explicitly
+  (cudaMalloc/cudaMemcpy H2D, launch, memcpy D2H) behind the same
+  Result-mapped error codes. Multi-dim temp ABI: device-side scratch
+  materialized with the walker's element-count model and the same
+  `kKernelTempElementsLimit`.
+- **Thread mapping from proven marks.** Scheduler rows marked
+  parallel map to grid/block dimensions (tile loops → blocks, point
+  loops → threads); serial (carried-dependence) dims stay a serial
+  loop inside the kernel thread. The single-parallel-level rule from
+  the CPU emitter carries over: one launch per outermost parallel
+  band, never per point iteration.
+- **Bit-exactness boundary (the hard part, declared up front).** A
+  kernel thread computes one output cell with its k-chain in the same
+  ascending order as the walker — no cross-thread reduction, no
+  reassociation, `-fmad=false` (separate mul/add, matching the walker
+  and the asm emitter's contract). Transcendentals: `exp`/`erf` are
+  libm-ordered on the CPU path; the GPU path must either reproduce
+  the same bit patterns (device libm does NOT guarantee it) or the
+  differential contract for those ops is explicitly re-declared as
+  ULP-bounded with the bound measured and recorded — never silently
+  relaxed (Rule 90 honesty; softmax is the first test case).
+- **Verification.** The existing three-way differential harness
+  (walker vs artifact vs Tier1 baseline) runs unchanged; identity is
+  still memcmp-grade where the op set allows, ULP-bounded-with-
+  certificate where device libm forces it.
+- **Honest initial boundary.** Single GPU, one stream, no unified
+  memory, no multi-device partitioning; buffers ≤ device memory with
+  the limit checked and reported, not guessed. Everything outside the
+  boundary is a structured rejection, never a fallback.
+
+Entry point when this phase starts: `ArtifactKind::Cuda` +
+`GpuBackendDriverConfig` (compiler = `nvcc`, arch flag declared per
+config), reusing `buildKernelArtifactInDir`, the artifact cache
+fingerprint (compiler kind becomes part of it), and `mlk-poly bench
+--paths=cuda` for the same Rule 49 protocol.

@@ -33,6 +33,16 @@
 //                 tensor descriptors yet (upstream serializer), so tensor
 //                 graphs enter through the GraphBuilder API (demo) —
 //                 emit covers every graph the Tier2 lowering accepts
+//   mlk-poly bench [--reps=R] [--warmup=W]
+//                  [--suites=gemm,softmax,reducesum] [--json-out=F]
+//                  [--workdir=D]
+//                 runs the polyhedral runtime benchmark: per suite case
+//                 (declared shapes and flop models) the Tier1 call
+//                 baseline, the Tier2 walker, and the C++/assembly
+//                 native artifacts over the same seeded inputs, with a
+//                 bit-exact gate before any timing and Rule 49 stats
+//                 (median/min/max); skipped paths are reported, never
+//                 guessed (Rule 30).
 // Deterministic (Rule 53); every fallback is reported (Rule 30).
 #include <cmath>
 #include <cstdio>
@@ -53,6 +63,8 @@
 #include "mlk/core/small_vector.h"
 #include "mlk/support/json.h"
 #include "mlk/type/domain_profile.h"
+
+#include "poly_bench.h"
 
 namespace {
 
@@ -592,6 +604,9 @@ int main(int argc, char** argv) {
     if (mode == "autotune") {
         return runAutotune(argc, argv);
     }
+    if (mode == "bench") {
+        return polybench::runBench(argc, argv);
+    }
     if (mode == "emit" && argc >= 3) {
         std::string outPath, workdir;
         bool useAsm = true;   // the assembly form is the default artifact
@@ -657,6 +672,8 @@ int main(int argc, char** argv) {
     }
     std::fputs("usage: mlk-poly demo [--backend=asm|cpp] | show "
                "<graph.mlk> | autotune [...]\n"
+               " | bench [--reps=R] [--warmup=W] [--suites=...] "
+               "[--json-out=F] [--workdir=D]\n"
                " | emit <graph.mlk> [--asm|--cpp] [--out=<path>] "
                "[--workdir=<dir>] [--compile]\n",
                stderr);

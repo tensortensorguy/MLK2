@@ -39,6 +39,89 @@ namespace {
 /// typed function pointer).
 inline constexpr std::size_t kDriverMaxBindableBuffers = 8;
 
+/// True when the configured compiler accepts `-fopenmp` for a shared
+/// build (compile + link probe of a minimal OpenMP program). Probed at
+/// most once per process (the first config's settings; the artifact
+/// compiler does not vary in practice), and the result decides whether
+/// the C++ artifact build passes -fopenmp — turning the scheduler's
+/// PROVEN parallel marks (Rule 148 records them) into real threaded
+/// execution. Without it the pragmas stay inert (scalar artifacts,
+/// still bit-exact). The probe follows the same no-exec-tmpfs policy
+/// as the artifact workdir (probe dir under the resolved workdir base;
+/// linked, never run).
+[[nodiscard]] bool openmpAvailable(const BackendDriverConfig& config) {
+#if !defined(_WIN32)
+    static const bool cached = [&config] {
+        std::string base = config.workdirBase;
+        if (base.empty()) {
+            const char* env = std::getenv("MLK_BACKEND_WORKDIR");
+            if (env != nullptr && env[0] != '\0') {
+                base = env;
+            } else {
+                char cwd[4096];
+                if (::getcwd(cwd, sizeof(cwd)) == nullptr) return false;
+                base = std::string(cwd) + "/mlk_backend_work";
+            }
+        }
+        if (!createDirs(base).has_value()) return false;
+        std::string dir = base + "/ompprobe-XXXXXX";
+        if (::mkdtemp(dir.data()) == nullptr) return false;
+        const std::string src = dir + "/probe.cpp";
+        const std::string lib = dir + "/probe.so";
+        {
+            FILE* f = std::fopen(src.c_str(), "wb");
+            if (f == nullptr) return false;
+            static const char kProbe[] =
+                "#include <omp.h>\n"
+                "extern \"C\" int mlk_omp_probe() {\n"
+                "    int s = 0;\n"
+                "#pragma omp parallel for schedule(static) reduction(+:s)\n"
+                "    for (int i = 0; i < 8; ++i) s += i;\n"
+                "    return s;\n"
+                "}\n";
+            std::fwrite(kProbe, 1, sizeof(kProbe) - 1, f);
+            std::fclose(f);
+        }
+        std::vector<std::string> args{config.compiler,   "-fopenmp",
+                                      "-O0",             "-shared",
+                                      "-fPIC",           src,
+                                      "-o",              lib};
+        std::vector<char*> argv;
+        argv.reserve(args.size() + 1);
+        for (std::string& a : args) argv.push_back(a.data());
+        argv.push_back(nullptr);
+        const std::string log = dir + "/log.txt";
+        posix_spawn_file_actions_t actions;
+        if (posix_spawn_file_actions_init(&actions) != 0) return false;
+        posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO,
+                                         log.c_str(),
+                                         O_WRONLY | O_CREAT | O_TRUNC,
+                                         0644);
+        posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO,
+                                         STDERR_FILENO);
+        pid_t pid = -1;
+        const int rc = posix_spawnp(&pid, argv[0], &actions, nullptr,
+                                    argv.data(), environ);
+        posix_spawn_file_actions_destroy(&actions);
+        int status = -1;
+        if (rc == 0) {
+            (void)::waitpid(pid, &status, 0);
+        }
+        // Cleanup is best-effort; the probe dir dies with the process
+        // either way (no exec mapping is ever taken from it).
+        (void)::unlink(src.c_str());
+        (void)::unlink(lib.c_str());
+        (void)::unlink(log.c_str());
+        (void)::rmdir(dir.c_str());
+        return rc == 0 && status == 0;
+    }();
+    return cached;
+#else
+    (void)config;
+    return false;
+#endif
+}
+
 [[nodiscard]] std::string joinPath(const std::string& a,
                                    const std::string& b) {
     if (a.empty()) return b;
@@ -164,11 +247,16 @@ void callLegacy(void* fn, Args... args) {
         // C++ artifacts: the SAME no-exception/no-rtti contract as the
         // host build (proves the artifact honors the repo rules) and
         // baseline codegen (no FMA contraction, matching the walker).
+        // -fopenmp (when the probe confirms the toolchain links
+        // libgomp) activates the emitted parallel pragmas — the
+        // scheduler PROVED those rows write disjoint slabs, so any
+        // thread schedule is bit-exact-deterministic (Rule 43/148).
         argStorage.push_back("-O2");
         argStorage.push_back("-shared");
         argStorage.push_back("-fPIC");
         argStorage.push_back("-fno-exceptions");
         argStorage.push_back("-fno-rtti");
+        if (openmpAvailable(config)) argStorage.push_back("-fopenmp");
         argStorage.push_back(artifactPath);
     }
     argStorage.push_back("-o");
@@ -317,9 +405,15 @@ Result<void> createDirs(const std::string& path) {
 
 LoadedKernel::~LoadedKernel() {
 #if !defined(_WIN32)
-    if (handle_ != nullptr) {
-        ::dlclose(handle_);  // artifact code allocates nothing; no leaks
-    }
+    // Deliberately NOT dlclose'd. Unloading executed kernel code is
+    // unsafe once the artifact may have spawned a runtime thread pool:
+    // an OpenMP-linked artifact (GCC 14 libgomp) segfaults at process
+    // teardown after dlclose — the worker threads' TLS/dtors point into
+    // the unmapped object. Artifacts are process-lifetime by contract
+    // (bounded by the artifact cache; the OS reclaims at exit), so the
+    // handle is intentionally leaked here — this is the standard
+    // plugin-host model for code that has already run.
+    (void)handle_;
 #endif
 }
 
@@ -335,9 +429,8 @@ LoadedKernel::LoadedKernel(LoadedKernel&& other) noexcept
 
 LoadedKernel& LoadedKernel::operator=(LoadedKernel&& other) noexcept {
     if (this != &other) {
-#if !defined(_WIN32)
-        if (handle_ != nullptr) ::dlclose(handle_);
-#endif
+        // The previous handle is intentionally NOT dlclose'd (see the
+        // destructor: loaded kernel code is process-lifetime).
         handle_ = other.handle_;
         fn_ = other.fn_;
         multiDim_ = other.multiDim_;

@@ -24,7 +24,7 @@ mlk_add_executable(mlk-replay
     DEPS mlk_runtime
 )
 mlk_add_executable(mlk-poly
-    SOURCES mlk-poly/mlk_poly.cpp
+    SOURCES mlk-poly/mlk_poly.cpp mlk-poly/poly_bench.cpp
     DEPS mlk_runtime mlk_backend_cpu mlk_poly mlk_fastkernel
 )
 mlk_add_executable(mlk-generate-profiles

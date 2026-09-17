@@ -72,6 +72,8 @@ struct CppEmitter {
     bool legacyUsesDynamicN{false};
     std::size_t parallelLoops{0};
     std::size_t simdLoops{0};
+    std::size_t nestedParallelSerial{0};  // marks emitted serial (1 level)
+    bool inOmpParallel{false};            // active threading region depth
     std::string body{};  // signature + everything between the braces
     int depth{0};
     SmallVector<std::string, 8> varNames{};  // per-depth emitted names
@@ -481,22 +483,36 @@ struct CppEmitter {
                 } else {
                     endExpr = i64(n.end - 1);
                 }
+                // SINGLE PARALLEL LEVEL: only the outermost parallel-
+                // marked loop emits a threading pragma. Nested marks
+                // stay serial — omp parallel regions nested per point
+                // iteration thrash libgomp teams (measured 18x loss on
+                // tiled GEMM); the scheduler's disjoint-slab proof
+                // holds at the outer level, which is where threads
+                // pay off. simd marks remain (per-loop vectorization,
+                // no threading, bit-exact per element).
+                bool openedOmp = false;
                 if (n.parallel || n.vectorHint) {
                     body += indent() + "#ifdef _OPENMP\n";
-                    if (n.parallel && n.vectorHint) {
-                        body += indent() +
-                                "#pragma omp parallel for simd "
-                                "schedule(static)\n";
+                    if (n.parallel && !inOmpParallel) {
+                        if (n.vectorHint) {
+                            body += indent() +
+                                    "#pragma omp parallel for simd "
+                                    "schedule(static)\n";
+                            ++simdLoops;
+                        } else {
+                            body += indent() +
+                                    "#pragma omp parallel for "
+                                    "schedule(static)\n";
+                        }
                         ++parallelLoops;
-                        ++simdLoops;
-                    } else if (n.parallel) {
-                        body += indent() +
-                                "#pragma omp parallel for "
-                                "schedule(static)\n";
-                        ++parallelLoops;
+                        openedOmp = true;
                     } else {
-                        body += indent() + "#pragma omp simd\n";
-                        ++simdLoops;
+                        if (n.parallel) ++nestedParallelSerial;
+                        if (n.vectorHint) {
+                            body += indent() + "#pragma omp simd\n";
+                            ++simdLoops;
+                        }
                     }
                     body += indent() + "#endif\n";
                 }
@@ -506,7 +522,9 @@ struct CppEmitter {
                         beginExpr + "; " + var + " <= " + endExpr + "; ++" +
                         var + ") {\n";
                 ++depth;
+                if (openedOmp) inOmpParallel = true;
                 MLK_TRYV(emitChildList(n.children, false));
+                if (openedOmp) inOmpParallel = false;
                 --depth;
                 body += indent() + "}\n";
                 varNames.pop_back();
@@ -840,6 +858,13 @@ Result<std::string> emitCppSource(const KernelModule& kernel,
            (em.needsPoly7 ? "poly7" : "libm") + "; pragmas are guarded "
            "by #ifdef _OPENMP (inert without -fopenmp; parallel rows "
            "write disjoint slabs, so any schedule is deterministic).\n";
+    if (em.nestedParallelSerial != 0) {
+        out += "// Single parallel level: " +
+               std::to_string(em.nestedParallelSerial) + " nested "
+               "parallel mark(s) emitted serial (nested omp regions "
+               "thrash thread teams; the outer slab proof is where "
+               "threads pay).\n";
+    }
     out += "#include <cmath>\n#include <cstdint>\n";
     if (em.needsPoly7) emitPoly7Prologue(out);
     out += "\n";

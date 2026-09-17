@@ -85,8 +85,12 @@ struct BackendDriverConfig {
 /// is success.
 [[nodiscard]] Result<void> createDirs(const std::string& path);
 
-/// A compiled artifact loaded into this process. Owns the dlopen handle
-/// (closed on destruction / reassignment; move-only).
+/// A compiled artifact loaded into this process. Move-only; the
+/// dlopen handle is intentionally NOT closed on destruction — loaded
+/// kernel code is process-lifetime (unloading executed artifacts is
+/// unsafe once they may have spawned runtime thread pools, e.g.
+/// libgomp segfaults at teardown after dlclose; the OS reclaims at
+/// exit).
 class LoadedKernel {
 public:
     LoadedKernel() noexcept = default;
