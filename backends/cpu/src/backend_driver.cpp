@@ -495,17 +495,55 @@ Result<void> LoadedKernel::run(const KernelModule& kernel,
     (void)symbols;
     // Bindable-buffer pointer materialization — exactly the walker's
     // resolveInput/resolveOutput: inputs index io.inputs by TABLE id,
-    // outputs index io.outputs by (bid - nInputs).
+    // outputs index io.outputs by (bid - nInputs). Temp scratch
+    // (multi-dim temp ABI) is materialized HERE — zero-initialized per
+    // isTemp buffer with the SAME element-count model and limit as the
+    // walker's temp materialization — and passed like any other buffer.
     struct PtrPair {
         const double* ptr;
         const int64_t* dims;
     };
     std::vector<PtrPair> pairs;
     std::vector<std::vector<int64_t>> dimsStorage;
+    std::vector<std::vector<double>> tempStorage;
     pairs.reserve(kernel.buffers.size());
     dimsStorage.reserve(kernel.buffers.size());
     for (uint32_t bid = 0; bid < kernel.buffers.size(); ++bid) {
         const KernelBuffer& b = kernel.buffers[bid];
+        if (b.isTemp) {
+            if (!multiDim_) {
+                return err(ErrorCode::UnsupportedCapability,
+                           "driver: temp buffers belong to the multi-dim "
+                           "form (walker parity)");
+            }
+            // Walker mirror (kernel_buffers.cpp): dims product (or the
+            // elements field), same kKernelTempElementsLimit guard,
+            // zero-initialized storage alive for the whole call.
+            int64_t n = b.elements;
+            if (!b.dims.empty()) {
+                n = 1;
+                for (const int64_t d : b.dims) {
+                    if (d <= 0 ||
+                        n > constants::kKernelTempElementsLimit / d) {
+                        return err(
+                            ErrorCode::InvalidGraph,
+                            "driver: temp buffer element count out of "
+                            "range");
+                    }
+                    n *= d;
+                }
+            }
+            if (n <= 0 || n > constants::kKernelTempElementsLimit) {
+                return err(ErrorCode::InvalidGraph,
+                           "driver: temp buffer element count out of "
+                           "range");
+            }
+            tempStorage.emplace_back(static_cast<std::size_t>(n), 0.0);
+            dimsStorage.emplace_back(b.dims.begin(), b.dims.end());
+            pairs.push_back(PtrPair{tempStorage.back().data(),
+                                    dimsStorage.back().data()});
+            continue;
+        }
         if (!b.isInput && !b.isOutput) continue;
         const double* ptr;
         if (b.isInput) {

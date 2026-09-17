@@ -33,9 +33,9 @@ namespace {
 /// the fast-kernel launch-coverage certificate mirrors the chunking
 /// arithmetic and must read the SAME values.
 inline constexpr std::size_t kMaxTempSlots = 64;
-/// Upper bound on ONE temp buffer's element count (DoS guard for
-/// executor-allocated scratch; 16M doubles = 128 MiB).
-inline constexpr int64_t kKernelTempElementsLimit = 1 << 24;
+// kKernelTempElementsLimit lives in constants.h — the native-artifact
+// driver materializes the SAME temp scratch and must read the SAME
+// limit.
 
 enum class SinFamily { Libm, Poly7 };
 
@@ -836,14 +836,15 @@ Result<void> executeKernelOnBuffers(const KernelModule& kernel,
         if (!b.dims.empty()) {
             n = 1;
             for (const int64_t d : b.dims) {
-                if (d <= 0 || n > kKernelTempElementsLimit / d) {
+                if (d <= 0 ||
+                    n > constants::kKernelTempElementsLimit / d) {
                     return err(ErrorCode::InvalidGraph,
                                "temp buffer element count out of range");
                 }
                 n *= d;
             }
         }
-        if (n <= 0 || n > kKernelTempElementsLimit) {
+        if (n <= 0 || n > constants::kKernelTempElementsLimit) {
             return err(ErrorCode::InvalidGraph,
                        "temp buffer element count out of range");
         }

@@ -24,6 +24,27 @@ driver builds the artifact OUT-OF-PROCESS (cc -shared; C++ artifacts
 compile under -fno-exceptions/-fno-rtti to honor the repo contract)
 and loads it with dlopen.
 
+Decision 11 (native temp ABI, multi-dim form): every `isTemp` buffer
+is a bindable `(ptr, dims)` table entry — the DRIVER materializes the
+scratch exactly like the walker (zero-initialized, the walker's
+element-count model, the same `kKernelTempElementsLimit` hoisted to
+constants.h) and the storage outlives the call. Max-accumulate stores
+emit the walker's exact select `(value > cur) ? value : cur` — the
+assembly form uses `comisd` + `jbe`-guarded store (unordered/NaN and
+<= all keep the running slot; `vmaxsd` would break the NaN rule).
+The softmax class runs three-way bit-exact including adversarial
+NaN/±0 rows. The legacy 1-D form keeps structurally rejecting
+temps/Max (the 1-D executor routes such modules through the
+multi-dim walker).
+
+Decision 12 (registry text resolution, Rule 16): pass resolution in
+`PassRegistry::byName` compares name TEXT, never raw SymbolIds — the
+registry is a process-wide singleton outliving every embedding's
+SymbolTable, and raw ids are table-scoped (an id that means
+"poly.synth" in one table numbered "memory.place" in another, which
+silently dispatched the wrong pass). Callers pass the table they
+interned with.
+
 ## Consequences
 ADR-0003's no-in-process-codegen decision is preserved: no emitter
 owns executable pages; dlopen maps a toolchain-built file like any

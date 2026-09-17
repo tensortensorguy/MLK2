@@ -28,20 +28,36 @@ struct PassContract {
 
 /// Static pass registry. Registration happens via PassRegistrar at static
 /// init (deterministic order by name; Rule 143).
+///
+/// Resolution is BY TEXT (Rule 16: "ids are table-scoped, so passes carry
+/// text, not ids"). The registry is a process-wide singleton while every
+/// embedding (test, CLI, pipeline) interns names into its OWN SymbolTable;
+/// raw SymbolId values are meaningless across tables — an id that means
+/// "poly.synth" in one table can be "memory.place" in another. Matching
+/// raw ids therefore returned WRONG PASSES whenever a caller's table
+/// numbered names differently from the first-registered table (observed
+/// live: byName("poly.synth") dispatched memory.place). Callers pass the
+/// table they interned with; the registry compares name TEXT.
 class PassRegistry {
 public:
     [[nodiscard]] static PassRegistry& instance();
 
     void add(PassContract contract, Pass* pass);
 
-    [[nodiscard]] Pass* byName(SymbolId name);
-    [[nodiscard]] const PassContract* contractByName(SymbolId name) const;
+    /// Resolves `name` (interned in `symbols`) by TEXT. The pass registry
+    /// outlives any single SymbolTable; text is the only stable identity.
+    [[nodiscard]] Pass* byName(const SymbolTable& symbols, SymbolId name);
+    [[nodiscard]] const PassContract* contractByName(
+        const SymbolTable& symbols, SymbolId name) const;
 
     [[nodiscard]] std::size_t size() const { return entries_.size(); }
 
     struct Entry {
         PassContract contract;
         Pass* pass{nullptr};
+        /// Stable textual identity (Rule 16) — captured from
+        /// pass->nameText() at registration; never null for real passes.
+        const char* nameText{nullptr};
     };
 
     [[nodiscard]] const std::vector<Entry>& entries() const {

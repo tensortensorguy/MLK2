@@ -530,9 +530,19 @@ struct AsmEmitter {
                 text += "addsd %xmm0, %xmm1\n";
                 text += "movsd %xmm1, (%r10,%rax,1)\n";
             } else if (store.accum == AccumMode::Max) {
-                return err(ErrorCode::UnsupportedCapability,
-                           "asm emitter: max-accumulate stores are not "
-                           "supported yet (roadmap; round-17)");
+                // Order-insensitive row-max primitive — the EXACT
+                // walker select (execPair): write the value only when
+                // value > cur (ordered). comisd value,cur sets CF=1|ZF=1
+                // for <=, ties, AND unordered (NaN — PF/ZF/CF all set),
+                // so jbe keeps the running slot on NaN and +/-0 ties
+                // exactly like (value > cur) ? value : cur; vmaxsd
+                // would break the NaN rule.
+                const std::string keep = newLabel("Lmaxkeep");
+                text += "movsd (%r10,%rax,1), %xmm1\n";
+                text += "comisd %xmm1, %xmm0\n";
+                text += "jbe " + keep + "\n";
+                text += "movsd %xmm0, (%r10,%rax,1)\n";
+                text += keep + ":\n";
             } else {
                 text += "movsd %xmm0, (%r10,%rax,1)\n";
             }
@@ -586,9 +596,12 @@ struct AsmEmitter {
             text += "addsd %xmm0, %xmm1\n";
             text += "movsd %xmm1, (%r10,%rax,1)\n";
         } else if (store.accum == AccumMode::Max) {
+            // The 1-D executor routes every Max module through the
+            // multi-dim walker; a legacy-form Max never reaches this
+            // emitter (kept as an honest structural rejection).
             return err(ErrorCode::UnsupportedCapability,
-                       "asm emitter: max-accumulate stores are not "
-                       "supported yet (roadmap; round-17)");
+                       "asm emitter: max-accumulate stores belong to "
+                       "the multi-dim form (walker parity)");
         } else {
             text += "movsd %xmm0, (%r10,%rax,1)\n";
         }
@@ -969,14 +982,20 @@ Result<std::string> emitAsmSource(const KernelModule& kernel,
     for (uint32_t bid = 0; bid < kernel.buffers.size(); ++bid) {
         const KernelBuffer& b = kernel.buffers[bid];
         if (b.isTemp) {
-            // Temp scratch has no ABI binding yet; the C++ artifact and
-            // the buffer walker materialize it, the assembly artifact
-            // does not (round-17 roadmap item).
-            return err(ErrorCode::UnsupportedCapability,
-                       "asm emitter: temp buffers are not supported yet "
-                       "(roadmap; round-17)");
+            if (!em.multiDim) {
+                // The 1-D executor routes every temp module through the
+                // multi-dim walker; a legacy-form temp never reaches
+                // this emitter (kept as an honest structural check).
+                return err(ErrorCode::UnsupportedCapability,
+                           "asm emitter: temp buffers belong to the "
+                           "multi-dim form (walker parity)");
+            }
+            // Multi-dim temp ABI: the caller materializes one
+            // zero-initialized table per isTemp buffer (the walker's
+            // temp model) and passes (ptr, dims) in table order — the
+            // artifact is the compiled form of the SAME contract.
         }
-        if (!b.isInput && !b.isOutput) continue;
+        if (!b.isInput && !b.isOutput && !b.isTemp) continue;
         em.bindable[bid] = true;
         em.ptrArgIdx[bid] = nextArg;
         nextArg += em.multiDim ? 2 : 1;
@@ -1192,6 +1211,19 @@ Result<std::string> emitAsmSource(const KernelModule& kernel,
                      "certificate; local helper routines)"
                    : "libm") +
               ".\n";
+    {
+        std::size_t temps = 0;
+        for (const KernelBuffer& b : kernel.buffers) {
+            temps += b.isTemp ? 1u : 0u;
+        }
+        if (temps > 0) {
+            header += "# Temp ABI: " + std::to_string(temps) +
+                      " executor-allocated scratch buffer(s) passed as "
+                      "(ptr, dims) table entries — zero-initialized by "
+                      "the caller exactly like the walker's temp "
+                      "materialization.\n";
+        }
+    }
     header += "# Assembled out-of-process (ADR-0003/0006): no "
               "in-process machine codegen anywhere in this backend.\n";
     std::string out = header + em.text;

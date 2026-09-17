@@ -27,7 +27,7 @@ struct TEnv {
         ctx.tier = mlk::Tier::Tier1;
     }
     mlk::Pass* pass(const char* n) {
-        return mlk::PassRegistry::instance().byName(symbols.intern(n));
+        return mlk::PassRegistry::instance().byName(symbols, symbols.intern(n));
     }
 };
 }  // namespace

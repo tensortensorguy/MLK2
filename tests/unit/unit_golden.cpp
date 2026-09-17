@@ -67,15 +67,15 @@ MLK_TEST(golden, pass_golden_pairs) {
         if (!graph.has_value()) continue;
         // Realistic prefix: inference before transforms (spec section 9).
         MLK_CHECK(mlk::PassRegistry::instance()
-                      .byName(symbols.intern("type.infer"))
+                      .byName(symbols, symbols.intern("type.infer"))
                       ->run(ctx, *graph)
                       .has_value());
         MLK_CHECK(mlk::PassRegistry::instance()
-                      .byName(symbols.intern("property.infer"))
+                      .byName(symbols, symbols.intern("property.infer"))
                       ->run(ctx, *graph)
                       .has_value());
         mlk::Pass* pass =
-            mlk::PassRegistry::instance().byName(symbols.intern(tc.pass));
+            mlk::PassRegistry::instance().byName(symbols, symbols.intern(tc.pass));
         MLK_CHECK(pass != nullptr);
         if (pass == nullptr) continue;
         MLK_CHECK(pass->run(ctx, *graph).has_value());

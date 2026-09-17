@@ -140,22 +140,20 @@ struct CppEmitter {
         return "(" + s + ")";
     }
 
-    /// Validated buffer pointer name for an operand/store id.
+    /// Validated buffer pointer name for an operand/store id. Temp
+    /// scratch is bindable in the multi-dim form: the caller materializes
+    /// one zero-initialized table per isTemp buffer (the walker's temp
+    /// ABI) and passes it like any other buffer pointer.
     [[nodiscard]] Result<std::string> bufRef(const uint32_t bid) const {
         if (bid >= km.buffers.size()) {
             return err(ErrorCode::InvalidGraph,
                        "emitter: buffer id out of range");
         }
         const KernelBuffer& b = km.buffers[bid];
-        if (b.isTemp) {
-            return err(ErrorCode::UnsupportedCapability,
-                       "emitter: temp buffers are not supported yet in "
-                       "native artifacts (roadmap; round-17)");
-        }
-        if (!b.isInput && !b.isOutput) {
+        if (!b.isInput && !b.isOutput && !b.isTemp) {
             return err(ErrorCode::InvalidGraph,
                        "emitter: reference to an unbindable buffer "
-                       "(neither input nor output)");
+                       "(neither input, output, nor temp)");
         }
         return ptrName[bid];
     }
@@ -346,20 +344,31 @@ struct CppEmitter {
         if (!ptr.has_value()) {
             return std::unexpected<Error>(ptr.error());
         }
-        if (store.accum == AccumMode::Max) {
-            // Overwriting here would be silently WRONG (the Max store is
-            // a read-modify-write reduction); reject until the native
-            // artifact story for temps/Max lands (round-17 roadmap).
-            return err(ErrorCode::UnsupportedCapability,
-                       "emitter: max-accumulate stores are not supported "
-                       "yet (roadmap; round-17)");
-        }
         std::string target;
         if (multiDim) {
             MLK_TRY_VAR(flat,
                         affine(store.outIndexCoeffs, store.outIndexOffset));
             target = *ptr + "[" + flat + "]";
+            if (store.accum == AccumMode::Max) {
+                // Order-insensitive row-max primitive — the EXACT walker
+                // select (execPair): a NaN value never replaces the
+                // running slot ((NaN > cur) is false), +/-0 ties keep the
+                // current bits. std::max/vmaxsd would break the NaN rule.
+                body += indent() + target + " = (" + value + " > " +
+                        target + ") ? " + value + " : " + target + ";\n";
+                --depth;
+                body += indent() + "}\n";
+                return {};
+            }
         } else {
+            if (store.accum == AccumMode::Max) {
+                // The 1-D executor routes every Max module through the
+                // multi-dim walker; a legacy-form Max never reaches this
+                // emitter (kept as an honest structural rejection).
+                return err(ErrorCode::UnsupportedCapability,
+                           "emitter: max-accumulate stores belong to the "
+                           "multi-dim form (walker parity)");
+            }
             if (varNames.empty()) {
                 return err(ErrorCode::InvalidGraph,
                            "emitter: store outside a loop");
@@ -665,9 +674,12 @@ Result<std::string> emitCppSource(const KernelModule& kernel,
         bool first = true;
         for (uint32_t bid = 0; bid < kernel.buffers.size(); ++bid) {
             const KernelBuffer& b = kernel.buffers[bid];
-            if (!b.isInput && !b.isOutput) continue;
+            if (!b.isInput && !b.isOutput && !b.isTemp) continue;
             if (!first) em.body += ",\n";
-            const bool writable = em.stored[bid] || b.isOutput;
+            // Temps are read-modify-write scratch (Max accumulate reads
+            // the running slot) — always emitted writable.
+            const bool writable =
+                em.stored[bid] || b.isOutput || b.isTemp;
             em.body += std::string("    ") +
                        (writable ? "double* " : "const double* ") +
                        em.ptrName[bid] + ", const int64_t* " +
@@ -715,7 +727,8 @@ Result<std::string> emitCppSource(const KernelModule& kernel,
     if (em.multiDim) {
         for (uint32_t bid = 0; bid < kernel.buffers.size(); ++bid) {
             if (kernel.buffers[bid].isInput ||
-                kernel.buffers[bid].isOutput) {
+                kernel.buffers[bid].isOutput ||
+                kernel.buffers[bid].isTemp) {
                 em.body += "    (void)" + em.dimsName[bid] + ";\n";
             }
         }

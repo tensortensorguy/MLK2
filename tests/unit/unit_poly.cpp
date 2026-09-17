@@ -1824,7 +1824,7 @@ MLK_TEST(poly, full_chain_baseline_to_transformed) {
 
     auto passFn = [&](const char* name) -> mlk::Pass* {
         mlk::Pass* p =
-            mlk::PassRegistry::instance().byName(symbols.intern(name));
+            mlk::PassRegistry::instance().byName(symbols, symbols.intern(name));
         MLK_CHECK(p != nullptr);
         return p;
     };
@@ -1926,7 +1926,7 @@ MLK_TEST(poly, runtime_execute_transformed_gemm) {
 
     mlk::MathGraph g2(&symbols);
     auto passFn = [&](const char* name) -> mlk::Pass* {
-        return mlk::PassRegistry::instance().byName(symbols.intern(name));
+        return mlk::PassRegistry::instance().byName(symbols, symbols.intern(name));
     };
     for (const char* name :
          {"poly.synth", "poly.scop_detect", "poly.dependence",
@@ -2314,7 +2314,7 @@ MLK_TEST(poly, reducesum_synth_pipeline_bitexact) {
 
     mlk::MathGraph g2(&symbols);
     auto passFn = [&](const char* name) -> mlk::Pass* {
-        return mlk::PassRegistry::instance().byName(symbols.intern(name));
+        return mlk::PassRegistry::instance().byName(symbols, symbols.intern(name));
     };
     for (const char* name :
          {"poly.synth", "poly.scop_detect", "poly.dependence",
@@ -3129,7 +3129,7 @@ MLK_TEST(poly, asm_backend_reducesum_bitexact) {
 
     mlk::MathGraph g2(&symbols);
     auto passFn = [&](const char* name) -> mlk::Pass* {
-        return mlk::PassRegistry::instance().byName(symbols.intern(name));
+        return mlk::PassRegistry::instance().byName(symbols, symbols.intern(name));
     };
     for (const char* name :
          {"poly.synth", "poly.scop_detect", "poly.dependence",
@@ -3452,7 +3452,7 @@ MLK_TEST(poly, softmax_synth_pipeline_bitexact) {
 
     mlk::MathGraph g2(&symbols);
     auto passFn = [&](const char* name) -> mlk::Pass* {
-        return mlk::PassRegistry::instance().byName(symbols.intern(name));
+        return mlk::PassRegistry::instance().byName(symbols, symbols.intern(name));
     };
     for (const char* name :
          {"poly.synth", "poly.scop_detect", "poly.dependence",
@@ -3572,8 +3572,7 @@ MLK_TEST(poly, softmax_shapes_k1_edge_bitexact) {
         ctx.kernelOut = &km;
         mlk::MathGraph g(&symbols);
         mlk::passes::registerAllPasses(symbols);
-        auto* synth = mlk::PassRegistry::instance().byName(
-            symbols.intern("poly.synth"));
+        auto* synth = mlk::PassRegistry::instance().byName(symbols, symbols.intern("poly.synth"));
         auto r = synth->run(ctx, g);
         MLK_CHECK(r.has_value() && r->changed);
         if (r.has_value() && r->changed) {
@@ -3687,20 +3686,33 @@ MLK_TEST(poly, max_accumulate_store_semantics) {
     MLK_CHECK(out[2] == 2.5);
 }
 
-MLK_TEST(poly, backend_rejects_softmax_temps) {
-    // Native artifacts have no temp-binding story yet (round-17): both
-    // emitters must REJECT the synthesized softmax module with an
-    // actionable UnsupportedCapability error instead of emitting a
-    // silently wrong artifact (Rule 67).
+MLK_TEST(poly, softmax_native_three_way_bitexact) {
+    // Native temp ABI milestone: the synthesized softmax module (three
+    // materialized temps, Max-accumulate rowmax stores) now runs
+    // THREE-WAY — buffer walker vs C++ artifact vs x86-64 asm artifact
+    // — with bit-exact outputs including the adversarial NaN and +/-0
+    // rows (Rule 90: identical ops in identical order; Rule 43: exact
+    // float equality semantics, bit patterns compared so -0.0 and NaN
+    // payloads count).
     SymbolTable symbols;
+    mlk::DiagnosticEngine diag;
+    mlk::PassContext ctx;
+    ctx.symbols = &symbols;
+    ctx.diag = &diag;
+    ctx.tier = mlk::Tier::Tier2;
+    mlk::poly::PolyWorkspace* ws = mlk::poly::createPolyWorkspace();
+    ctx.polyWorkspace = ws;
+    mlk::passes::registerAllPasses(symbols);
+
+    constexpr int64_t M = 12, K = 8;
     KernelModule km;
     KernelBuffer a;
     a.name = symbols.intern("A");
-    a.dims = SmallVector<int64_t, 4>{4, 4};
+    a.dims = SmallVector<int64_t, 4>{M, K};
     a.isInput = true;
     KernelBuffer y;
     y.name = symbols.intern("Y");
-    y.dims = SmallVector<int64_t, 4>{4, 4};
+    y.dims = SmallVector<int64_t, 4>{M, K};
     y.isOutput = true;
     const uint32_t bufA = km.addBuffer(a);
     const uint32_t bufY = km.addBuffer(y);
@@ -3710,34 +3722,288 @@ MLK_TEST(poly, backend_rejects_softmax_temps) {
     call.bufferA = bufA;
     call.bufferOut = bufY;
     (void)km.addNode(call);
-
-    mlk::PassContext ctx;
-    ctx.symbols = &symbols;
-    ctx.tier = mlk::Tier::Tier2;
-    mlk::poly::PolyWorkspace* ws = mlk::poly::createPolyWorkspace();
-    ctx.polyWorkspace = ws;
     ctx.kernelOut = &km;
-    mlk::MathGraph g(&symbols);
-    mlk::passes::registerAllPasses(symbols);
+
+    const std::size_t n = static_cast<std::size_t>(M * K);
+    SmallVector<double, 8> bufIn(n), walkerY(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+        bufIn[i] = static_cast<double>((i * 13) % 19) * 0.25 - 2.0;
+    }
+    // Adversarial rows (walker rowmax select is order-insensitive but
+    // the engines must still agree bit-for-bit):
+    // row 9: a NaN input never enters the rowmax ((NaN > cur) is
+    // false), poisons exp/sum/div — every engine propagates NaN to the
+    // whole row.
+    bufIn[static_cast<std::size_t>(9 * K + 2)] = std::nan("");
+    // row 10: -0.0 replaces -inf, then +0.0 ties and the CURRENT slot
+    // (-0.0) is kept — the sign bit of the rowmax is observable through
+    // the (v > cur) select only, so outputs must match bit-exactly.
+    for (int64_t k = 0; k < K; ++k) {
+        bufIn[static_cast<std::size_t>(10 * K + static_cast<std::size_t>(
+                                                    k))] =
+            (k % 2 == 0) ? -0.0 : 0.0;
+    }
+    // row 11: the tie-after-negative form (rowmax becomes -0.0 and a
+    // later +0.0 must NOT replace it).
+    bufIn[static_cast<std::size_t>(11 * K)] = -1.0;
+    bufIn[static_cast<std::size_t>(11 * K + 1)] = -0.0;
+    bufIn[static_cast<std::size_t>(11 * K + 2)] = 0.0;
+    bufIn[static_cast<std::size_t>(11 * K + 3)] = -2.0;
+
+    // Baseline execution (Call path) — the oracle the artifacts must
+    // match bit-for-bit after synthesis.
+    {
+        mlk::KernelBufferBindings io;
+        io.inputs.push_back(bufIn.data());
+        io.outputs.push_back(walkerY.data());
+        io.elements = n;
+        auto br = mlk::executeKernelOnBuffers(km, symbols, io, nullptr);
+        MLK_CHECK(br.has_value());
+        if (!br.has_value()) {
+            mlk::poly::destroyPolyWorkspace(ws);
+            return;
+        }
+    }
+
+    // Synthesize: baseline Call -> materialized-temp statement chain.
+    mlk::MathGraph g2(&symbols);
     auto* synth =
-        mlk::PassRegistry::instance().byName(symbols.intern("poly.synth"));
-    auto r = synth->run(ctx, g);
-    MLK_CHECK(r.has_value() && r->changed);
-    if (!r.has_value() || !r->changed) {
+        mlk::PassRegistry::instance().byName(symbols,
+                                             symbols.intern("poly.synth"));
+    auto sr = synth->run(ctx, g2);
+    MLK_CHECK(sr.has_value() && sr->changed);
+    if (!sr.has_value()) {
+        std::fprintf(stderr, "  synth error: %s\n",
+                     sr.error().message.c_str());
+    } else if (!sr->changed) {
+        std::fprintf(stderr, "  synth: no change\n");
+    }
+    if (!sr.has_value() || !sr->changed) {
         mlk::poly::destroyPolyWorkspace(ws);
         return;
     }
-    auto asmR = mlk::emitAsmSource(km, symbols);
-    MLK_CHECK(!asmR.has_value());
-    if (!asmR.has_value()) {
-        MLK_CHECK(asmR.error().code == mlk::ErrorCode::UnsupportedCapability);
+    MLK_CHECK_EQ(km.buffers.size(), std::size_t{5});
+
+    // Walker over the SYNTHESIZED form: the artifact contract to match.
+    SmallVector<double, 8> synthY(n, 0.0);
+    {
+        mlk::KernelBufferBindings io;
+        io.inputs.push_back(bufIn.data());
+        io.outputs.push_back(synthY.data());
+        io.elements = n;
+        auto r = mlk::executeKernelOnBuffers(km, symbols, io, nullptr);
+        MLK_CHECK(r.has_value());
+        if (!r.has_value()) {
+            mlk::poly::destroyPolyWorkspace(ws);
+            return;
+        }
     }
-    auto cppR = mlk::emitCppSource(km, symbols);
-    MLK_CHECK(!cppR.has_value());
-    if (!cppR.has_value()) {
-        MLK_CHECK(cppR.error().code == mlk::ErrorCode::UnsupportedCapability);
+    // Synthesized walker == baseline Call (the differential guarantee).
+    MLK_CHECK(std::memcmp(synthY.data(), walkerY.data(),
+                          n * sizeof(double)) == 0);
+
+    // Native three-way: both artifacts run through the driver, which
+    // materializes the temp scratch exactly like the walker.
+    MLK_CHECK(backendToolchainReady());
+    if (!backendToolchainReady()) {
+        mlk::poly::destroyPolyWorkspace(ws);
+        return;
+    }
+    mlk::BackendDriverConfig cfg;
+    for (const mlk::ArtifactKind kind : {mlk::ArtifactKind::Cpp,
+                                         mlk::ArtifactKind::Asm}) {
+        auto loaded = mlk::buildKernelArtifact(km, symbols, kind, cfg);
+        MLK_CHECK(loaded.has_value());
+        if (!loaded.has_value()) {
+            std::fprintf(stderr, "  emit/kind=%d: %s\n",
+                         static_cast<int>(kind),
+                         loaded.error().message.c_str());
+            mlk::poly::destroyPolyWorkspace(ws);
+            return;
+        }
+        SmallVector<double, 8> nativeY(n, 0.0);
+        mlk::KernelBufferBindings io;
+        io.inputs.push_back(bufIn.data());
+        io.outputs.push_back(nativeY.data());
+        io.elements = n;
+        auto r = loaded->run(km, symbols, io);
+        MLK_CHECK(r.has_value());
+        if (!r.has_value()) {
+            std::fprintf(stderr, "  run/kind=%d: %s\n",
+                         static_cast<int>(kind),
+                         r.error().message.c_str());
+            mlk::poly::destroyPolyWorkspace(ws);
+            return;
+        }
+        // Bit-exact vs the walker (NaN payloads and -0.0 sign bits
+        // included — memcmp, never ==).
+        MLK_CHECK(std::memcmp(nativeY.data(), walkerY.data(),
+                              n * sizeof(double)) == 0);
     }
     mlk::poly::destroyPolyWorkspace(ws);
+}
+
+MLK_TEST(poly, max_accumulate_store_native_bitexact) {
+    // The Max select is directly observable through a temp: S1
+    // accumulates rowmax into temp T (AccumMode::Max), S2 copies T to Y
+    // through the exact passthrough (Sub(x, 0.0) preserves -0.0 and NaN
+    // payloads). The zero-init ABI means the +0.0 slot is the RUNNING
+    // value an adversarial row must beat — pinning the walker select
+    // ((v > cur) ? v : cur) in BOTH artifacts: NaN never replaces,
+    // +/-0 ties keep the current slot's sign bit (std::max/vmaxsd
+    // would flip exactly here).
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{4, 4};
+    a.isInput = true;
+    KernelBuffer yy;
+    yy.name = symbols.intern("Y");
+    yy.dims = SmallVector<int64_t, 4>{4};
+    yy.isOutput = true;
+    KernelBuffer t;
+    t.name = symbols.intern("T");
+    t.dims = SmallVector<int64_t, 4>{4};
+    t.isTemp = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufY = km.addBuffer(yy);
+    const uint32_t bufT = km.addBuffer(t);
+    const SymbolId vm = symbols.intern("m");
+    const SymbolId vk = symbols.intern("k");
+
+    KernelNode loopM;
+    loopM.op = mlk::KernelOp::Loop;
+    loopM.var = vm;
+    loopM.begin = 0;
+    loopM.end = 4;
+    KernelNode loopK;
+    loopK.op = mlk::KernelOp::Loop;
+    loopK.var = vk;
+    loopK.begin = 0;
+    loopK.end = 4;
+    // S0 (init): T[m] = -inf — Add(-inf, 0.0) is the exact constant;
+    // without it the zero-init slot (+0.0) could never go negative and
+    // the +/-0 tie would be unobservable (max only increases).
+    KernelNode initCompute;
+    initCompute.op = mlk::KernelOp::Compute;
+    initCompute.exprs.push_back(KernelExpr{});
+    initCompute.exprs[0].op = mlk::MathOp::Add;
+    initCompute.exprs[0].a.kind = KernelOperand::Kind::Const;
+    initCompute.exprs[0].a.constValue = -INFINITY;
+    initCompute.exprs[0].b.kind = KernelOperand::Kind::Const;
+    initCompute.exprs[0].b.constValue = 0.0;
+    KernelNode initStore;
+    initStore.op = mlk::KernelOp::Store;
+    initStore.bufferOut = bufT;
+    initStore.outIndexCoeffs = SmallVector<int64_t, 4>{1};
+    KernelNode maxCompute;
+    maxCompute.op = mlk::KernelOp::Compute;
+    maxCompute.exprs.push_back(KernelExpr{});
+    maxCompute.exprs[0].op = mlk::MathOp::Sub;
+    maxCompute.exprs[0].a.kind = KernelOperand::Kind::ElemIdx;
+    maxCompute.exprs[0].a.index = static_cast<int64_t>(bufA);
+    maxCompute.exprs[0].a.idxCoeffs = SmallVector<int64_t, 4>{4, 1};
+    maxCompute.exprs[0].b.kind = KernelOperand::Kind::Const;
+    maxCompute.exprs[0].b.constValue = 0.0;  // exact identity
+    KernelNode maxStore;
+    maxStore.op = mlk::KernelOp::Store;
+    maxStore.bufferOut = bufT;
+    maxStore.outIndexCoeffs = SmallVector<int64_t, 4>{1, 0};
+    maxStore.accum = mlk::AccumMode::Max;
+    KernelNode copyCompute;
+    copyCompute.op = mlk::KernelOp::Compute;
+    copyCompute.exprs.push_back(KernelExpr{});
+    copyCompute.exprs[0].op = mlk::MathOp::Sub;
+    copyCompute.exprs[0].a.kind = KernelOperand::Kind::ElemIdx;
+    copyCompute.exprs[0].a.index = static_cast<int64_t>(bufT);
+    copyCompute.exprs[0].a.idxCoeffs = SmallVector<int64_t, 4>{1};
+    copyCompute.exprs[0].b.kind = KernelOperand::Kind::Const;
+    copyCompute.exprs[0].b.constValue = 0.0;  // exact identity
+    KernelNode copyStore;
+    copyStore.op = mlk::KernelOp::Store;
+    copyStore.bufferOut = bufY;
+    copyStore.outIndexCoeffs = SmallVector<int64_t, 4>{1};
+    {
+        const uint32_t ic = km.addNode(initCompute);
+        const uint32_t is = km.addNode(initStore);
+        const uint32_t lc = km.addNode(maxCompute);
+        const uint32_t ls = km.addNode(maxStore);
+        loopK.children.push_back(lc);
+        loopK.children.push_back(ls);
+        const uint32_t lk = km.addNode(loopK);
+        const uint32_t cc = km.addNode(copyCompute);
+        const uint32_t cs = km.addNode(copyStore);
+        loopM.children.push_back(ic);
+        loopM.children.push_back(is);
+        loopM.children.push_back(lk);
+        loopM.children.push_back(cc);
+        loopM.children.push_back(cs);
+        (void)km.addNode(loopM);
+    }
+
+    // Inputs (explicit -inf init band, mirroring the softmax synth's
+    // S0; the walker + both artifacts must agree bit-for-bit):
+    // row 0: 1.0 then 2.0 win; NaN and -0.0 never replace  -> 2.0
+    // row 1: all-NaN: the -inf init survives               -> -inf
+    // row 2: -1.0 replaces, then the +/-0 pair: -0.0
+    //        replaces -1.0, +0.0 does NOT replace -0.0     -> -0.0
+    // row 3: 1.0 wins                                      -> 1.0
+    SmallVector<double, 8> in{
+        1.0, std::nan(""), -0.0, 2.0,          // row 0
+        std::nan(""), std::nan(""), std::nan(""),
+        std::nan(""),                          // row 1
+        -1.0, -0.0, 0.0, -2.0,                 // row 2
+        0.5, 0.25, 1.0, -8.0                   // row 3
+    };
+    SmallVector<double, 8> walkerY(4, -99.0);
+    {
+        mlk::KernelBufferBindings io;
+        io.inputs.push_back(in.data());
+        io.outputs.push_back(walkerY.data());
+        io.elements = 4;
+        auto r = mlk::executeKernelOnBuffers(km, symbols, io, nullptr);
+        MLK_CHECK(r.has_value());
+        if (!r.has_value()) return;
+    }
+    // Walker semantics (also documents the contract for the artifacts):
+    const double expected[4] = {2.0, -INFINITY, -0.0, 1.0};
+    for (int64_t m = 0; m < 4; ++m) {
+        MLK_CHECK(std::memcmp(&walkerY[static_cast<std::size_t>(m)],
+                              &expected[m], sizeof(double)) == 0);
+    }
+
+    // Native three-way.
+    MLK_CHECK(backendToolchainReady());
+    if (!backendToolchainReady()) return;
+    mlk::BackendDriverConfig cfg;
+    for (const mlk::ArtifactKind kind : {mlk::ArtifactKind::Cpp,
+                                         mlk::ArtifactKind::Asm}) {
+        auto loaded = mlk::buildKernelArtifact(km, symbols, kind, cfg);
+        MLK_CHECK(loaded.has_value());
+        if (!loaded.has_value()) {
+            std::fprintf(stderr, "  emit/kind=%d: %s\n",
+                         static_cast<int>(kind),
+                         loaded.error().message.c_str());
+            return;
+        }
+        SmallVector<double, 8> nativeY(4, -99.0);
+        mlk::KernelBufferBindings io;
+        io.inputs.push_back(in.data());
+        io.outputs.push_back(nativeY.data());
+        io.elements = 4;
+        auto r = loaded->run(km, symbols, io);
+        MLK_CHECK(r.has_value());
+        if (!r.has_value()) {
+            std::fprintf(stderr, "  run/kind=%d: %s\n",
+                         static_cast<int>(kind),
+                         r.error().message.c_str());
+            return;
+        }
+        // memcmp: -0.0 vs +0.0 (and NaN payloads) MUST count.
+        MLK_CHECK(std::memcmp(nativeY.data(), walkerY.data(),
+                              4 * sizeof(double)) == 0);
+    }
 }
 
 MLK_TEST_MAIN("poly")

@@ -49,7 +49,7 @@ MLK_TEST(calculus, derivative_of_x_squared) {
     MLK_CHECK(d.has_value());
     b.output(*d);
     auto pass = mlk::PassRegistry::instance().byName(
-        env.symbols.intern("calculus.derivative_symbolic"));
+        env.symbols, env.symbols.intern("calculus.derivative_symbolic"));
     MLK_CHECK(pass != nullptr);
     auto r = pass->run(env.ctx, b.graph());
     MLK_CHECK(r.has_value());
@@ -74,7 +74,7 @@ MLK_TEST(calculus, derivative_of_sin) {
     MLK_CHECK(d.has_value());
     b.output(*d);
     auto pass = mlk::PassRegistry::instance().byName(
-        env.symbols.intern("calculus.derivative_symbolic"));
+        env.symbols, env.symbols.intern("calculus.derivative_symbolic"));
     MLK_CHECK(pass->run(env.ctx, b.graph()).has_value());
     mlk::SmallVector<double, 8> inputs{0.0};
     auto out = mlk::interpretGraph(b.graph(), inputs);
@@ -100,7 +100,7 @@ MLK_TEST(calculus, derivative_of_product_rule) {
     MLK_CHECK(d.has_value());
     b.output(*d);
     auto pass = mlk::PassRegistry::instance().byName(
-        env.symbols.intern("calculus.derivative_symbolic"));
+        env.symbols, env.symbols.intern("calculus.derivative_symbolic"));
     MLK_CHECK(pass->run(env.ctx, b.graph()).has_value());
     mlk::SmallVector<double, 8> inputs{1.0};
     auto out = mlk::interpretGraph(b.graph(), inputs);
@@ -123,7 +123,7 @@ MLK_TEST(calculus, capability_gate_blocks_derivatives) {
     MLK_CHECK(d.has_value());
     b.output(*d);
     auto pass = mlk::PassRegistry::instance().byName(
-        env.symbols.intern("calculus.derivative_symbolic"));
+        env.symbols, env.symbols.intern("calculus.derivative_symbolic"));
     auto r = pass->run(env.ctx, b.graph());
     MLK_CHECK(!r.has_value());
     MLK_CHECK_EQ(r.error().code, mlk::ErrorCode::UnsupportedCapability);

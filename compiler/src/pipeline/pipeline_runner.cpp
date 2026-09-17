@@ -190,7 +190,8 @@ Result<PassResult> PipelineRunner::run(Tier tier, PassContext& baseCtx,
         if (baseCtx.cancel != nullptr && baseCtx.cancel->cancelled()) {
             return err(ErrorCode::Cancelled, "pipeline cancelled", 132);
         }
-        Pass* pass = PassRegistry::instance().byName(nameId);
+        Pass* pass =
+            PassRegistry::instance().byName(symbols_, nameId);
         if (pass == nullptr) {
             return err(ErrorCode::Unimplemented,
                        "pipeline references unregistered pass: " +
@@ -207,7 +208,7 @@ Result<PassResult> PipelineRunner::run(Tier tier, PassContext& baseCtx,
         }
         // Contract tier check (Rule 142).
         const PassContract* contract =
-            PassRegistry::instance().contractByName(nameId);
+            PassRegistry::instance().contractByName(symbols_, nameId);
         if (contract != nullptr) {
             bool tierOk = false;
             for (const Tier t : contract->supportedTiers) {

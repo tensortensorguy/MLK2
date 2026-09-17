@@ -33,7 +33,7 @@ public:
             for (const char* subName : kSubPasses) {
                 const SymbolId sid = ctx.symbols->intern(subName);
                 if (ctx.killed(sid)) continue;
-                Pass* sub = PassRegistry::instance().byName(sid);
+                Pass* sub = PassRegistry::instance().byName(*(ctx.symbols), sid);
                 if (sub == nullptr) {
                     return err(ErrorCode::Internal,
                                std::string(subName) + " not registered");

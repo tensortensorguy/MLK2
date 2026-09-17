@@ -352,7 +352,8 @@ reference order the synthesized chain replays.
   untiled schedule — the tile-part replay and stack-absolute point
   bounds), and the SOFTMAX synthesis class (pipeline + K==1/shape sweep,
   Max-accumulate store semantics incl. the NaN/±0 select rules, and the
-  native-artifact temp rejection).
+  native THREE-WAY temp ABI — walker / C++ artifact / assembly artifact
+  bit-exact on adversarial NaN and ±0 rows).
 - Differential (Rules 43/85/90): the transformed GEMM executes over dense
   buffers and matches a straightforward reference (bit-exact for the
   no-reassociation class; accumulation order per output cell preserved).
@@ -391,12 +392,27 @@ buffer-dim bounds), ElemIdx affine addressing, accumulate stores,
 affine-equality guards, temp chains (cap = the executor's 64 slots),
 and the legacy 1-D form are all supported; multi-dim artifacts check
 store-address sign at runtime and report a nonzero ABI code where the
-walker raises InvalidGraph (the driver maps it back). Temp buffers and
-Max-accumulate stores are NOT yet realizable in native artifacts: both
-emitters reject them with an actionable UnsupportedCapability error
-(`backend_rejects_softmax_temps`) instead of emitting a silently wrong
-artifact — the softmax class keeps running through the buffer walker
-(roadmap: temp-binding ABI extension, round 17). The verified
+walker raises InvalidGraph (the driver maps it back).
+
+**Native temp ABI (multi-dim form).** Temp scratch is part of the
+BINDABLE TABLE: every `isTemp` buffer contributes a `(ptr, dims)` pair
+in table order, exactly like an output. The DRIVER materializes the
+scratch — one zero-initialized allocation per temp with the walker's
+element-count model and the SAME `kKernelTempElementsLimit` guard
+(hoisted to constants.h so walker and driver read one constant) — and
+the storage outlives the call. Max-accumulate stores emit the walker's
+EXACT select `(value > cur) ? value : cur`: the C++ artifact emits the
+ternary verbatim; the assembly artifact emits
+`comisd` + `jbe`-guarded store (unordered/NaN and <= all set CF|ZF, so
+`jbe` keeps the running slot — `vmaxsd` would break the NaN rule).
+The softmax class therefore runs THREE-WAY bit-exact (buffer walker /
+C++ artifact / x86-64 assembly artifact), including the adversarial
+NaN and +/-0 rows that pin the select semantics
+(`softmax_native_three_way_bitexact`,
+`max_accumulate_store_native_bitexact`). The legacy 1-D form keeps
+rejecting temps/Max structurally (the 1-D executor routes every such
+module through the multi-dim walker; a legacy-form temp or Max never
+reaches the emitters). The verified
 "poly7" Sin family (math_families.h certificate) emits LOCAL helper
 routines in the assembly artifact — Cody-Waite quadrant reduction and
 degree-13 minimax Horner residuals mirrored OPERATION FOR OPERATION
@@ -549,11 +565,6 @@ cache reuse + invalidation).
   kernel whose phases must complete per region before the next starts.
   Requires per-statement loop bounds in codegen (the min/max-of-affine
   forms CLAST emits) alongside the piecewise split.
-- Native artifacts for temp buffers + Max-accumulate stores: a
-  temp-binding ABI extension (the driver materializes scratch exactly
-  like the walker) and the compare/select sequence mirroring the
-  walker's Max store in both emitters — then the softmax class runs
-  three-way bit-exact like GEMM.
 - Full Pluto ILP locality objective over all rows simultaneously (the
   order search composes exact per-row scores; an ILP with memory-reuse
   terms could weight fusion across nests beyond the carried-distance
@@ -561,7 +572,9 @@ cache reuse + invalidation).
 - Parametric SCoPs (symbolic dims with runtime guards) — currently
   requires constant bounds after workload specialization.
 - Multi-input elementwise synthesis classes beyond softmax; >2-input
-  elementwise (temp materialization infrastructure now exists).
+  elementwise (temp materialization infrastructure now exists, and the
+  native temp ABI makes synthesized temps first-class artifact
+  citizens).
 - Multiple SCoP regions per kernel.
 - Per-statement loop-bound generalization: fused statements currently
   share the intersection of their pivot bounds (the synth classes agree;

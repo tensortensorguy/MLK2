@@ -19,7 +19,7 @@ public:
         // 2x sin(x) + x² cos(x) -> x(2 sin(x) + x cos(x)) form is e-graph
         // territory; here we fold/sort/eliminate identities).
         Pass* canonicalize =
-            PassRegistry::instance().byName(ctx.symbols->intern("math.canonicalize"));
+            PassRegistry::instance().byName(*(ctx.symbols), ctx.symbols->intern("math.canonicalize"));
         if (canonicalize == nullptr) {
             return err(ErrorCode::Internal, "math.canonicalize not registered");
         }

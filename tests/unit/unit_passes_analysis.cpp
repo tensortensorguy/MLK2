@@ -30,7 +30,7 @@ struct Env {
         ctx.symbols = &symbols;
     }
     mlk::Pass* pass(const char* name) {
-        return mlk::PassRegistry::instance().byName(symbols.intern(name));
+        return mlk::PassRegistry::instance().byName(symbols, symbols.intern(name));
     }
 };
 }  // namespace

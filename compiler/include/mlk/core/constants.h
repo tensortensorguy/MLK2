@@ -91,6 +91,12 @@ inline constexpr std::array<int64_t, 3> kVectorWidthChoices{4, 8, 16};
 // --- Kernel/KernelIR --------------------------------------------------------
 inline constexpr int64_t kKernelLoopDynamicBound = -1;
 inline constexpr std::size_t kKernelMaxFusionDepth = 32;
+/// Upper bound on ONE temp buffer's element count (DoS guard for
+/// executor-allocated scratch; 16M doubles = 128 MiB). The buffer walker
+/// and the native-artifact driver BOTH materialize isTemp scratch and
+/// must read the SAME limit (the artifact is the compiled form of the
+/// same contract — docs/polyhedral_spec.md #backend).
+inline constexpr int64_t kKernelTempElementsLimit = 1 << 24;
 
 // --- Polyhedral engine (mlk_poly; see docs/polyhedral_spec.md) ---------------
 /// Maximum loop dimensions per SCoP statement (Rule 10: bounded passes).

@@ -2,6 +2,7 @@
 #include "mlk/pass/pass_registry.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace mlk {
 
@@ -33,7 +34,14 @@ PassRegistry& PassRegistry::instance() {
 }
 
 void PassRegistry::add(PassContract contract, Pass* pass) {
-    entries_.push_back(Entry{std::move(contract), pass});
+    Entry e;
+    e.contract = std::move(contract);
+    e.pass = pass;
+    // Textual identity is captured at registration (Rule 16: passes
+    // carry text). The contract's SymbolId is table-scoped and is NOT
+    // used for resolution — only for deterministic iteration order.
+    e.nameText = pass != nullptr ? pass->nameText() : nullptr;
+    entries_.push_back(std::move(e));
     // Deterministic ordering by name id (interning is deterministic per
     // table; Rule 143).
     std::sort(entries_.begin(), entries_.end(),
@@ -42,16 +50,25 @@ void PassRegistry::add(PassContract contract, Pass* pass) {
               });
 }
 
-Pass* PassRegistry::byName(SymbolId name) {
+Pass* PassRegistry::byName(const SymbolTable& symbols, SymbolId name) {
+    if (name == kInvalidSymbolId) return nullptr;
+    const std::string text = symbols.text(name);
     for (auto& e : entries_) {
-        if (e.contract.name == name) return e.pass;
+        if (e.nameText != nullptr && std::strcmp(e.nameText, text.c_str()) == 0) {
+            return e.pass;
+        }
     }
     return nullptr;
 }
 
-const PassContract* PassRegistry::contractByName(SymbolId name) const {
+const PassContract* PassRegistry::contractByName(
+    const SymbolTable& symbols, SymbolId name) const {
+    if (name == kInvalidSymbolId) return nullptr;
+    const std::string text = symbols.text(name);
     for (const auto& e : entries_) {
-        if (e.contract.name == name) return &e.contract;
+        if (e.nameText != nullptr && std::strcmp(e.nameText, text.c_str()) == 0) {
+            return &e.contract;
+        }
     }
     return nullptr;
 }

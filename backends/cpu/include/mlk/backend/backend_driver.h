@@ -37,6 +37,11 @@
 // input buffers bind io.inputs[bid]; output buffers bind
 // io.outputs[bid - io.inputs.size()]; the dims arrays are the module's
 // own logical dims (the executor trusts the binder — kernel_abi.md).
+// TEMP buffers (multi-dim temp ABI) are NOT caller-bound: run()
+// materializes them exactly like the buffer walker — one
+// zero-initialized allocation per isTemp buffer (walker element-count
+// model, kKernelTempElementsLimit) — and passes them as (ptr, dims)
+// table entries in table order.
 // The dispatch covers up to 8 bindable buffers (+ scalars = 18 flat
 // arguments); larger modules are rejected honestly, not mis-invoked.
 #pragma once
