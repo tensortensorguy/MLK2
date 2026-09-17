@@ -801,12 +801,17 @@ obtainNativeKernel(const KernelModule& kernel, SymbolTable& symbols,
     std::string libPath;
     if (caching) {
         // The cache ROOT is this layer's responsibility (the driver
-        // creates only the per-fingerprint leaf directory).
-        if (::mkdir(config.cacheDir.c_str(), 0755) != 0 &&
-            errno != EEXIST) {
+        // creates only the per-fingerprint leaf). The root itself may
+        // be nested under a not-yet-existing base (fresh checkout,
+        // fresh --cache-dir): createDirs walks the full parent chain —
+        // a single-level mkdir here turned every first run without
+        // pre-existing leftovers into a spurious IoError.
+        if (auto rootMade = mlk::createDirs(config.cacheDir);
+            !rootMade.has_value()) {
             return err(ErrorCode::IoError,
                        "fastkernel: cannot create cache dir: " +
-                           config.cacheDir);
+                           config.cacheDir + " — " +
+                           rootMade.error().message);
         }
         cacheDirName = joinPathLocal(config.cacheDir, "fk-" + fp);
         libPath = joinPathLocal(cacheDirName, "libmlk_kernel.so");

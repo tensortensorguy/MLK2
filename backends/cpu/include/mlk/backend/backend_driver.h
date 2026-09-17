@@ -72,6 +72,14 @@ struct BackendDriverConfig {
 /// every other failure is an error, never a silent skip).
 [[nodiscard]] bool toolchainAvailable(const BackendDriverConfig& config);
 
+/// Creates `path` and every missing parent (mkdir -p semantics; 0755).
+/// A missing PARENT chain is a normal first-run state (fresh checkout,
+/// fresh --cache-dir), not an error — a single-level mkdir there fails
+/// with ENOENT and would make every cache/workdir operation depend on
+/// pre-existing directory leftovers. Idempotent: an existing directory
+/// is success.
+[[nodiscard]] Result<void> createDirs(const std::string& path);
+
 /// A compiled artifact loaded into this process. Owns the dlopen handle
 /// (closed on destruction / reassignment; move-only).
 class LoadedKernel {

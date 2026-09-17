@@ -129,9 +129,9 @@ void callLegacy(void* fn, Args... args) {
             base = joinPath(cwd, "mlk_backend_work");
         }
     }
-    if (::mkdir(base.c_str(), 0755) != 0 && errno != EEXIST) {
-        return err(ErrorCode::IoError,
-                   "driver: cannot create workdir base: " + base);
+    auto baseMade = createDirs(base);
+    if (!baseMade.has_value()) {
+        return std::unexpected<Error>(baseMade.error());
     }
     std::string templ = joinPath(base, "mlkart-XXXXXX");
     std::vector<char> buf(templ.begin(), templ.end());
@@ -273,6 +273,48 @@ bool toolchainAvailable(const BackendDriverConfig& config) {
 #endif
 }
 
+Result<void> createDirs(const std::string& path) {
+    if (path.empty()) {
+        return err(ErrorCode::InvalidArgument,
+                   "driver: createDirs called with an empty path");
+    }
+    // mkdir one component; an existing entry must be a DIRECTORY (a
+    // regular file blocking any component of the chain is an error,
+    // never a silent pass-through).
+    const auto ensureDir = [](const std::string& p) -> Result<void> {
+        if (::mkdir(p.c_str(), 0755) == 0) {
+            return {};
+        }
+        struct ::stat st{};
+        if (errno == EEXIST) {
+            if (::stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+                return {};
+            }
+            return err(ErrorCode::IoError,
+                       "driver: not a directory: " + p);
+        }
+        return err(ErrorCode::IoError,
+                   "driver: cannot create directory " + p + ": " +
+                       std::string(std::strerror(errno)));
+    };
+    // Walk the chain creating every missing component (mkdir -p
+    // semantics). Slash-only components (absolute root, doubled or
+    // trailing slashes) are not components and are skipped.
+    std::size_t pos = 0;
+    while (pos < path.size()) {
+        std::size_t next = path.find('/', pos);
+        if (next == std::string::npos) next = path.size();
+        if (next > pos) {
+            if (auto made = ensureDir(path.substr(0, next));
+                !made.has_value()) {
+                return made;
+            }
+        }
+        pos = next + 1;
+    }
+    return {};
+}
+
 LoadedKernel::~LoadedKernel() {
 #if !defined(_WIN32)
     if (handle_ != nullptr) {
@@ -319,11 +361,11 @@ Result<LoadedKernel> buildKernelArtifactInDir(
     if (!source.has_value()) {
         return std::unexpected<Error>(source.error());
     }
-    // Stage 2: pin the artifact directory (created 0755 if missing; the
-    // cache layer owns the per-fingerprint naming).
-    if (::mkdir(artifactDir.c_str(), 0755) != 0 && errno != EEXIST) {
-        return err(ErrorCode::IoError,
-                   "driver: cannot create artifact dir: " + artifactDir);
+    // Stage 2: pin the artifact directory (created with its parent
+    // chain; the cache layer owns the per-fingerprint naming).
+    auto dirMade = createDirs(artifactDir);
+    if (!dirMade.has_value()) {
+        return std::unexpected<Error>(dirMade.error());
     }
     // Stage 3: write.
     const bool isAsm = kind == ArtifactKind::Asm;

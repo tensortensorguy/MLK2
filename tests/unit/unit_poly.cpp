@@ -10,7 +10,12 @@
 #include "mlk/backend/backend_driver.h"
 
 #include <cmath>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "mlk_test.h"
 
@@ -2666,6 +2671,67 @@ bool backendToolchainReady() {
         return mlk::toolchainAvailable(cfg);
     }();
     return ready;
+}
+
+// ---------------------------------------------------------------------------
+// createDirs (driver): the recursive mkdir -p behind the workdir base,
+// the artifact dir, and the fast-kernel cache root. A fresh checkout or
+// a fresh --cache-dir has NO pre-existing parent chain — the previous
+// single-level mkdir turned that perfectly normal first-run state into
+// a spurious IoError for every nested path (the cache tests only passed
+// on machines carrying build leftovers, breaking fresh CI runs).
+// ---------------------------------------------------------------------------
+
+MLK_TEST(poly, create_dirs_recursive_semantics) {
+    // Run-unique root under the cwd (ctest's build tree — never /tmp,
+    // matching the driver's own workdir policy).
+    const std::string base =
+        std::string("./fk_createDirs_test-") +
+        std::to_string(static_cast<long long>(
+            ::std::chrono::steady_clock::now().time_since_epoch().count()));
+    const std::string deep = base + "/a/b/c";
+    const auto isDir = [](const std::string& p) {
+        struct ::stat st {};
+        return ::stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+    };
+
+    // 1. A missing multi-level chain is created whole.
+    auto made = mlk::createDirs(deep);
+    MLK_CHECK(made.has_value());
+    MLK_CHECK(isDir(deep));
+    MLK_CHECK(isDir(base + "/a/b"));
+
+    // 2. Idempotent: an existing chain is success, not an error.
+    auto again = mlk::createDirs(deep);
+    MLK_CHECK(again.has_value());
+
+    // 3. An empty path is an honest InvalidArgument, never a silent ok.
+    auto empty = mlk::createDirs("");
+    MLK_CHECK(!empty.has_value());
+
+    // 4. A regular file blocking a chain component is an ERROR — EEXIST
+    // on a non-directory must not pass for success.
+    const std::string blocked = base + "/f";
+    FILE* blocker = ::std::fopen(blocked.c_str(), "wb");
+    MLK_CHECK(blocker != nullptr);
+    if (blocker != nullptr) {
+        ::std::fclose(blocker);
+        auto throughFile = mlk::createDirs(blocked + "/sub");
+        MLK_CHECK(!throughFile.has_value());
+    }
+
+    // 5. Trailing-slash form terminates at the same directory.
+    auto slash = mlk::createDirs(base + "/t/");
+    MLK_CHECK(slash.has_value());
+    MLK_CHECK(isDir(base + "/t"));
+
+    // Best-effort cleanup: the test leaves nothing behind on success.
+    ::rmdir((base + "/t").c_str());
+    ::remove(blocked.c_str());
+    ::rmdir((base + "/a/b/c").c_str());
+    ::rmdir((base + "/a/b").c_str());
+    ::rmdir((base + "/a").c_str());
+    ::rmdir(base.c_str());
 }
 
 /// The full-chain GEMM module (scop -> dependences -> schedule ->
