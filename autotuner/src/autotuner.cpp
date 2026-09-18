@@ -7,6 +7,7 @@
 
 #include "mlk/cost/cost_model.h"
 #include "mlk/ir/graph_hash.h"
+#include "mlk/pipeline/pipeline_runner.h"
 #include "mlk/runtime/execution.h"
 
 namespace mlk {
@@ -141,21 +142,101 @@ SearchSpace Autotuner::buildSpace(const MathGraph& graph) const {
     return sp;
 }
 
+Result<KernelModule> Autotuner::compileCandidate(
+    const MathGraph& graph, const TuningContext& ctx,
+    const OpenHashMap<SymbolId, int64_t>& params) const {
+    // The previous implementation "verified" and "measured" an EMPTY
+    // KernelModule{}: executeKernel re-ran the interpreter, so verification
+    // compared the interpreter against itself and every measurement was
+    // noise around one fixed workload (Rule 58 violation). Candidates are
+    // now compiled through the Tier-1 pipeline and executed as real
+    // KernelModules.
+    MathGraph candidate = graph;  // Rule 13: the pipeline mutates its copy
+
+    const SymbolId vwAttr = symbols_.intern("vector_width");
+    const SymbolId tmAttr = symbols_.intern("tile_m");
+    const SymbolId tnAttr = symbols_.intern("tile_n");
+    const SymbolId tkAttr = symbols_.intern("tile_k");
+    const int64_t* vw = params.find(vwAttr);
+    const int64_t* tm = params.find(tmAttr);
+    const int64_t* tn = params.find(tnAttr);
+    const int64_t* tk = params.find(tkAttr);
+    for (Node& node : candidate.nodesRef()) {
+        if (node.flags.test(NodeFlag::Dead)) continue;
+        auto appendI64 = [&](SymbolId name, int64_t value) {
+            for (const Attr& a : node.attrs) {
+                if (a.name == name) return;  // keep existing schedule attrs
+            }
+            if (node.attrs.size() >= kMaxAttrsPerNode) return;
+            Attr a;
+            a.name = name;
+            a.value = AttrValue{value};
+            node.attrs.push_back(a);
+        };
+        if (vw != nullptr) appendI64(vwAttr, *vw);
+        if (node.op == MathOp::MatMul) {
+            if (tm != nullptr) appendI64(tmAttr, *tm);
+            if (tn != nullptr) appendI64(tnAttr, *tn);
+            if (tk != nullptr) appendI64(tkAttr, *tk);
+        }
+    }
+
+    KernelModule kernel;
+    DiagnosticEngine diag;
+    PipelineRunner runner(symbols_, &telemetry_);
+    PassContext ctxPass;
+    MathDomainProfile defaultProfile;
+    defaultProfile.name = symbols_.intern("scalar_f64");
+    defaultProfile.capabilities.set(mlk::Capability::HasNumericValues);
+    defaultProfile.capabilities.set(mlk::Capability::HasFloatingPoint);
+    ctxPass.domainProfile =
+        ctx.profile != nullptr ? ctx.profile : &defaultProfile;
+    ctxPass.accuracy = ctx.accuracy;  // null is fine for the Tier-1 set
+    ctxPass.diag = &diag;
+    ctxPass.telemetry = &telemetry_;
+    ctxPass.symbols = &symbols_;
+    ctxPass.tier = Tier::Tier1;
+    ctxPass.kernelOut = &kernel;
+    MLK_TRY_VAR(result, runner.run(Tier::Tier1, ctxPass, candidate, &kernel));
+    (void)result;
+    if (diag.hasErrors()) {
+        return err(ErrorCode::VerificationFailed,
+                   "candidate compilation produced diagnostics (Rule 58)",
+                   58);
+    }
+    // Executor-consumable params the lowering does not copy: the parallel
+    // knob drives decideThreads through the "threads" schedule param.
+    const int64_t* parallel = params.find(symbols_.intern("parallel"));
+    if (parallel != nullptr && *parallel >= 1) {
+        (void)kernel.scheduleParams.findOrInsert(
+            symbols_.intern("threads"), nullptr, *parallel);
+    }
+    return kernel;
+}
+
 Result<bool> Autotuner::verifyCandidate(const MathGraph& graph,
                                         const TuningContext& ctx,
                                         const TuningCandidate& cand) const {
-    // Rule 58: correctness precedes benchmarking — compare candidate output
-    // against the Tier 0 oracle on seeded inputs within the contract.
-    (void)cand;
+    // Rule 58: correctness precedes benchmarking — compile the CANDIDATE
+    // config and compare its kernel execution against the Tier 0 oracle on
+    // seeded inputs within the contract. Scalar-ABI only today: a kernel
+    // with input buffers (tensor graphs) is rejected by executeKernel and
+    // surfaces here as a structured error, never as a fabricated win.
     SmallVector<double, 8> inputs;
     for (std::size_t i = 0; i < 8; ++i) inputs.push_back(sampleInput(i + 1));
     MLK_TRY_VAR(oracle, interpretGraph(graph, inputs));
-    MLK_TRY_VAR(tier1, executeKernel(KernelModule{}, graph, inputs, nullptr));
+    const OpenHashMap<SymbolId, int64_t> params = space_.realize(cand.config);
+    MLK_TRY_VAR(kernel, compileCandidate(graph, ctx, params));
+    MLK_TRY_VAR(got,
+                executeKernel(kernel, graph, inputs, nullptr, symbols_));
+    if (got.outputScalars.size() != oracle.outputScalars.size()) {
+        return false;
+    }
     const double tol =
         ctx.accuracy != nullptr ? ctx.accuracy->maxRelError : 1e-9;
     for (std::size_t i = 0; i < oracle.outputScalars.size(); ++i) {
         const double a = oracle.outputScalars[i];
-        const double b = tier1.outputScalars[i];
+        const double b = got.outputScalars[i];
         if (std::fabs(a - b) > tol * (1.0 + std::fabs(a))) return false;
     }
     return true;
@@ -164,20 +245,25 @@ Result<bool> Autotuner::verifyCandidate(const MathGraph& graph,
 Result<BenchmarkMeasurement> Autotuner::measureCandidate(
     const MathGraph& graph, const TuningContext& ctx,
     const TuningCandidate& cand) const {
-    (void)cand;
+    // Time the CANDIDATE'S KERNEL (previously: the interpreter was timed
+    // identically for every config, so the "winner" was pure noise).
+    // Compile once outside the timing loop; every rep executes the real
+    // KernelModule through the same scalar ABI the engine uses.
     BenchmarkMeasurement m;
     m.reps = ctx.protocol.reps;
     SmallVector<double, 8> inputs;
     for (std::size_t i = 0; i < 8; ++i) inputs.push_back(sampleInput(i + 7));
+    const OpenHashMap<SymbolId, int64_t> params = space_.realize(cand.config);
+    MLK_TRY_VAR(compiled, compileCandidate(graph, ctx, params));
     SmallVector<double, 64> samples;
     for (uint32_t r = 0; r < ctx.protocol.warmup + ctx.protocol.reps; ++r) {
         const double t0 = nowMs();
-        auto run = interpretGraph(graph, inputs);
+        auto run = executeKernel(compiled, graph, inputs, nullptr, symbols_);
+        const double t1 = nowMs();
         if (!run.has_value()) {
             return err(ErrorCode::VerificationFailed,
                        "candidate failed during measurement (Rule 58)", 58);
         }
-        const double t1 = nowMs();
         if (r >= ctx.protocol.warmup) samples.push_back(t1 - t0);
     }
     if (samples.empty()) {

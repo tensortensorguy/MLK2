@@ -60,8 +60,12 @@ public:
     /// current tier keeps executing; installation is atomic.
     void requestAsyncCompile(CompileInputs inputs);
 
-    /// Executes: Tier 0 interpreter for tier==Tier0 or when no kernel is
-    /// installed yet; otherwise the kernel executor (with Tier 0 fallback).
+    /// Executes: Tier 0 interpreter for tier==Tier0; otherwise compiles the
+    /// requested tier ON DEMAND when no matching kernel is installed
+    /// (cold-start tiering; Rule 139: sync path for one-shot callers —
+    /// Rule 11's background tier-up remains available via
+    /// requestAsyncCompile), executes the kernel, and falls back to
+    /// Tier 0 on any failure (Rule 102/115, telemetry recorded).
     /// `inputScalars` binds placeholders/variables in value-id order
     /// (documented ABI order; see kernel_abi.md).
     [[nodiscard]] Result<ExecutionResult> execute(
@@ -94,12 +98,17 @@ private:
 [[nodiscard]] Result<ExecutionResult> interpretGraph(
     const MathGraph& graph, const SmallVector<double, 8>& inputScalars);
 
-/// Kernel executor (CPU): tree-walks a KernelModule over buffers. No dynamic
-/// codegen (see docs/kernel_abi.md for the W^X publication note).
+/// Kernel executor (CPU): binds the scalar ABI (inputs as scalar params in
+/// value-id order, one dense f64 slot per kernel output buffer), runs the
+/// module through executeKernelOnBuffers, and reads the outputs back.
+/// Tensor kernels (input buffers) are rejected — they need real buffer
+/// bindings (executeKernelOnBuffers); callers fall back to Tier 0
+/// (Rule 102/115). `symbols` must be the table the kernel was built with
+/// (schedule params and implementation families are interned ids).
 [[nodiscard]] Result<ExecutionResult> executeKernel(
     const KernelModule& kernel, const MathGraph& graph,
-    const SmallVector<double, 8>& inputScalars,
-    CancellationToken* cancel);
+    const SmallVector<double, 8>& inputScalars, CancellationToken* cancel,
+    SymbolTable& symbols);
 
 /// --- Buffer-level kernel ABI (docs/kernel_abi.md) -------------------------
 /// Raw element-buffer bindings for tensor kernels. Inputs are bound in

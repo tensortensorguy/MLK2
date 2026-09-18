@@ -274,6 +274,15 @@ struct LexState {
 
 /// Enumerates candidates in lex order; first integer-verified assignment
 /// wins (see int_set.h soundness contract).
+///
+/// Residual invariant: `residual` references only dims >= prefix.size().
+/// Each recursion level SUBSTITUTES x_depth = cand into every row
+/// (constant += coeff*cand, coeff := 0) instead of appending an equality
+/// row — appending alone leaves the prefix var live in sibling rows, and
+/// the univariate interval extraction below would then silently read a
+/// coupled row like (i - j >= 0) as (-j >= 0), returning wrong optima
+/// (e.g. lexmax{0<=j<=i<=7} = (7,0)). Substitution keeps the interval
+/// extraction exact.
 [[nodiscard]] Result<bool> lexSearch(LexState& st, const Polyhedron& residual,
                                      SmallVector<int64_t, 8>& prefix) {
     if (st.nodeBudget == 0) {
@@ -291,7 +300,7 @@ struct LexState {
         return false;  // rationally feasible, no integer lift at prefix
     }
     // Project out all dims deeper than `depth` so rows only bound x_depth
-    // (spectating on already-fixed prefix vars).
+    // (prefix dims are already substituted away — see the invariant above).
     Polyhedron projected = residual;
     for (uint32_t v = depth + 1; v < nDims; ++v) {
         MLK_TRY_VAR(fm, fmEliminate(std::move(projected), v));
@@ -302,7 +311,9 @@ struct LexState {
         }
         projected = std::move(fm.projected);
     }
-    // Univariate integer interval over dim `depth`.
+    // Univariate integer interval over dim `depth`. After the projection
+    // above every row has support subseteq {depth}, so reading only
+    // coeffOf(depth) and r.constant is exact (no hidden prefix terms).
     int64_t lb = INT64_MIN;
     int64_t ub = INT64_MAX;
     for (const ConstraintRow& r : projected.rows) {
@@ -327,31 +338,46 @@ struct LexState {
             if (bound < ub) ub = bound;
         }
     }
-    if (lb == INT64_MIN || ub == INT64_MAX || lb > ub) {
-        // Domains in MLK+ SCoPs always bound every dim; an unbounded
-        // interval here means a malformed domain (Rule 67: actionable).
-        if (lb == INT64_MIN || ub == INT64_MAX) {
-            return err(ErrorCode::InvalidArgument,
-                       "lexmin/lexmax encountered an unbounded dimension");
-        }
-        return false;  // empty interval
+    if (lb > ub) return false;  // empty interval
+    // Only the SEARCH-direction bound must be finite: lexMin walks up from
+    // lb (an open upper end just means "enumerate until the witness or the
+    // node budget stops us"), lexMax walks down from ub. A missing bound in
+    // the search direction means no optimum exists (Rule 67: actionable
+    // error, never a wrong optimum).
+    if (st.maximize ? ub == INT64_MAX : lb == INT64_MIN) {
+        return err(ErrorCode::InvalidArgument,
+                   "lexmin/lexmax dimension unbounded in the search "
+                   "direction");
     }
     const int64_t start = st.maximize ? ub : lb;
     const int64_t stop = st.maximize ? lb : ub;
     const int64_t step = st.maximize ? -1 : 1;
-    for (int64_t cand = start; cand != stop + step; cand += step) {
+    for (int64_t cand = start;; cand += step) {
         Polyhedron next = residual;
-        // Fix: x_depth - cand == 0.
-        ConstraintRow fix;
-        fix.isEquality = true;
-        fix.coeffs = SmallVector<int64_t, 8>(next.space.totalVars(), 0);
-        fix.coeffs[depth] = 1;
-        fix.constant = -cand;
-        next.addRow(std::move(fix));
+        // Substitute x_depth = cand into every row: K += c*cand, c := 0.
+        // Rows with c == 0 stay; one that became trivially false means the
+        // prefix contradicts the system (bail early — sound, since every
+        // candidate is re-verified against the source at the leaf anyway).
+        for (ConstraintRow& r : next.rows) {
+            const int64_t c = r.coeffOf(depth);
+            if (c == 0) {
+                if (r.isTriviallyFalse()) return false;
+                continue;
+            }
+            int64_t term = 0;
+            if (!checked::mul(c, cand, &term) ||
+                !checked::add(r.constant, term, &r.constant)) {
+                return err(ErrorCode::InvalidArgument,
+                           "lexmin/lexmax coefficient overflow while "
+                           "substituting a fixed prefix value");
+            }
+            r.coeffs[depth] = 0;
+        }
         prefix.push_back(cand);
         MLK_TRY_VAR(found, lexSearch(st, next, prefix));
         if (found) return true;
         prefix.pop_back();
+        if (cand == stop) break;  // sentinel stop => budget-bounded walk
         if (st.nodeBudget == 0) {
             return err(ErrorCode::BudgetExceeded,
                        "lexmin/lexmax node budget exhausted");

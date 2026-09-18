@@ -11,23 +11,9 @@
 namespace mlk {
 
 namespace {
-/// True ULP distance between two doubles (Rule 34: real error bounds).
-[[nodiscard]] double ulpDistance(double ref, double got) {
-    if (ref == got) return 0.0;
-    if (ref != ref || got != got) return 1e18;  // NaN mismatch = fail
-    const int side = (ref > got) ? -1 : 1;
-    double ulps = 0.0;
-    double cur = ref;
-    // Bounded walk (values are close; the walk terminates within a few
-    // thousand steps for sane candidates; the cap guards pathological
-    // candidates deterministically).
-    constexpr double kMaxUlpsWalk = 100000.0;
-    while (cur != got && ulps < kMaxUlpsWalk) {
-        cur = std::nextafter(cur, cur + side);
-        ulps += 1.0;
-    }
-    return cur == got ? ulps : kMaxUlpsWalk;
-}
+// ulpDistance now lives in math_families.h as the single source of truth
+// shared with approx.ulp_verify (Rule 77: no duplicated quality logic).
+using mlk::families::ulpDistance;
 }  // namespace
 
 ScalarPeepholeSuperoptimizer::ScalarPeepholeSuperoptimizer(

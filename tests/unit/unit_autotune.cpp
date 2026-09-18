@@ -4,6 +4,7 @@
 #include "mlk/ir/graph_builder.h"
 #include "mlk/autotune/search_space.h"
 #include "mlk/autotune/searcher.h"
+#include "mlk/pass/register_all.h"
 #include "mlk/runtime/cache.h"
 #include "mlk/runtime/telemetry.h"
 #include "mlk/type/domain_profile.h"
@@ -41,7 +42,10 @@ MLK_TEST(autotune, search_space_rejects_empty_domain) {
 
 MLK_TEST(autotune, tune_verifies_before_benchmarks) {
     // Rule 58: the tuner must reject graphs that fail correctness.
+    // Candidates compile through the Tier-1 pipeline (real kernels), so
+    // the pass registry must be populated.
     mlk::SymbolTable symbols;
+    mlk::passes::registerAllPasses(symbols);
     mlk::TelemetrySink telemetry;
     mlk::Autotuner tuner(symbols, telemetry);
     mlk::GraphBuilder b(symbols);

@@ -658,6 +658,14 @@ int runBench(int argc, char** argv) {
         std::fprintf(stderr, "mlk-poly bench: --reps/--warmup must be > 0\n");
         return 2;
     }
+    // Tool-boundary env resolution (Rule 84): MLK_BACKEND_WORKDIR is read
+    // HERE, in the CLI — backend code never reads the environment itself.
+    if (workdir.empty()) {
+        const char* envWorkdir = std::getenv("MLK_BACKEND_WORKDIR");
+        if (envWorkdir != nullptr && envWorkdir[0] != '\0') {
+            workdir = envWorkdir;
+        }
+    }
     const bool wantGemm = suites.find("gemm") != std::string::npos;
     const bool wantSoftmax = suites.find("softmax") != std::string::npos;
     const bool wantReduce = suites.find("reducesum") != std::string::npos;

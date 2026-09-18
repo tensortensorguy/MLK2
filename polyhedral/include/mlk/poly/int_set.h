@@ -16,8 +16,12 @@
 //    lexicographic order with rational-feasibility pruning (sound) and
 //    verify the final integer point against the ORIGINAL constraints
 //    (witness check). The first verified point is the exact optimum.
-//    Budget exhaustion yields an error, never a wrong optimum (Rule 53:
-//    determinism; Rule 10: bounded passes).
+//    A dimension unbounded in the SEARCH direction (no lower bound for
+//    lexMin, no upper bound for lexMax) is an InvalidArgument error —
+//    no optimum exists there; the opposite side may stay open because
+//    enumeration stops at the first witness. Budget exhaustion yields an
+//    error, never a wrong optimum (Rule 53: determinism; Rule 10: bounded
+//    passes).
 //
 // Symbols (parameters) must be specialized to constants before lexMin /
 // lexMax (the polyhedral pipeline specializes workload sizes first; see

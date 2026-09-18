@@ -347,6 +347,23 @@ public:
             compute.bufferA = elemBuf[0];
             compute.bufferB = elemBuf[1];
 
+            // Scalar outputs materialize a REAL 1-element output buffer:
+            // a scalar kernel is an executable module (loop over one
+            // element writing the chain result), not a degenerate
+            // dynamic-bound loop with an unbound store target — the
+            // buffer-level executor would otherwise skip the store and
+            // report garbage as "executed tier>=1".
+            if (!outV.type.tensor) {
+                KernelBuffer outBuf;
+                outBuf.name = outV.name != kInvalidSymbolId
+                                  ? outV.name
+                                  : ctx.symbols->intern("out");
+                outBuf.dtype = Dtype::F64;  // scalar kernel ABI: f64 slots
+                outBuf.isInput = false;
+                outBuf.isOutput = true;
+                outBuf.elements = 1;
+                outputBuffers.push_back(kernel.addBuffer(outBuf));
+            }
             // Build: loop over elements { compute chain; store }.
             KernelNode loop;
             loop.op = KernelOp::Loop;
@@ -357,6 +374,8 @@ public:
                 loop.end = num.has_value()
                                ? *num
                                : constants::kKernelLoopDynamicBound;
+            } else {
+                loop.end = 1;  // scalar kernel: exactly one instance
             }
             int64_t vectorWidth = constants::kDefaultSimdWidthF32;
             for (const Node* cn : ordered) {
@@ -385,6 +404,13 @@ public:
             store.bufferOut = outputBuffers.empty()
                                   ? constants::kInvalidId
                                   : outputBuffers[0];
+            // A scalar kernel always has its 1-element output buffer; an
+            // unbound store here would mean the module cannot execute.
+            if (store.bufferOut == constants::kInvalidId &&
+                !outV.type.tensor) {
+                return err(ErrorCode::InvalidGraph,
+                           "scalar kernel output buffer was not materialized");
+            }
             SmallVector<uint32_t, 4> body;
             const uint32_t computeId = kernel.addNode(compute);
             const uint32_t storeId = kernel.addNode(store);

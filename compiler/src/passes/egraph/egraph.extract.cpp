@@ -32,50 +32,74 @@ public:
         MathGraph extracted{ctx.symbols};
         MLK_TRY_VAR(best, eg.extract(*ctx.symbols, extracted, rootClass));
 
-        // Transplant with explicit id mapping (leaves first, then one result
-        // per node in creation order — matches MathGraph allocation).
-        const uint32_t base = graph.numValues();
-        const uint32_t numLeaves = [&] {
-            uint32_t count = 0;
-            for (const auto& v : extracted.values()) {
-                if (v.kind != ValueKind::NodeResult) ++count;
+        // Transplant with a FULL per-value id map. Extraction materializes
+        // in DFS order, so leaves and node results INTERLEAVE (e.g.
+        // add(mul(x,2),y) allocates x, 2, mul-result, y, add-result); the
+        // previous "leaves first, then results" offset scheme miswired or
+        // under-indexed every graph where a leaf follows a node result.
+        // Node inputs always precede their node (children materialize
+        // first), so two passes over the extracted graph suffice.
+        //
+        // Named leaves (placeholder/variable/symbol) REUSE the existing
+        // graph value of the same kind+name+type instead of creating a
+        // duplicate atom: input binding is by value-id order
+        // (interpretGraph / kernel ABI), and a re-created "x" would be a
+        // second placeholder that no input scalar ever reaches — the tier-3
+        // pipeline used to evaluate sin(x^2+3x) at x=2 as sin(0) = 0
+        // through exactly that duplication.
+        auto reuseNamedLeaf = [&](ValueKind kind, SymbolId name,
+                                  const MathType& type) -> ValueId {
+            for (const auto& v : graph.values()) {
+                if (v.kind == kind && v.name == name && v.type == type) {
+                    return v.id;
+                }
             }
-            return count;
-        }();
-        for (const auto& v : extracted.values()) {
+            return kInvalidValueId;
+        };
+        SmallVector<ValueId, 16> mapped(extracted.numValues(),
+                                        kInvalidValueId);
+        for (uint32_t i = 0; i < extracted.numValues(); ++i) {
+            const auto& v = extracted.values()[i];
             switch (v.kind) {  // Rule 78: exhaustive
                 case ValueKind::Constant:
-                    if (v.constant.isInt) {
-                        (void)graph.addIntConstant(v.constant.i64, v.type);
-                    } else {
-                        (void)graph.addConstant(v.constant.f64, v.type);
-                    }
+                    mapped[i] = v.constant.isInt
+                                    ? graph.addIntConstant(v.constant.i64,
+                                                           v.type)
+                                    : graph.addConstant(v.constant.f64,
+                                                        v.type);
                     break;
                 case ValueKind::Variable:
-                    (void)graph.addVariable(v.name, v.type);
-                    break;
                 case ValueKind::Placeholder:
-                    (void)graph.addPlaceholder(v.name, v.type);
+                case ValueKind::Symbol: {
+                    const ValueId existing =
+                        reuseNamedLeaf(v.kind, v.name, v.type);
+                    mapped[i] = existing != kInvalidValueId
+                                    ? existing
+                                    : (v.kind == ValueKind::Variable
+                                           ? graph.addVariable(v.name, v.type)
+                                       : v.kind == ValueKind::Placeholder
+                                           ? graph.addPlaceholder(v.name,
+                                                                  v.type)
+                                           : graph.addSymbol(v.name, v.type));
                     break;
-                case ValueKind::Symbol:
-                    (void)graph.addSymbol(v.name, v.type);
-                    break;
+                }
                 case ValueKind::NodeResult:
                     break;  // recreated via addNode below
             }
         }
-        SmallVector<ValueId, 8> mappedResults;
         ValueId extractedRootNew = kInvalidValueId;
         for (const auto& n : extracted.nodes()) {
             SmallVector<ValueId, 4> ins;
             for (const ValueId in : n.inputs) {
-                const ValueId mapped = in < numLeaves
-                                           ? static_cast<ValueId>(base + in)
-                                           : mappedResults[in - numLeaves];
-                ins.push_back(mapped);
+                if (in >= extracted.numValues() ||
+                    mapped[in] == kInvalidValueId) {
+                    return err(ErrorCode::Internal,
+                               "extraction produced a dangling input");
+                }
+                ins.push_back(mapped[in]);
             }
             MLK_TRY_VAR(newV, graph.addNode(n.op, ins, n.attrs));
-            mappedResults.push_back(newV);
+            mapped[n.results[0]] = newV;
             if (n.results[0] == best) extractedRootNew = newV;
         }
         if (extractedRootNew == kInvalidValueId) {

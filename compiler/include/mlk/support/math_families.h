@@ -15,6 +15,8 @@
 
 #include <cmath>
 
+#include "mlk/core/constants.h"
+
 namespace mlk::families {
 
 /// Cody-Waite split constants: pi/2 = hi + lo with lo < 2^-33 so the
@@ -85,6 +87,53 @@ inline constexpr double kCosC5 = 4.16666666666666435770e-2;
         case 2: return -polySinReduced(r);
         default: return -polyCosReduced(r);
     }
+}
+
+/// True ULP distance between two doubles (Rule 34: real error bounds).
+/// Bounded deterministic walk; the cap guards pathological candidates.
+[[nodiscard]] inline double ulpDistance(double ref, double got) noexcept {
+    if (ref == got) return 0.0;
+    if (ref != ref || got != got) return 1e18;  // NaN mismatch = fail
+    const int side = (ref > got) ? -1 : 1;
+    double ulps = 0.0;
+    double cur = ref;
+    constexpr double kMaxUlpsWalk = 100000.0;
+    while (cur != got && ulps < kMaxUlpsWalk) {
+        cur = std::nextafter(cur, cur + side);
+        ulps += 1.0;
+    }
+    return cur == got ? ulps : kMaxUlpsWalk;
+}
+
+/// MEASURED max ULP error of the poly7 sin family against libm over the
+/// deterministic sample set + quadrant edges (Rule 50: candidates are
+/// verified before benchmarking; Rule 34: the certificate records the real
+/// bound, never an asserted number). Single source of truth shared by
+/// approx.ulp_verify (pass gate) and the superoptimizer (certificate).
+[[nodiscard]] inline double measuredPolySinMaxUlps() noexcept {
+    double maxUlps = 0.0;
+    for (std::size_t i = 0;
+         i < constants::kUlpVerifySamples + constants::kUlpVerifyEdgeSamples;
+         ++i) {
+        double x = 0.0;
+        if (i < constants::kUlpVerifySamples) {
+            x = -3.14159265358979323846 +
+                2.0 * 3.14159265358979323846 *
+                    static_cast<double>(i) /
+                    static_cast<double>(constants::kUlpVerifySamples);
+        } else {
+            // Edge cases: exact quadrant boundaries.
+            static const double kEdges[] = {
+                -3.14159265358979323846, -1.57079632679489661923,
+                -0.78539816339744830962, 0.0, 0.78539816339744830962,
+                1.57079632679489661923,  3.14159265358979323846};
+            x = kEdges[(i - constants::kUlpVerifySamples) % 7];
+        }
+        const double ulps = ulpDistance(std::sin(x), polySin(x));
+        if (ulps >= 1e18) return 1e18;  // NaN-class mismatch = hard fail
+        if (ulps > maxUlps) maxUlps = ulps;
+    }
+    return maxUlps;
 }
 
 }  // namespace mlk::families

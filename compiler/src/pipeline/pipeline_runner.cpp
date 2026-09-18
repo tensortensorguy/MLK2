@@ -16,7 +16,8 @@ struct TierPipelineDef {
 };
 }  // namespace
 
-SmallVector<SymbolId, 16> tierPipeline(Tier tier, SymbolTable& symbols) {
+SmallVector<SymbolId, 16> tierPipeline(Tier tier, SymbolTable& symbols,
+                                       bool debugDump) {
     // Spec §9 pipelines, restricted to the registered MVP set (layout spec
     // §11 sanctions starting here; the full catalog is in pass_registry.md).
     SmallVector<SymbolId, 16> out;
@@ -149,7 +150,7 @@ SmallVector<SymbolId, 16> tierPipeline(Tier tier, SymbolTable& symbols) {
             add("backend.emit_binary");
             break;
     }
-    if (std::getenv("MLK_LOWER_DEBUG") != nullptr) {
+    if (debugDump) {
         std::fprintf(stderr, "[pipeline] tier=%d entries=%zu\n",
                      static_cast<int>(tier), out.size());
         for (const SymbolId id : out) {
@@ -177,7 +178,7 @@ Result<PassResult> PipelineRunner::run(Tier tier, PassContext& baseCtx,
     }
     PassResult total;
     total.nodesBefore = graph.liveNodeCount();
-    const auto passNames = tierPipeline(tier, symbols_);
+    const auto passNames = tierPipeline(tier, symbols_, opts.debugDumpPassList);
     poly::PolyWorkspace* polyWs =
         tier == Tier::Tier2 || tier == Tier::Tier3
             ? poly::createPolyWorkspace()
@@ -237,7 +238,21 @@ Result<PassResult> PipelineRunner::run(Tier tier, PassContext& baseCtx,
             (nameId == lowerId || nameId == emitId || polyPass)
                 ? kernelOut
                 : nullptr;
-        MLK_TRY_VAR(result, pass->run(ctx, graph));
+        auto passResult = pass->run(ctx, graph);
+        if (!passResult.has_value() &&
+            passResult.error().code == ErrorCode::UnsupportedCapability) {
+            // Capability-gated pass (Part 0) does not apply to this
+            // profile — skip gracefully with telemetry instead of failing
+            // the compilation: the calculus passes gate on
+            // HasDerivatives, which scalar profiles legitimately lack.
+            // Rule 138: the skip stays observable.
+            if (telemetry_ != nullptr && opts.recordTelemetry) {
+                telemetry_->event(10, nameId,
+                                  symbols_.intern("capability_skipped"), 1);
+            }
+            continue;
+        }
+        MLK_TRY_VAR(result, std::move(passResult));
         total.changed = total.changed || result.changed;
         for (const auto& inv : result.invalidatedAnalyses) {
             total.invalidatedAnalyses.push_back(inv);

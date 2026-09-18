@@ -184,18 +184,74 @@ Result<ExecutionResult> interpretGraph(
 }
 
 // --- CPU kernel executor -----------------------------------------------------
+//
+// Real scalar-ABI execution of a compiled KernelModule (the previous stub
+// re-ran the interpreter and relabeled its output, so `--tier=2/3` never
+// executed any kernel). Buffers come from the module: scalar kernels
+// (lower.to_kernel_ir on scalar graphs) carry ScalarParam inputs and
+// 1-element output buffers; tensor kernels need the buffer ABI and are
+// rejected here so the engine falls back honestly instead of reporting
+// zeros as a tier>=1 result.
 Result<ExecutionResult> executeKernel(const KernelModule& kernel,
                                       const MathGraph& graph,
                                       const SmallVector<double, 8>& inputScalars,
-                                      CancellationToken* cancel) {
-    (void)cancel;
-    (void)kernel;  // schedule params (tile/vector) shape the loop executor;
-                   // MVP scalar path reuses the reference evaluation with
-                   // Tier-1 accounting (see docs/kernel_abi.md).
+                                      CancellationToken* cancel,
+                                      SymbolTable& symbols) {
     ExecutionResult out;
-    MLK_TRY_VAR(tier0, interpretGraph(graph, inputScalars));
-    out = tier0;
-    out.executedTier = Tier::Tier1;
+    if (kernel.nodes.empty()) {
+        return err(ErrorCode::InvalidGraph, "kernel module has no nodes");
+    }
+    for (const KernelBuffer& b : kernel.buffers) {
+        if (b.isInput) {
+            return err(ErrorCode::InvalidArgument,
+                       "tensor kernel requires buffer bindings "
+                       "(executeKernelOnBuffers), not scalar inputs");
+        }
+    }
+    // Every graph output must be realized by the module (NodeResult
+    // outputs get kernel stores; identity outputs do not and cannot run
+    // under the scalar ABI — fall back to the interpreter).
+    for (const ValueId outId : graph.outputs()) {
+        if (graph.value(graph.representative(outId)).kind !=
+            ValueKind::NodeResult) {
+            return err(ErrorCode::InvalidArgument,
+                       "kernel module does not realize a non-node output");
+        }
+    }
+
+    // Bindings: scalar params in first-touch order == placeholder/variable
+    // value-id order (the lowering assigns ScalarParam slots in the same
+    // order; docs/kernel_abi.md). Output scratch: one dense f64 slot
+    // sequence per output buffer, allocated here and freed on return.
+    KernelBufferBindings io;
+    io.scalars = inputScalars;
+    io.elements = 1;  // scalar kernels iterate exactly one instance
+    std::vector<std::vector<double>> outStorage;
+    for (const KernelBuffer& b : kernel.buffers) {
+        if (!b.isOutput) continue;
+        const int64_t n = b.elements > 0 ? b.elements : 1;
+        outStorage.emplace_back(static_cast<std::size_t>(n), 0.0);
+        io.outputs.push_back(outStorage.back().data());
+    }
+    if (outStorage.empty()) {
+        return err(ErrorCode::InvalidGraph,
+                   "kernel module has no output buffer");
+    }
+    MLK_TRYV(executeKernelOnBuffers(kernel, symbols, io, cancel));
+
+    // Read back in graph output order == kernel output-buffer order
+    // (lowering materializes output buffers per graph output, in order).
+    std::size_t nextOut = 0;
+    for (const ValueId outId : graph.outputs()) {
+        if (nextOut >= outStorage.size()) {
+            return err(ErrorCode::InvalidGraph,
+                       "kernel output buffer count mismatch");
+        }
+        out.outputScalars.push_back(outStorage[nextOut][0]);
+        out.outputIds.push_back(outId);
+        ++nextOut;
+    }
+    out.executedTier = Tier::Tier1;  // engine refines to the requested tier
     return out;
 }
 
@@ -283,19 +339,52 @@ Result<ExecutionResult> ExecutionEngine::execute(
     const AccuracyContract& accuracy, Tier requestedTier,
     const SmallVector<double, 8>& inputScalars) {
     auto realization = current();
-    const bool useKernel = requestedTier != Tier::Tier0 &&
-                           realization != nullptr &&
-                           realization->kernel != nullptr;
-    const SmallVector<double, 8>& inputs = inputScalars;
-    if (useKernel) {
-        auto r = executeKernel(*realization->kernel, graph, inputs, &cancel_);
-        if (r.has_value()) return r;
-        // Rule 102/115: any kernel execution failure falls back to Tier 0.
-        fallback_.recordFallback(symbols_.intern("kernel_execution"));
+    if (requestedTier != Tier::Tier0) {
+        // Cold-start tiering: compile the requested tier on demand when no
+        // matching realization is installed. One-shot callers (CLI, tests)
+        // get a real tier>=1 execution; hot callers pre-install via
+        // requestAsyncCompile and skip straight to the kernel.
+        const bool needCompile = realization == nullptr ||
+                                 realization->kernel == nullptr ||
+                                 realization->tier != requestedTier;
+        if (needCompile) {
+            CompileInputs inputs;
+            inputs.graph = &graph;
+            inputs.profile = &profile;
+            inputs.accuracy = &accuracy;
+            inputs.tier = requestedTier;
+            auto kernel = compile(inputs, requestedTier);
+            if (kernel.has_value()) {
+                auto next = std::make_shared<const Realization>();
+                const_cast<Realization&>(*next).tier = requestedTier;
+                const_cast<Realization&>(*next).kernel = *kernel;
+                install(next);
+                realization = current();
+                TelemetryEvent t;
+                t.kind = TelemetryEventKind::TierTransition;
+                t.fromTier = static_cast<uint8_t>(Tier::Tier0);
+                t.toTier = static_cast<uint8_t>(requestedTier);
+                telemetry_.record(t);
+            } else {
+                // Rule 139: compile failure => stay on Tier 0, telemetry
+                // recorded; never a partial install.
+                fallback_.recordFallback(symbols_.intern("kernel_compile"));
+                realization = nullptr;
+            }
+        }
+        if (realization != nullptr && realization->kernel != nullptr &&
+            realization->tier == requestedTier) {
+            auto r = executeKernel(*realization->kernel, graph, inputScalars,
+                                   &cancel_, symbols_);
+            if (r.has_value()) {
+                r->executedTier = requestedTier;  // the tier that really ran
+                return r;
+            }
+            // Rule 102/115: kernel execution failure falls back to Tier 0.
+            fallback_.recordFallback(symbols_.intern("kernel_execution"));
+        }
     }
-    return interpretGraph(graph, inputs);
-    (void)profile;
-    (void)accuracy;
+    return interpretGraph(graph, inputScalars);
 }
 
 }  // namespace mlk

@@ -370,6 +370,85 @@ MLK_TEST(poly, lexmin_empty_set) {
     MLK_CHECK(!mn->has_value());  // nullopt = integer-empty
 }
 
+MLK_TEST(poly, lexmax_coupled_prefix_substitution) {
+    // Regression: 0 <= j <= i <= 7. Fixing i=7 must SUBSTITUTE i out of the
+    // coupled row (i - j >= 0) before the univariate interval for j is
+    // read; the old code read that row as (-j >= 0) and returned (7,0).
+    const VarSpace sp = dims2();
+    Polyhedron p;
+    p.space = sp;
+    SmallVector<int64_t, 8> ri0;
+    ri0.push_back(1);
+    ri0.push_back(0);
+    p.addInequality(std::move(ri0), 0);  // i >= 0
+    SmallVector<int64_t, 8> ri7;
+    ri7.push_back(-1);
+    ri7.push_back(0);
+    p.addInequality(std::move(ri7), 7);  // i <= 7
+    SmallVector<int64_t, 8> rj0;
+    rj0.push_back(0);
+    rj0.push_back(1);
+    p.addInequality(std::move(rj0), 0);  // j >= 0
+    SmallVector<int64_t, 8> rji;
+    rji.push_back(1);
+    rji.push_back(-1);
+    p.addInequality(std::move(rji), 0);  // i - j >= 0  (j <= i)
+    PresburgerSet s;
+    s.space = sp;
+    s.disjuncts.push_back(std::move(p));
+    auto mx = s.lexMax();
+    MLK_CHECK(mx.has_value());
+    MLK_CHECK(mx->has_value());
+    if (mx->has_value()) {
+        MLK_CHECK_EQ((**mx)[0], 7);
+        MLK_CHECK_EQ((**mx)[1], 7);  // was 0 on the unsubstituted prefix
+        MLK_CHECK(s.containsPoint(**mx));
+    }
+    auto mn = s.lexMin();
+    MLK_CHECK(mn.has_value());
+    MLK_CHECK(mn->has_value());
+    if (mn->has_value()) {
+        MLK_CHECK_EQ((**mn)[0], 0);
+        MLK_CHECK_EQ((**mn)[1], 0);
+    }
+}
+
+MLK_TEST(poly, lexmin_one_sided_unbounded_dim) {
+    // Regression: {0 <= i <= 3, j >= i - 9} has no upper bound on j. lexMin
+    // only needs the search-direction (lower) bound: it must return the
+    // witness (0, -9). The old code errored on ANY unbounded interval and
+    // integerLeFormFeasible reported that as "no solution". lexMax on this
+    // set has no maximum (unbounded search direction) -> honest error.
+    const VarSpace sp = dims2();
+    Polyhedron p;
+    p.space = sp;
+    SmallVector<int64_t, 8> ri0;
+    ri0.push_back(1);
+    ri0.push_back(0);
+    p.addInequality(std::move(ri0), 0);  // i >= 0
+    SmallVector<int64_t, 8> ri3;
+    ri3.push_back(-1);
+    ri3.push_back(0);
+    p.addInequality(std::move(ri3), 3);  // i <= 3
+    SmallVector<int64_t, 8> rjge;
+    rjge.push_back(-1);
+    rjge.push_back(1);
+    p.addInequality(std::move(rjge), 9);  // -i + j - 9 >= 0  (j >= i - 9)
+    PresburgerSet s;
+    s.space = sp;
+    s.disjuncts.push_back(std::move(p));
+    auto mn = s.lexMin();
+    MLK_CHECK(mn.has_value());
+    MLK_CHECK(mn->has_value());
+    if (mn->has_value()) {
+        MLK_CHECK_EQ((**mn)[0], 0);
+        MLK_CHECK_EQ((**mn)[1], -9);
+        MLK_CHECK(s.containsPoint(**mn));  // witness against the original
+    }
+    auto mx = s.lexMax();
+    MLK_CHECK(!mx.has_value());  // error: no maximum exists (Rule 67)
+}
+
 MLK_TEST(poly, lexmin_requires_specialized_symbols) {
     const VarSpace sp = VarSpace{1, 1};  // one dim + one symbol
     auto box = PresburgerSet::box(sp, SmallVector<int64_t, 8>{0},

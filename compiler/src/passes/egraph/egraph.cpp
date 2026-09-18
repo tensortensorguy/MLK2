@@ -177,17 +177,26 @@ Result<bool> EGraph::saturateOnce(SymbolTable& symbols) {
         };
 
         // Identity elements (definitely 0/1 leaves only; Rule 22).
+        // mul(1,x) -> x and add(0,x) -> x: the PARENT class (the class of
+        // enode i itself) unifies with the surviving child's class.
+        // Uniting the two CHILDREN instead (a previous bug) declared the
+        // constant equivalent to the operand — 0.0 + x extracted as
+        // add(0,0) = 0 and x * 1.0 as mul(x,x) = x^2.
         if (e.op == MathOp::Mul && isConstD(lv, 1.0)) {
-            (void)unionClasses(rc, lc, symbols.intern("egraph.identity"));
+            (void)unionClasses(enodeClass_[i], rc,
+                               symbols.intern("egraph.identity"));
             grew = true;
         } else if (e.op == MathOp::Mul && isConstD(rv, 1.0)) {
-            (void)unionClasses(lc, rc, symbols.intern("egraph.identity"));
+            (void)unionClasses(enodeClass_[i], lc,
+                               symbols.intern("egraph.identity"));
             grew = true;
         } else if (e.op == MathOp::Add && isConstD(lv, 0.0)) {
-            (void)unionClasses(rc, lc, symbols.intern("egraph.identity"));
+            (void)unionClasses(enodeClass_[i], rc,
+                               symbols.intern("egraph.identity"));
             grew = true;
         } else if (e.op == MathOp::Add && isConstD(rv, 0.0)) {
-            (void)unionClasses(lc, rc, symbols.intern("egraph.identity"));
+            (void)unionClasses(enodeClass_[i], lc,
+                               symbols.intern("egraph.identity"));
             grew = true;
         }
 

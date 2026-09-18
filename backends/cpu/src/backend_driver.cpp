@@ -50,20 +50,20 @@ inline constexpr std::size_t kDriverMaxBindableBuffers = 8;
 /// still bit-exact). The probe follows the same no-exec-tmpfs policy
 /// as the artifact workdir (probe dir under the resolved workdir base;
 /// linked, never run).
+/// Resolves the artifact workdir base: the explicit config value wins;
+/// otherwise the process cwd + fixed suffix. The MLK_BACKEND_WORKDIR
+/// override is resolved at the TOOL boundary (tools fill config.workdirBase
+/// from argv/env) — Rule 84: backend code performs no hidden global
+/// environment reads.
+[[nodiscard]] Result<std::string> resolveWorkdirBase(
+    const std::string& configuredBase);
+
 [[nodiscard]] bool openmpAvailable(const BackendDriverConfig& config) {
 #if !defined(_WIN32)
     static const bool cached = [&config] {
-        std::string base = config.workdirBase;
-        if (base.empty()) {
-            const char* env = std::getenv("MLK_BACKEND_WORKDIR");
-            if (env != nullptr && env[0] != '\0') {
-                base = env;
-            } else {
-                char cwd[4096];
-                if (::getcwd(cwd, sizeof(cwd)) == nullptr) return false;
-                base = std::string(cwd) + "/mlk_backend_work";
-            }
-        }
+        auto baseRes = resolveWorkdirBase(config.workdirBase);
+        if (!baseRes.has_value()) return false;
+        const std::string& base = *baseRes;
         if (!createDirs(base).has_value()) return false;
         std::string dir = base + "/ompprobe-XXXXXX";
         if (::mkdtemp(dir.data()) == nullptr) return false;
@@ -160,28 +160,36 @@ inline constexpr std::size_t kDriverMaxBindableBuffers = 8;
 #endif
 }
 
-/// Shared PATH-walk probe for both toolchains (cc/nvcc): true when the
+/// Shared tool-on-PATH probe for both toolchains (cc/nvcc): true when the
 /// executable name resolves on PATH (or the name carries a '/' and
-/// exists at that path).
+/// exists at that path). Resolution is delegated to `sh -c "command -v"`
+/// — the SAME resolution the actual compiler spawn (posix_spawnp) uses —
+/// so backend code never reads the environment directly (Rule 84: no
+/// hidden global env reads; the PATH state is owned by the process
+/// environment the spawned tools see anyway).
 [[nodiscard]] bool resolveOnPath(const std::string& name) {
 #if !defined(_WIN32)
     if (name.find('/') != std::string::npos) {
         return fileExists(name);
     }
-    const char* pathEnv = std::getenv("PATH");
-    if (pathEnv == nullptr) return false;
-    const std::string path(pathEnv);
-    std::size_t pos = 0;
-    while (pos <= path.size()) {
-        std::size_t next = path.find(':', pos);
-        if (next == std::string::npos) next = path.size();
-        const std::string dir = path.substr(pos, next - pos);
-        if (!dir.empty() && fileExists(joinPath(dir, name))) {
-            return true;
-        }
-        pos = next + 1;
+    // Shell-metachar guard: probed names are compiler identifiers
+    // ("cc", "nvcc", user-declared tool names) — never shell syntax.
+    for (const char c : name) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+                        c == '-' || c == '+';
+        if (!ok) return false;
     }
-    return false;
+    if (name.empty()) return false;
+    const std::string cmd = "command -v '" + name + "' >/dev/null 2>&1";
+    const char* argv[] = {"/bin/sh", "-c", cmd.c_str(), nullptr};
+    pid_t pid = -1;
+    const int rc = posix_spawnp(&pid, argv[0], nullptr, nullptr,
+                                const_cast<char* const*>(argv), environ);
+    if (rc != 0) return false;
+    int status = -1;
+    (void)::waitpid(pid, &status, 0);
+    return status == 0;
 #else
     (void)name;
     return false;
@@ -223,24 +231,27 @@ void callLegacy(void* fn, Args... args) {
     reinterpret_cast<F>(fn)(args...);
 }
 
+/// Resolves the artifact workdir base: the explicit config value wins;
+/// otherwise the process cwd + fixed suffix. The MLK_BACKEND_WORKDIR
+/// override is resolved at the TOOL boundary (tools fill config.workdirBase
+/// from argv/env) — Rule 84: backend code performs no hidden global
+/// environment reads.
+[[nodiscard]] Result<std::string> resolveWorkdirBase(
+    const std::string& configuredBase) {
+    if (!configuredBase.empty()) return configuredBase;
+    char cwd[4096];
+    if (::getcwd(cwd, sizeof(cwd)) == nullptr) {
+        return err(ErrorCode::IoError,
+                   "driver: cannot resolve cwd for workdir");
+    }
+    return joinPath(cwd, "mlk_backend_work");
+}
+
 /// Fresh 0700 workdir under the configured base (never /tmp — build
 /// artifacts must live on the project filesystem; see the header).
 [[nodiscard]] Result<std::string> makeWorkdir(
     const BackendDriverConfig& config) {
-    std::string base = config.workdirBase;
-    if (base.empty()) {
-        const char* env = std::getenv("MLK_BACKEND_WORKDIR");
-        if (env != nullptr && env[0] != '\0') {
-            base = env;
-        } else {
-            char cwd[4096];
-            if (::getcwd(cwd, sizeof(cwd)) == nullptr) {
-                return err(ErrorCode::IoError,
-                           "driver: cannot resolve cwd for workdir");
-            }
-            base = joinPath(cwd, "mlk_backend_work");
-        }
-    }
+    MLK_TRY_VAR(base, resolveWorkdirBase(config.workdirBase));
     auto baseMade = createDirs(base);
     if (!baseMade.has_value()) {
         return std::unexpected<Error>(baseMade.error());
@@ -759,20 +770,7 @@ Result<LoadedKernel> buildGpuKernelArtifact(const KernelModule& kernel,
         return std::unexpected<Error>(source.error());
     }
     // Stage 2: workdir.
-    std::string base = config.workdirBase;
-    if (base.empty()) {
-        const char* env = std::getenv("MLK_BACKEND_WORKDIR");
-        if (env != nullptr && env[0] != '\0') {
-            base = env;
-        } else {
-            char cwd[4096];
-            if (::getcwd(cwd, sizeof(cwd)) == nullptr) {
-                return err(ErrorCode::IoError,
-                           "driver: cannot resolve cwd for workdir");
-            }
-            base = joinPath(cwd, "mlk_backend_work");
-        }
-    }
+    MLK_TRY_VAR(base, resolveWorkdirBase(config.workdirBase));
     auto baseMade = createDirs(base);
     if (!baseMade.has_value()) {
         return std::unexpected<Error>(baseMade.error());

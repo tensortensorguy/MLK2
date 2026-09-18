@@ -344,10 +344,32 @@ void runElementwiseRange(const KernelNode& compute, const KernelNode& store,
                          const KernelBufferBindings& io,
                          const int64_t begin, const int64_t end,
                          CancellationToken* cancel) {
-    const double* inA = resolveInput(kernel, io, compute.bufferA);
-    const double* inB = resolveInput(kernel, io, compute.bufferB);
+    // ElemA/ElemB are required only when the chain actually references
+    // them: scalar kernels (lower.to_kernel_ir on scalar graphs) bind
+    // their inputs as ScalarParams and carry no input buffers at all.
+    // The legacy single-op path always reads ElemA (+ElemB for binary
+    // ops), matching the previous always-resolve behavior.
+    bool needsA = compute.exprs.empty();
+    bool needsB = compute.exprs.empty();
+    for (const KernelExpr& e : compute.exprs) {
+        if (e.a.kind == KernelOperand::Kind::ElemA ||
+            e.b.kind == KernelOperand::Kind::ElemA) {
+            needsA = true;
+        }
+        if (e.a.kind == KernelOperand::Kind::ElemB ||
+            e.b.kind == KernelOperand::Kind::ElemB) {
+            needsB = true;
+        }
+    }
+    const double* inA = needsA ? resolveInput(kernel, io, compute.bufferA)
+                               : nullptr;
+    const double* inB = needsB ? resolveInput(kernel, io, compute.bufferB)
+                               : nullptr;
     double* out = resolveOutput(kernel, io, store.bufferOut);
-    if (inA == nullptr || out == nullptr) return;  // unbound ABI: skip
+    if (out == nullptr || (needsA && inA == nullptr) ||
+        (needsB && inB == nullptr)) {
+        return;  // unbound ABI: skip
+    }
 
     (void)kernel;
     const SinFamily fam =

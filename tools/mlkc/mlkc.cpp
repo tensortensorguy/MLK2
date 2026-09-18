@@ -188,7 +188,11 @@ int runExec(int argc, char** argv) {
         if (starts("--tier=")) tierArg = a + 7;
         else if (starts("--profile=")) profileName = a + 10;
         else if (starts("--x")) {
-            inputs.push_back(std::strtod(a + 3, nullptr));
+            // Accept both documented forms: --x2.0 and --x=2.0 (the
+            // latter used to parse strtod("=2.0") == 0 silently).
+            const char* v = a + 3;
+            if (*v == '=') ++v;
+            inputs.push_back(std::strtod(v, nullptr));
         }
     }
     bool ok = false;

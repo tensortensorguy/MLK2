@@ -458,6 +458,15 @@ int runAutotune(int argc, char** argv) {
         std::fprintf(stderr, "mlk-poly: --m/--k/--n must be positive\n");
         return 2;
     }
+    // Tool-boundary env resolution (Rule 84): MLK_BACKEND_WORKDIR is read
+    // HERE, in the CLI, and passed down via config.workdirBase — backend
+    // code never reads the environment itself.
+    if (workdir.empty()) {
+        const char* envWorkdir = std::getenv("MLK_BACKEND_WORKDIR");
+        if (envWorkdir != nullptr && envWorkdir[0] != '\0') {
+            workdir = envWorkdir;
+        }
+    }
     if (mode != "same" && mode != "extra" && mode != "amortized") {
         std::fprintf(stderr,
                      "mlk-poly: --budget-mode must be same|extra|amortized\n");
