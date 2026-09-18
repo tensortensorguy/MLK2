@@ -49,6 +49,7 @@
 #include <string>
 
 #include "mlk/backend/cpp_emitter.h"
+#include "mlk/backend/slab_plan.h"
 #include "mlk/core/result.h"
 #include "mlk/runtime/execution.h"
 
@@ -74,6 +75,10 @@ struct BackendDriverConfig {
     /// $MLK_BACKEND_WORKDIR, then "<cwd>/mlk_backend_work" (never /tmp:
     /// build artifacts must not depend on tmpfs noexec policy).
     std::string workdirBase{};
+    /// Slab emission options (round 21): forwarded to emitCppSource
+    /// for kind Cpp. With the default value the artifact is
+    /// byte-identical to the historical form.
+    SlabEmitOptions slabs{};
 };
 
 /// True when the configured compiler is resolvable on PATH (cold probe;
@@ -93,6 +98,10 @@ struct GpuBackendDriverConfig {
     /// Base directory for per-build workdirs (same resolution as
     /// BackendDriverConfig::workdirBase; never /tmp).
     std::string workdirBase{};
+    /// Slab emission options (round 21): forwarded to emitCudaSource.
+    /// With the default value the artifact is byte-identical to the
+    /// historical form.
+    SlabEmitOptions slabs{};
 };
 
 /// True when the configured GPU compiler is resolvable on PATH (cold

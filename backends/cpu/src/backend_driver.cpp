@@ -544,7 +544,8 @@ Result<LoadedKernel> buildKernelArtifactInDir(
     // Stage 1: emit.
     Result<std::string> source = kind == ArtifactKind::Asm
                                      ? emitAsmSource(kernel, symbols)
-                                     : emitCppSource(kernel, symbols);
+                                     : emitCppSource(kernel, symbols,
+                                                     config.slabs);
     if (!source.has_value()) {
         return std::unexpected<Error>(source.error());
     }
@@ -629,7 +630,8 @@ Result<LoadedKernel> buildKernelArtifact(const KernelModule& kernel,
     // Stage 1: emit.
     Result<std::string> source = kind == ArtifactKind::Asm
                                      ? emitAsmSource(kernel, symbols)
-                                     : emitCppSource(kernel, symbols);
+                                     : emitCppSource(kernel, symbols,
+                                                     config.slabs);
     if (!source.has_value()) {
         return std::unexpected<Error>(source.error());
     }
@@ -696,7 +698,7 @@ Result<LoadedKernel> buildGpuKernelArtifactInDir(
                        config.arch + "'");
     }
     // Stage 1: emit (CUDA C++ text).
-    auto source = emitCudaSource(kernel, symbols);
+    auto source = emitCudaSource(kernel, symbols, config.slabs);
     if (!source.has_value()) {
         return std::unexpected<Error>(source.error());
     }
@@ -752,7 +754,7 @@ Result<LoadedKernel> buildGpuKernelArtifact(const KernelModule& kernel,
                        config.arch + "'");
     }
     // Stage 1: emit.
-    auto source = emitCudaSource(kernel, symbols);
+    auto source = emitCudaSource(kernel, symbols, config.slabs);
     if (!source.has_value()) {
         return std::unexpected<Error>(source.error());
     }

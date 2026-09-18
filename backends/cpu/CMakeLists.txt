@@ -9,6 +9,7 @@ mlk_add_library(mlk_backend_cpu
         src/cpp_emitter.cpp
         src/asm_emitter.cpp
         src/cuda_emitter.cpp
+        src/slab_plan.cpp
         src/backend_driver.cpp
     PUBLIC_DEPS mlk_runtime
 )

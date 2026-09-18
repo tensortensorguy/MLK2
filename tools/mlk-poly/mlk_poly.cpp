@@ -24,7 +24,7 @@
 //                 runtime upper bounds, roofline lower bound + gap,
 //                 budget gates, and the honest winner claim (Axiom 14.21).
 //                 --json-out writes the full machine-readable report.
-//   mlk-poly emit <graph.mlk> [--asm|--cpp|--cuda] [--arch=sm_XX] [--out=<path>]
+//   mlk-poly emit <graph.mlk> [--asm|--cpp|--cuda] [--cuda-smem] [--arch=sm_XX] [--out=<path>]
 //                 [--workdir=<dir>] [--compile]
 //                 compiles the graph at Tier2 and emits the standalone
 //                 artifact text (kernel.s | kernel.cpp) to stdout or
@@ -271,7 +271,7 @@ int runDemo(const std::string& backendFlag) {
 int runEmit(const std::string& path, const bool useAsm,
             const bool useCuda, const std::string& outPath,
             const std::string& workdir, const bool compile,
-            const std::string& arch) {
+            const std::string& arch, const bool smemSlabs) {
     mlk::SymbolTable symbols;
     mlk::passes::registerAllPasses(symbols);
     mlk::DiagnosticEngine diag;
@@ -305,9 +305,11 @@ int runEmit(const std::string& path, const bool useAsm,
                      r.error().message.c_str());
         return 1;
     }
-    auto src = useCuda   ? mlk::emitCudaSource(kernel, symbols)
+    mlk::SlabEmitOptions slabOpts;
+    slabOpts.sharedMemSlabs = smemSlabs;
+    auto src = useCuda   ? mlk::emitCudaSource(kernel, symbols, slabOpts)
                : useAsm  ? mlk::emitAsmSource(kernel, symbols)
-                         : mlk::emitCppSource(kernel, symbols);
+                         : mlk::emitCppSource(kernel, symbols, slabOpts);
     if (!src.has_value()) {
         std::fprintf(stderr, "mlk-poly: emit failed: %s\n",
                      src.error().message.c_str());
@@ -331,6 +333,7 @@ int runEmit(const std::string& path, const bool useAsm,
             mlk::GpuBackendDriverConfig gcfg;
             if (!workdir.empty()) gcfg.workdirBase = workdir;
             if (!arch.empty()) gcfg.arch = arch;
+            gcfg.slabs = slabOpts;
             auto loaded = mlk::buildGpuKernelArtifact(kernel, symbols, gcfg);
             if (!loaded.has_value()) {
                 std::fprintf(stderr, "mlk-poly: artifact failed: %s\n",
@@ -344,6 +347,7 @@ int runEmit(const std::string& path, const bool useAsm,
         } else {
             mlk::BackendDriverConfig cfg;
             if (!workdir.empty()) cfg.workdirBase = workdir;
+            cfg.slabs = slabOpts;
             auto loaded = mlk::buildKernelArtifact(
                 kernel, symbols,
                 useAsm ? mlk::ArtifactKind::Asm : mlk::ArtifactKind::Cpp,
@@ -611,7 +615,7 @@ int main(int argc, char** argv) {
                    "[--budget-mode=..]\n"
                    "                         [--comptime-budget-ms=X] "
                    "[--extra-budget-ms=X] [--tau-ms=X] [--json-out=F]\n"
-                   "       mlk-poly emit <graph.mlk> [--asm|--cpp] "
+                   "       mlk-poly emit <graph.mlk> [--asm|--cpp] [--cuda-smem] "
                    "[--out=<path>] [--workdir=<dir>] [--compile]\n",
                    stderr);
         return 2;
@@ -645,6 +649,7 @@ int main(int argc, char** argv) {
         bool useAsm = true;   // the assembly form is the default artifact
         bool useCuda = false;
         bool compile = false;
+        bool smemSlabs = false;
         for (int i = 3; i < argc; ++i) {
             const std::string a = argv[i];
             if (a == "--asm") {
@@ -655,6 +660,8 @@ int main(int argc, char** argv) {
                 useCuda = false;
             } else if (a == "--cuda") {
                 useCuda = true;
+            } else if (a == "--cuda-smem") {
+                smemSlabs = true;
             } else if (a.rfind("--arch=", 0) == 0) {
                 arch = a.substr(7);
             } else if (a.rfind("--out=", 0) == 0) {
@@ -670,7 +677,7 @@ int main(int argc, char** argv) {
             }
         }
         return runEmit(argv[2], useAsm, useCuda, outPath, workdir,
-                       compile, arch);
+                       compile, arch, smemSlabs);
     }
     if (mode == "show" && argc >= 3) {
         mlk::SymbolTable symbols;
@@ -715,7 +722,8 @@ int main(int argc, char** argv) {
                "<graph.mlk> | autotune [...]\n"
                " | bench [--reps=R] [--warmup=W] [--suites=...] "
                "[--json-out=F] [--workdir=D]\n"
-               " | emit <graph.mlk> [--asm|--cpp|--cuda] [--arch=sm_XX] "
+               " | emit <graph.mlk> [--asm|--cpp|--cuda] [--cuda-smem] "
+               "[--arch=sm_XX] "
                "[--out=<path>] [--workdir=<dir>] [--compile]\n",
                stderr);
     return 2;

@@ -54,6 +54,7 @@
 // kMaxTempSlots, and operands referencing unbound buffers.
 #pragma once
 
+#include "mlk/backend/slab_plan.h"
 #include "mlk/core/result.h"
 #include "mlk/core/symbol_table.h"
 #include "mlk/support/kernel_ir.h"
@@ -63,6 +64,23 @@ namespace mlk {
 /// Emits standalone C++ source for a KernelModule (AOT artifact form).
 [[nodiscard]] Result<std::string> emitCppSource(const KernelModule& kernel,
                                                 SymbolTable& symbols);
+
+/// Slab-mirror form (docs/polyhedral_spec.md #GPU-backend, round 21):
+/// the same emission with slab preload blocks — for every root with a
+/// plan, the root's read-only buffers are copied into a heap scratch
+/// block (RAII guard, leak-free on every exit) before the root's
+/// loops and all their reads are redirected to the copy. This is the
+/// BEHAVIORAL verification vehicle for the slab value logic: the
+/// artifact is differentially tested bit-exact against the walker
+/// (the CUDA text shares the plan and the redirect, so the value
+/// logic is pinned by construction; the device-specific prologue is
+/// structure-verified separately). With `opts.sharedMemSlabs == false`
+/// this is byte-identical to the two-argument form. ABI code 5 =
+/// slab allocation failure (recorded in the artifact header when the
+/// option is on).
+[[nodiscard]] Result<std::string> emitCppSource(
+    const KernelModule& kernel, SymbolTable& symbols,
+    const SlabEmitOptions& opts);
 
 /// The buffer executor's multi-dim routing decision
 /// (executeKernelOnBuffers): selects the ABI form of an emitted artifact

@@ -782,3 +782,82 @@ Two open roadmap items closed:
   memory tiling, stream orchestration, and PTX emission stay open —
   each needs hardware evidence before it is claimed as an
   optimization, Rule 90).
+
+### GPU backend — implementation status (round 21): shared-memory slab reuse
+
+The first of the three open GPU mechanisms lands: **read-only slab
+reuse**. A SLAB is a copy of a buffer's reachable element range placed
+in dynamic shared memory for the duration of ONE root's execution;
+every read of that buffer inside the root is redirected to the copy,
+so a block's threads hit shared memory instead of re-reading the same
+global lines. It is OPT-IN (`--cuda-smem` on `mlk-poly emit`, or
+`SlabEmitOptions`/the driver configs in code); with the option off
+every artifact is byte-identical to the round-20 form.
+
+- **Plan (`backends/cpu/slab_plan.{h,cpp}`, shared by both
+  emitters).** A buffer qualifies for a root when (a) the READ-ONLY
+  PROOF holds — no Store node anywhere in the module targets it
+  (buffer granularity; temps are store targets by construction and
+  never qualify) — and (b) its read forms' interval hulls are
+  HOST-COMPUTABLE: per-var hulls (the interval closure of every loop
+  bound naming the var, padded point loops included) are composed
+  symbolically so every bound text expands to constants and dims
+  reads only. The slab is the value-hulled range
+  [minForm, maxForm] over ALL the buffer's read forms in the root —
+  keyed by GLOBAL index value, so per-segment k symbols (the piecewise
+  split) fold into one exact span with no position collisions.
+  Constant folding (overflow-checked, degrading to symbolic text)
+  keeps the generated spans small. Reads in store-target buffers are
+  refused and the skip is RECORDED in the artifact header (Rule 148).
+- **Soundness (why the copy is invisible).** Value identity: a
+  redirected read at form F returns the value loaded from B[F] — the
+  position is F − hullMin and the load fills exactly the positions
+  whose global index lands in the hull AND inside the buffer; every
+  LIVE read has an in-bounds form (walker parity), hull-excess
+  positions are skipped by the load guard and never read. The hull is
+  a superset of every value any thread can read (guards are
+  transparent; statically empty hulls are crossed and sound). The
+  redirect changes WHERE a value is read from, never WHICH value or
+  the arithmetic order — the exactness policy is untouched.
+- **CUDA twin + barrier discipline.** Each root with a plan emits
+  BOTH device kernels: the plain form (unchanged) and a slab twin —
+  `extern __shared__` array, slabs at consecutive offsets, a
+  cooperative load (block-local rank striding the hull, uniform trip
+  so the barrier is uniform), `__syncthreads()`, then the body under
+  a live flag. The flag DISCIPLINE is the load-bearing change: the
+  padded-collapse early returns (flat guard + per-level hole guards)
+  become `mlk_live` updates so EVERY thread of the block reaches the
+  load and the barrier — a divergent `__syncthreads` would be UB.
+  The negative-store-flat `return` stays inside the body (after all
+  barriers); serial roots get the same load text (1x1 launches
+  degenerate to one thread).
+- **Runtime pick.** Dims are runtime values, so "does the slab fit?"
+  is a runtime question: the wrapper computes the byte size from the
+  same dims-only texts and launches the slab twin only when it is
+  non-negative and within the DECLARED budget (default 49152 bytes =
+  the sm_70+ dynamic-smem baseline; `SlabEmitOptions::
+  smemBudgetBytes`), the plain form otherwise. Both forms are
+  correct; the choice is recorded in the generated header, never
+  silent.
+- **Behavioral verification without hardware.** The value logic
+  (plan + preload + redirect) is shared verbatim with the C++ mirror
+  emitter (`emitCppSource(..., opts)`): per-root preload blocks copy
+  the planned buffers into heap scratch behind an RAII guard
+  (leak-free on every exit incl. the ABI error returns; code 5 = slab
+  allocation failure) and redirect their reads. The compiled mirror
+  artifact is BIT-EXACT vs the walker on the scheduled GEMM — untiled
+  AND tile-2 (partial tiles, padded hulls, split-k segments) —
+  `slab_cpp_mirror_gemm_bitexact`. The CUDA-specific prologue is
+  structure-verified (`cuda_emission_smem_structure`: twins, shared
+  decl, flag form, load guard, offset folding, runtime pick, header
+  recording, and the byte-identical default-off contract) plus
+  determinism, the serial-root form, and the stored-buffer refusal
+  (`slab_plan_gemm_analysis`, `cuda_emission_smem_deterministic`,
+  `cuda_emission_smem_serial_root`, `slab_plan_stored_buffer_refused`).
+- **Honest boundary (roadmap).** No device or nvcc has touched the
+  slab twins: they are structure-verified with the value logic pinned
+  bit-exact through the CPU mirror. No SPEEDUP is claimed anywhere —
+  whether the slabs pay is a hardware question (Rule 90). Still open:
+  chunked slabs for buffers whose hull exceeds the budget (needs the
+  segment-interleave restructure), spread block heuristics, stream
+  orchestration, PTX emission.

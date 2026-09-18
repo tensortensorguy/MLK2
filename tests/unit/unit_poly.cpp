@@ -4246,11 +4246,12 @@ MLK_TEST(poly, cuda_emission_multiaxis_text) {
 }
 
 MLK_TEST(poly, cuda_emission_multiaxis_tiled_gemm_text) {
-    // Tiled scheduled GEMM: the collapsed chain is the tile/point band
-    // [ti, i, tj, j] — the trips array carries FOUR padded trips (the
-    // point-loop trips are interval maxima over the tile prefix; the
-    // split k segments stop deeper collapse), and the geometry call
-    // passes the level count to the helper.
+    // Tiled scheduled GEMM: the collapsed chain is the tile/point
+    // prefix [ti, i] — the split k segments are sibling subtrees and
+    // stop deeper collapse, so the trips array carries TWO padded
+    // trips: the tile level's is exact (2 for tile 2 over M = 4) and
+    // the POINT level's is the interval max over the tile box (4 = the
+    // full M — partial tiles pad). Both feed the geometry helper.
     SymbolTable symbols;
     KernelModule base = buildGemmKernel(symbols);
     auto mod = buildScheduledGemm(symbols, base, 2);
@@ -4275,6 +4276,430 @@ MLK_TEST(poly, cuda_emission_multiaxis_tiled_gemm_text) {
     // Byte-identical re-emission (tiled form, helper included).
     auto again = mlk::emitCudaSource(*mod, symbols);
     MLK_CHECK(again.has_value() && *again == s);
+}
+
+// ---------------------------------------------------------------------------
+// Round 21: shared-memory slab reuse (docs/polyhedral_spec.md
+// #GPU-backend). The plan (slab_plan.h) qualifies module-wide
+// read-only buffers whose read-form hulls are dims-only; the C++
+// mirror artifact behaviorally pins the value logic bit-exact against
+// the walker; the CUDA twin is structure-verified (no nvcc here —
+// declared boundary).
+// ---------------------------------------------------------------------------
+
+/// The scheduled GEMM's roots + module-wide store table, shared by the
+/// round-21 slab tests.
+void slabTestSetup(const mlk::KernelModule& mod,
+                   std::vector<uint32_t>& roots,
+                   std::vector<bool>& stored) {
+    roots.clear();
+    stored.assign(mod.buffers.size(), false);
+    for (const KernelNode& n : mod.nodes) {
+        if (n.op == mlk::KernelOp::Store &&
+            n.bufferOut < mod.buffers.size()) {
+            stored[n.bufferOut] = true;
+        }
+    }
+    for (uint32_t i = 0; i < mod.nodes.size(); ++i) {
+        bool referenced = false;
+        for (const KernelNode& n : mod.nodes) {
+            for (const uint32_t c : n.children) {
+                referenced = referenced || c == i;
+            }
+        }
+        if (!referenced) roots.push_back(i);
+    }
+}
+
+MLK_TEST(poly, slab_plan_gemm_analysis) {
+    // Planner contract on the scheduled GEMM (tile 2): the read-only
+    // proof qualifies A and B (the accumulate target C is refused and
+    // RECORDED), the constant-folded hulls are exact, and the plan is
+    // a pure function of the module.
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    auto mod = buildScheduledGemm(symbols, base, 2);
+    MLK_CHECK(mod.has_value());
+    if (!mod.has_value()) return;
+    std::vector<uint32_t> roots;
+    std::vector<bool> stored;
+    slabTestSetup(*mod, roots, stored);
+    MLK_CHECK_EQ(roots.size(), static_cast<std::size_t>(1));
+    std::vector<std::string> dimsName;
+    for (uint32_t bid = 0; bid < mod->buffers.size(); ++bid) {
+        dimsName.push_back("buf" + std::to_string(bid) + "_dims");
+    }
+    mlk::SlabEmitOptions opts;
+    opts.sharedMemSlabs = true;
+    auto plans = mlk::planRootSlabs(*mod, roots, dimsName, stored, opts);
+    MLK_CHECK(plans.has_value());
+    if (!plans.has_value()) return;
+    MLK_CHECK_EQ(plans->size(), static_cast<std::size_t>(1));
+    const auto& plan = (*plans)[0];
+    MLK_CHECK(plan.notes.empty());
+    MLK_CHECK_EQ(plan.slabs.size(), static_cast<std::size_t>(2));
+    if (plan.slabs.size() != 2) return;
+    // Buffer-id order: A (id 0) then B (id 1); C never qualifies.
+    MLK_CHECK_EQ(plan.slabs[0].buffer, static_cast<uint32_t>(0));
+    MLK_CHECK_EQ(plan.slabs[1].buffer, static_cast<uint32_t>(1));
+    // Constant-folded hulls over the padded tile box: the reads cover
+    // exactly the full A and B rectangles [0, M*K) / [0, K*N) — the
+    // split-k segments' per-symbol hulls fold into one exact span.
+    MLK_CHECK(plan.slabs[0].minText == "0");
+    MLK_CHECK(plan.slabs[0].spanText == "12");
+    MLK_CHECK(plan.slabs[1].minText == "0");
+    MLK_CHECK(plan.slabs[1].spanText == "15");
+    // The elems texts are the dims products (the load's bounds guard).
+    MLK_CHECK(plan.slabs[0].elemsText ==
+              "((buf0_dims[0]) * buf0_dims[1])");
+    MLK_CHECK(plan.slabs[1].elemsText ==
+              "((buf1_dims[0]) * buf1_dims[1])");
+    // Pure function of the module: re-planning is identical.
+    auto again = mlk::planRootSlabs(*mod, roots, dimsName, stored, opts);
+    MLK_CHECK(again.has_value() && again->size() == 1 &&
+              (*again)[0].slabs.size() == 2);
+    if (again.has_value() && again->size() == 1 &&
+        (*again)[0].slabs.size() == 2) {
+        for (std::size_t k = 0; k < 2; ++k) {
+            MLK_CHECK((*again)[0].slabs[k].minText ==
+                      plan.slabs[k].minText);
+            MLK_CHECK((*again)[0].slabs[k].spanText ==
+                      plan.slabs[k].spanText);
+        }
+    }
+    // Options off: empty plans, no analysis.
+    auto off = mlk::planRootSlabs(*mod, roots, dimsName, stored,
+                                  mlk::SlabEmitOptions{});
+    MLK_CHECK(off.has_value() && off->size() == 1 &&
+              (*off)[0].slabs.empty());
+}
+
+MLK_TEST(poly, cuda_emission_smem_structure) {
+    // The CUDA slab twin: dynamic shared decl, live-flag hole
+    // discipline (no early return before the barrier), cooperative
+    // load with the in-bounds guard, the folded span, the redirected
+    // reads, the wrapper's runtime pick, and the header recording.
+    // The default options stay byte-identical to the historical form.
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    auto mod = buildScheduledGemm(symbols, base, 2);
+    MLK_CHECK(mod.has_value());
+    if (!mod.has_value()) return;
+    mlk::SlabEmitOptions opts;
+    opts.sharedMemSlabs = true;
+    auto src = mlk::emitCudaSource(*mod, symbols, opts);
+    MLK_CHECK(src.has_value());
+    if (!src.has_value()) {
+        std::fprintf(stderr, "  emit: %s\n", src.error().message.c_str());
+        return;
+    }
+    const std::string& s = *src;
+    // Twin kernels: the plain form AND the slab twin.
+    MLK_CHECK(s.find("__global__ void mlk_dev_0(") != std::string::npos);
+    MLK_CHECK(s.find("__global__ void mlk_dev_0_sm(") !=
+              std::string::npos);
+    // Slab prologue: one dynamic shared array.
+    MLK_CHECK(s.find("extern __shared__ double mlk_smem[];") !=
+              std::string::npos);
+    // The slab twin replaces the flat guard with the live flag...
+    MLK_CHECK(s.find("const bool mlk_live = mlk_flat < mlk_total;") !=
+              std::string::npos);
+    MLK_CHECK(s.find("mlk_live = mlk_live && ((") != std::string::npos);
+    // ...the plain twin keeps it.
+    MLK_CHECK(s.find("if (mlk_flat >= mlk_total) return;") !=
+              std::string::npos);
+    // Cooperative load: block-rank stride over the folded span with
+    // the in-bounds guard; B's slab sits at A's span offset.
+    MLK_CHECK(s.find("mlk_u < 12; mlk_u += mlk_bl") != std::string::npos);
+    MLK_CHECK(s.find("mlk_idx >= 0 && mlk_idx < (((A_dims[0]) * "
+                     "A_dims[1])))") != std::string::npos);
+    MLK_CHECK(s.find("mlk_smem[(12) + mlk_u] = B[mlk_idx];") !=
+              std::string::npos);
+    MLK_CHECK(s.find("__syncthreads();") != std::string::npos);
+    // Redirected reads (position = form - hull min, offset folded in).
+    MLK_CHECK(s.find("mlk_smem[((3*") != std::string::npos);
+    MLK_CHECK(s.find("mlk_smem[(12) + ((5*") != std::string::npos);
+    // The wrapper's runtime pick: slab twin within the declared
+    // budget, plain form otherwise.
+    MLK_CHECK(s.find("const int64_t mlk_smem_bytes = (int64_t)sizeof("
+                     "double) * ((12) + (15));") != std::string::npos);
+    MLK_CHECK(s.find("mlk_smem_bytes >= 0 && mlk_smem_bytes <= 49152") !=
+              std::string::npos);
+    MLK_CHECK(s.find("mlk_dev_0_sm<<<mlk_grid, mlk_block, "
+                     "mlk_smem_bytes>>>") != std::string::npos);
+    // Header recording (Rule 148).
+    MLK_CHECK(s.find("// Slab emission (round 21): 1 root(s) with slab "
+                     "twins") != std::string::npos);
+    // The body under the live flag: the store-flat early return stays
+    // (all barriers already passed — no divergence).
+    MLK_CHECK(s.find("if (mlk_flat < 0) { *mlk_status = 1; return; }") !=
+              std::string::npos);
+    // Default options: byte-identical to the historical emission and
+    // free of any slab scaffolding.
+    auto plainA = mlk::emitCudaSource(*mod, symbols);
+    auto plainB = mlk::emitCudaSource(*mod, symbols,
+                                      mlk::SlabEmitOptions{});
+    MLK_CHECK(plainA.has_value() && plainB.has_value() &&
+              *plainA == *plainB);
+    MLK_CHECK(plainA->find("__syncthreads") == std::string::npos);
+    MLK_CHECK(plainA->find("_sm(") == std::string::npos);
+}
+
+MLK_TEST(poly, cuda_emission_smem_deterministic) {
+    // Byte-identical re-emission with the slab option on (both
+    // emitters): the plan and the scaffolding names are pure
+    // functions of the module.
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    auto mod = buildScheduledGemm(symbols, base, 2);
+    MLK_CHECK(mod.has_value());
+    if (!mod.has_value()) return;
+    mlk::SlabEmitOptions opts;
+    opts.sharedMemSlabs = true;
+    auto a = mlk::emitCudaSource(*mod, symbols, opts);
+    auto b = mlk::emitCudaSource(*mod, symbols, opts);
+    MLK_CHECK(a.has_value() && b.has_value() && *a == *b);
+    auto c = mlk::emitCppSource(*mod, symbols, opts);
+    auto d = mlk::emitCppSource(*mod, symbols, opts);
+    MLK_CHECK(c.has_value() && d.has_value() && *c == *d);
+}
+
+MLK_TEST(poly, slab_cpp_mirror_gemm_bitexact) {
+    // THE behavioral anchor for the slab value logic: the C++ mirror
+    // artifact (preload into scratch + redirected reads, RAII guard)
+    // must be bit-exact vs the walker on the tiled GEMM — partial
+    // tiles, the padded hulls, and the split-k segments included. The
+    // CUDA twin shares the plan and the redirect verbatim, so this
+    // pins the value logic on hardware the tree cannot reach (no nvcc
+    // here); the device prologue is structure-verified separately.
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    for (const int64_t tile : {int64_t{0}, int64_t{2}}) {
+        auto mod = buildScheduledGemm(symbols, base, tile);
+        MLK_CHECK(mod.has_value());
+        if (!mod.has_value()) return;
+        constexpr std::size_t nA =
+            static_cast<std::size_t>(kTestM * kTestK);
+        constexpr std::size_t nB =
+            static_cast<std::size_t>(kTestK * kTestN);
+        constexpr std::size_t nC =
+            static_cast<std::size_t>(kTestM * kTestN);
+        SmallVector<double, 8> bufA(nA), bufB(nB);
+        for (std::size_t i = 0; i < nA; ++i) {
+            bufA[i] = static_cast<double>(i % 7) * 0.25;
+        }
+        for (std::size_t i = 0; i < nB; ++i) {
+            bufB[i] = static_cast<double>(i % 5) * 0.5;
+        }
+        SmallVector<double, 8> outW(nC, 0.0), outCpp(nC, 0.0);
+        auto bind = [&](SmallVector<double, 8>& outC) {
+            mlk::KernelBufferBindings io;
+            io.inputs.push_back(bufA.data());
+            io.inputs.push_back(bufB.data());
+            io.outputs.push_back(outC.data());
+            io.elements = nC;
+            return io;
+        };
+        auto rw = mlk::executeKernelOnBuffers(*mod, symbols, bind(outW),
+                                              nullptr);
+        MLK_CHECK(rw.has_value());
+        if (!rw.has_value()) return;
+        // The mirror text carries the scaffolding (recorded + named).
+        mlk::SlabEmitOptions opts;
+        opts.sharedMemSlabs = true;
+        auto src = mlk::emitCppSource(*mod, symbols, opts);
+        MLK_CHECK(src.has_value());
+        if (!src.has_value()) return;
+        MLK_CHECK(src->find("Slab emission (round 21)") !=
+                  std::string::npos);
+        MLK_CHECK(src->find("mlk_SlabGuard") != std::string::npos);
+        MLK_CHECK(src->find("#include <cstdlib>") != std::string::npos);
+        MLK_CHECK_EQ(backendToolchainReady(), true);
+        if (!backendToolchainReady()) return;
+        mlk::BackendDriverConfig cfg;
+        cfg.slabs = opts;
+        auto loaded = mlk::buildKernelArtifact(*mod, symbols,
+                                               mlk::ArtifactKind::Cpp,
+                                               cfg);
+        MLK_CHECK(loaded.has_value());
+        if (!loaded.has_value()) {
+            std::fprintf(stderr, "  emit/tile=%lld: %s\n",
+                         static_cast<long long>(tile),
+                         loaded.error().message.c_str());
+            return;
+        }
+        auto r = loaded->run(*mod, symbols, bind(outCpp));
+        MLK_CHECK(r.has_value());
+        if (!r.has_value()) {
+            std::fprintf(stderr, "  run/tile=%lld: %s\n",
+                         static_cast<long long>(tile),
+                         r.error().message.c_str());
+            return;
+        }
+        for (std::size_t i = 0; i < nC; ++i) {
+            MLK_CHECK(outCpp[i] == outW[i]);
+        }
+    }
+}
+
+MLK_TEST(poly, slab_plan_stored_buffer_refused) {
+    // A module where the read buffer is ALSO a store target: the
+    // read-only proof fails, the buffer keeps its global reads, the
+    // skip is RECORDED (Rule 148), and the CUDA emission with slabs
+    // enabled has no twin for that root (it degrades to the plain
+    // form, honestly).
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{4, 4};
+    a.isInput = true;
+    KernelBuffer out;
+    out.name = symbols.intern("Out");
+    out.dims = SmallVector<int64_t, 4>{4, 4};
+    out.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufOut = km.addBuffer(out);
+    (void)bufOut;  // written only through the store node's target id
+    const SymbolId vi = symbols.intern("i");
+    const SymbolId vj = symbols.intern("j");
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    KernelExpr ea;
+    ea.op = mlk::MathOp::Add;
+    ea.a.kind = mlk::KernelOperand::Kind::ElemIdx;
+    ea.a.index = static_cast<int64_t>(bufA);
+    ea.a.idxCoeffs = SmallVector<int64_t, 4>{4, 1};  // 4*i + j
+    compute.exprs.push_back(ea);
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = bufA;  // A is BOTH read and written
+    store.outIndexCoeffs = SmallVector<int64_t, 4>{4, 1};
+    {
+        const uint32_t cid = km.addNode(compute);
+        const uint32_t sid = km.addNode(store);
+        KernelNode jLoop;
+        jLoop.op = mlk::KernelOp::Loop;
+        jLoop.var = vj;
+        jLoop.begin = 0;
+        jLoop.end = 4;
+        jLoop.children.push_back(cid);
+        jLoop.children.push_back(sid);
+        const uint32_t jid = km.addNode(jLoop);
+        KernelNode iLoop;
+        iLoop.op = mlk::KernelOp::Loop;
+        iLoop.var = vi;
+        iLoop.begin = 0;
+        iLoop.end = 4;
+        iLoop.parallel = true;
+        iLoop.children.push_back(jid);
+        (void)km.addNode(iLoop);
+    }
+    std::vector<uint32_t> roots;
+    std::vector<bool> stored;
+    slabTestSetup(km, roots, stored);
+    MLK_CHECK_EQ(roots.size(), static_cast<std::size_t>(1));
+    std::vector<std::string> dimsName;
+    for (uint32_t bid = 0; bid < km.buffers.size(); ++bid) {
+        dimsName.push_back("buf" + std::to_string(bid) + "_dims");
+    }
+    mlk::SlabEmitOptions opts;
+    opts.sharedMemSlabs = true;
+    auto plans = mlk::planRootSlabs(km, roots, dimsName, stored, opts);
+    MLK_CHECK(plans.has_value());
+    if (!plans.has_value()) return;
+    MLK_CHECK_EQ(plans->size(), static_cast<std::size_t>(1));
+    MLK_CHECK((*plans)[0].slabs.empty());
+    MLK_CHECK_EQ((*plans)[0].notes.size(), static_cast<std::size_t>(1));
+    if (!(*plans)[0].notes.empty()) {
+        MLK_CHECK((*plans)[0].notes[0].find("read-only proof failed") !=
+                  std::string::npos);
+    }
+    // CUDA emission: no slab twin anywhere; the note is recorded in
+    // the generated header.
+    auto src = mlk::emitCudaSource(km, symbols, opts);
+    MLK_CHECK(src.has_value());
+    if (!src.has_value()) return;
+    MLK_CHECK(src->find("_sm(") == std::string::npos);
+    MLK_CHECK(src->find("read-only proof failed") != std::string::npos);
+    MLK_CHECK(src->find("// Slab emission (round 21): 0 root(s)") !=
+              std::string::npos);
+}
+
+MLK_TEST(poly, cuda_emission_smem_serial_root) {
+    // A serial (non-parallel-marked) root with a read-only buffer:
+    // the slab twin exists for the serial form too — same cooperative
+    // load (degenerate 1x1 geometry), same barrier discipline, and
+    // the wrapper's runtime pick. Serial kernels keep the plain
+    // one-thread body (no live flag needed — no padding holes).
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{2, 2};
+    a.isInput = true;
+    KernelBuffer out;
+    out.name = symbols.intern("Out");
+    out.dims = SmallVector<int64_t, 4>{2, 2};
+    out.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufOut = km.addBuffer(out);
+    const SymbolId vi = symbols.intern("i");
+    const SymbolId vj = symbols.intern("j");
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    KernelExpr ea;
+    ea.op = mlk::MathOp::Add;
+    ea.a.kind = mlk::KernelOperand::Kind::ElemIdx;
+    ea.a.index = static_cast<int64_t>(bufA);
+    ea.a.idxCoeffs = SmallVector<int64_t, 4>{2, 1};  // 2*i + j
+    compute.exprs.push_back(ea);
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = bufOut;
+    store.outIndexCoeffs = SmallVector<int64_t, 4>{2, 1};
+    {
+        const uint32_t cid = km.addNode(compute);
+        const uint32_t sid = km.addNode(store);
+        KernelNode jLoop;
+        jLoop.op = mlk::KernelOp::Loop;
+        jLoop.var = vj;
+        jLoop.begin = 0;
+        jLoop.end = 2;
+        jLoop.children.push_back(cid);
+        jLoop.children.push_back(sid);
+        const uint32_t jid = km.addNode(jLoop);
+        KernelNode iLoop;
+        iLoop.op = mlk::KernelOp::Loop;
+        iLoop.var = vi;
+        iLoop.begin = 0;
+        iLoop.end = 2;
+        // NOT parallel-marked -> serial root.
+        iLoop.children.push_back(jid);
+        (void)km.addNode(iLoop);
+    }
+    mlk::SlabEmitOptions opts;
+    opts.sharedMemSlabs = true;
+    auto src = mlk::emitCudaSource(km, symbols, opts);
+    MLK_CHECK(src.has_value());
+    if (!src.has_value()) {
+        std::fprintf(stderr, "  emit: %s\n", src.error().message.c_str());
+        return;
+    }
+    const std::string& s = *src;
+    MLK_CHECK(s.find("__global__ void mlk_dev_0_sm(") !=
+              std::string::npos);
+    MLK_CHECK(s.find("extern __shared__ double mlk_smem[];") !=
+              std::string::npos);
+    MLK_CHECK(s.find("mlk_u < 4; mlk_u += mlk_bl") != std::string::npos);
+    MLK_CHECK(s.find("__syncthreads();") != std::string::npos);
+    // Serial twin: no live flag, no flat decomposition.
+    MLK_CHECK(s.find("mlk_live") == std::string::npos);
+    // Redirected read with the folded hull [0, 3].
+    MLK_CHECK(s.find("mlk_smem[((2*") != std::string::npos);
+    // The runtime pick is present for the serial root too.
+    MLK_CHECK(s.find("mlk_dev_0_sm<<<mlk_grid, mlk_block, "
+                     "mlk_smem_bytes>>>") != std::string::npos);
 }
 
 // The C harness around the EXTRACTED generated geometry helper: hand-

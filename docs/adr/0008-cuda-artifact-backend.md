@@ -102,6 +102,19 @@ The hard constraints, declared up front in the spec:
    and toolchain/device absence yields structured rejections naming
    the failed probe — the declared space is reported in full and the
    winner claim downgrades honestly (Axiom 14.20/14.21).
+9. **Shared-memory slab reuse (round 21, OPT-IN)**: read-only buffers
+   with dims-only value hulls are copied into dynamic shared memory
+   per root and their reads redirected (value-identical; the hull is
+   a value-keyed superset so per-segment split symbols fold without
+   position collisions). The slab twin converts the padded-collapse
+   early returns into a live flag — every thread reaches the
+   cooperative load and the barrier (divergent __syncthreads is UB) —
+   and the wrapper picks plain/slab per launch over runtime dims
+   within a declared budget. The value logic is pinned BIT-EXACT
+   through the C++ mirror artifact (same plan, heap scratch); the
+   device prologue is structure-verified. No speedup is claimed
+   without hardware (Rule 90); default-off keeps artifacts
+   byte-identical.
 
 ## Consequences
 
@@ -113,7 +126,8 @@ The hard constraints, declared up front in the spec:
   contract, determinism, policy boundary, and driver rejection paths
   are fully test-verified; the live compile/run path is probe-gated
   and activates automatically where nvcc + a device exist.
-- Open (roadmap): block-geometry heuristics are untuned (spread
-  heuristic, shared-memory tiling, stream orchestration, PTX emission
-  — each needs hardware evidence before being claimed as an
-  optimization).
+- Open (roadmap): block-geometry heuristics are untuned; chunked
+  slabs for over-budget hulls (needs the segment-interleave
+  restructure), a spread heuristic, stream orchestration, and PTX
+  emission remain — each needs hardware evidence before being claimed
+  as an optimization.

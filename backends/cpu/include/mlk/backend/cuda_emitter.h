@@ -93,6 +93,7 @@
 // buffers, and fused chains over the temp-slot cap.
 #pragma once
 
+#include "mlk/backend/slab_plan.h"
 #include "mlk/core/result.h"
 #include "mlk/core/symbol_table.h"
 #include "mlk/support/kernel_ir.h"
@@ -104,6 +105,26 @@ namespace mlk {
 /// backend_driver.h buildGpuKernelArtifact).
 [[nodiscard]] Result<std::string> emitCudaSource(const KernelModule& kernel,
                                                  SymbolTable& symbols);
+
+/// Slab form (docs/polyhedral_spec.md #GPU-backend, round 21): for
+/// every root whose plan has slabs (read-only buffers with dims-only
+/// hulls), emits BOTH device kernels — the plain form and a slab twin
+/// that cooperatively loads the buffers' reachable ranges into
+/// dynamic shared memory (uniform prologue: every thread of the block
+/// participates in the load and the barrier, padding holes become a
+/// live-flag instead of an early return) and redirects the buffer's
+/// reads. The wrapper picks per launch at RUN time: the slab twin
+/// only when the runtime slab byte size fits the declared budget
+/// (and is non-negative), the plain form otherwise — both forms are
+/// correct, the choice is recorded, never silent. The value logic
+/// (plan + redirect) is shared verbatim with the C++ mirror, which is
+/// differentially proven bit-exact against the walker; the
+/// device-specific prologue is structure-verified. With
+/// `opts.sharedMemSlabs == false` this is byte-identical to the
+/// two-argument form.
+[[nodiscard]] Result<std::string> emitCudaSource(
+    const KernelModule& kernel, SymbolTable& symbols,
+    const SlabEmitOptions& opts);
 
 /// The emitter's exactness classification for the module (see the header
 /// contract above): true when every Compute op is in the device-exact set

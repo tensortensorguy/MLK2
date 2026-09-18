@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "mlk/backend/slab_plan.h"
 #include "mlk/core/constants.h"
 
 namespace mlk {
@@ -81,6 +82,20 @@ struct CppEmitter {
     std::vector<std::string> ptrName{};      // per buffer id
     std::vector<std::string> dimsName{};     // per buffer id
     std::vector<bool> stored{};              // per buffer id: store target
+
+    /// Active slab redirect (round 21, see slab_plan.h): per buffer id
+    /// the slab's base expression, positional offset, and hull minimum
+    /// when the buffer's reads are redirected for the current root.
+    struct SlabSite {
+        bool valid{false};
+        std::string base{};  // expression up to '[' (the scratch block)
+        std::string off{};   // positional offset text ("" for slab 0)
+        std::string min{};   // hull minimum text
+    };
+    std::vector<SlabSite> slabSites_{};
+    /// The RAII scratch-guard struct's name (minted once so the
+    /// prologue definition and the preload declarations agree).
+    std::string slabGuardType_{};
 
     [[nodiscard]] std::string uniqueName(std::string base) {
         base = sanitize(std::move(base));
@@ -212,6 +227,18 @@ struct CppEmitter {
                 auto flat = affine(o.idxCoeffs, o.idxOffset);
                 if (!flat.has_value()) {
                     return std::unexpected<Error>(flat.error());
+                }
+                // Slab redirect (value-identical: the slab holds a copy
+                // of the buffer's reachable range, see slab_plan.h).
+                if (o.index < static_cast<int64_t>(slabSites_.size()) &&
+                    slabSites_[static_cast<std::size_t>(o.index)].valid) {
+                    const SlabSite& site =
+                        slabSites_[static_cast<std::size_t>(o.index)];
+                    return site.base + "[" +
+                           (site.off.empty()
+                                ? std::string()
+                                : site.off + " + ") +
+                           "(" + *flat + ") - (" + site.min + ")]";
                 }
                 return *ptr + "[" + *flat + "]";
             }
@@ -661,6 +688,12 @@ bool isMultiDimModule(const KernelModule& kernel) noexcept {
 
 Result<std::string> emitCppSource(const KernelModule& kernel,
                                   SymbolTable& symbols) {
+    return emitCppSource(kernel, symbols, SlabEmitOptions{});
+}
+
+Result<std::string> emitCppSource(const KernelModule& kernel,
+                                  SymbolTable& symbols,
+                                  const SlabEmitOptions& opts) {
     if (kernel.nodes.empty()) {
         return err(ErrorCode::InvalidGraph,
                    "cannot emit empty kernel module");
@@ -683,6 +716,35 @@ Result<std::string> emitCppSource(const KernelModule& kernel,
             n.bufferOut < kernel.buffers.size()) {
             em.stored[n.bufferOut] = true;
         }
+    }
+
+    // Slab planning (round 21, slab_plan.h): one plan per forest root
+    // in id order; per-buffer redirect sites are minted at emission
+    // time through the unique-name pool so they can never collide with
+    // module names.
+    const bool slabArtifact = opts.sharedMemSlabs && em.multiDim;
+    std::vector<uint32_t> slabRoots;
+    std::vector<RootSlabPlan> slabPlans;
+    if (slabArtifact) {
+        for (uint32_t i = 0; i < kernel.nodes.size(); ++i) {
+            bool referenced = false;
+            for (const KernelNode& n : kernel.nodes) {
+                for (const uint32_t c : n.children) {
+                    referenced = referenced || c == i;
+                }
+            }
+            if (!referenced) slabRoots.push_back(i);
+        }
+        auto plans =
+            planRootSlabs(kernel, slabRoots, em.dimsName, em.stored, opts);
+        if (!plans.has_value()) {
+            return std::unexpected<Error>(plans.error());
+        }
+        slabPlans = std::move(*plans);
+    }
+    em.slabSites_.assign(kernel.buffers.size(), {});
+    if (slabArtifact) {
+        em.slabGuardType_ = em.uniqueName("mlk_SlabGuard");
     }
 
     // Signature.
@@ -755,6 +817,7 @@ Result<std::string> emitCppSource(const KernelModule& kernel,
 
     // Body: walk the forest roots (unreferenced nodes; children execute
     // through their parents — the walker's root discipline).
+    std::size_t slabCursor = 0;
     for (uint32_t i = 0; i < kernel.nodes.size(); ++i) {
         bool referenced = false;
         for (const KernelNode& n : kernel.nodes) {
@@ -765,7 +828,58 @@ Result<std::string> emitCppSource(const KernelModule& kernel,
         if (referenced) continue;
         const KernelNode& top = kernel.nodes[i];
         if (em.multiDim) {
+            // Slab preload (round 21): when the plan for this root has
+            // slabs, wrap the root in a block that copies the planned
+            // read-only buffers into heap scratch (RAII guard, leak-free
+            // on every exit including the error returns) and redirects
+            // their reads. Value-identical by the slab soundness
+            // contract; differentially pinned by the cpp_backend tests
+            // with the option enabled.
+            const RootSlabPlan* plan = nullptr;
+            if (slabCursor < slabRoots.size() &&
+                slabRoots[slabCursor] == i) {
+                plan = &slabPlans[slabCursor];
+                ++slabCursor;
+            }
+            const bool wrap = plan != nullptr && !plan->slabs.empty();
+            if (wrap) {
+                em.body += em.indent() + "{\n";
+                ++em.depth;
+                for (const Slab& s : plan->slabs) {
+                    const std::string guard = em.uniqueName("mlk_sm");
+                    em.body += em.indent() + em.slabGuardType_ + " " +
+                               guard + "(" + s.spanText + ");\n";
+                    em.body += em.indent() + "if ((" + s.spanText +
+                               ") > 0 && " + guard +
+                               ".p == 0) return 5;\n";
+                    const std::string u = em.uniqueName("mlk_u");
+                    const std::string idx = em.uniqueName("mlk_idx");
+                    em.body += em.indent() + "for (int64_t " + u +
+                               " = 0; " + u + " < (" + s.spanText +
+                               "); ++" + u + ") {\n";
+                    em.body += em.indent() + "    const int64_t " + idx +
+                               " = (" + s.minText + ") + " + u + ";\n";
+                    em.body += em.indent() + "    if (" + idx +
+                               " >= 0 && " + idx + " < (" +
+                               s.elemsText + ")) { " + guard + ".p[" +
+                               u + "] = " + em.ptrName[s.buffer] + "[" +
+                               idx + "]; }\n";
+                    em.body += em.indent() + "}\n";
+                    auto& site = em.slabSites_[s.buffer];
+                    site.valid = true;
+                    site.base = guard + ".p";
+                    site.off = "";
+                    site.min = s.minText;
+                }
+            }
             auto r = em.emitNode(i);
+            if (wrap) {
+                for (const Slab& s : plan->slabs) {
+                    em.slabSites_[s.buffer] = {};
+                }
+                --em.depth;
+                em.body += em.indent() + "}\n";
+            }
             if (!r.has_value()) {
                 return std::unexpected<Error>(r.error());
             }
@@ -858,6 +972,19 @@ Result<std::string> emitCppSource(const KernelModule& kernel,
            (em.needsPoly7 ? "poly7" : "libm") + "; pragmas are guarded "
            "by #ifdef _OPENMP (inert without -fopenmp; parallel rows "
            "write disjoint slabs, so any schedule is deterministic).\n";
+    if (slabArtifact) {
+        out += "// Slab emission (round 21): enabled — read-only buffers "
+               "with dims-only hulls are copied into per-root scratch "
+               "blocks and their reads redirected (value-identical; "
+               "docs/polyhedral_spec.md #GPU-backend). ABI code 5 = slab "
+               "allocation failure.\n";
+        for (std::size_t r = 0; r < slabPlans.size(); ++r) {
+            for (const std::string& note : slabPlans[r].notes) {
+                out += "// slab plan root " + std::to_string(r) + ": " +
+                       note + "\n";
+            }
+        }
+    }
     if (em.nestedParallelSerial != 0) {
         out += "// Single parallel level: " +
                std::to_string(em.nestedParallelSerial) + " nested "
@@ -866,6 +993,26 @@ Result<std::string> emitCppSource(const KernelModule& kernel,
                "threads pay).\n";
     }
     out += "#include <cmath>\n#include <cstdint>\n";
+    if (slabArtifact) {
+        // Slab scratch guard: RAII over the heap block so the error
+        // returns inside the kernel (negative store flat, allocation
+        // failure) can never leak the scratch. The name was minted
+        // through the unique-name pool before the body walk, so the
+        // definition and the preload declarations always agree.
+        const std::string& guardType = em.slabGuardType_;
+        out += "#include <cstdlib>\n";
+        out += "\n// Slab scratch guard (round 21): leak-free on every exit.\n";
+        out += "struct " + guardType + " {\n"
+               "    double* p;\n"
+               "    explicit " + guardType + "(int64_t mlk_n)\n"
+               "        : p(mlk_n > 0 ? (double*)malloc((size_t)mlk_n *\n"
+               "                        sizeof(double)) : 0) {}\n"
+               "    ~" + guardType + "() { free(p); }\n"
+               "    " + guardType + "(const " + guardType + "&) = delete;\n"
+               "    " + guardType + "& operator=(const " + guardType +
+               "&) = delete;\n"
+               "};\n";
+    }
     if (em.needsPoly7) emitPoly7Prologue(out);
     out += "\n";
     out += em.body;

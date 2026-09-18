@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "mlk/backend/cpp_emitter.h"
+#include "mlk/backend/slab_plan.h"
 #include "mlk/core/constants.h"
 
 namespace mlk {
@@ -98,6 +99,25 @@ struct CudaEmitter {
     std::vector<std::string> dimsName{};
     std::vector<bool> stored{};
     std::vector<bool> bindable{};
+
+    /// Active slab redirect (round 21, see slab_plan.h): per buffer id
+    /// the slab's base expression (the dynamic shared array), its
+    /// positional offset within that array, and the hull minimum, when
+    /// the buffer's reads are redirected for the current kernel.
+    struct SlabSite {
+        bool valid{false};
+        std::string base{};  // the shared-memory array name
+        std::string off{};   // positional offset text ("" for slab 0)
+        std::string min{};   // hull minimum text
+    };
+    std::vector<SlabSite> slabSites_{};
+    /// Declared smem budget (bytes) for the wrapper's runtime pick.
+    int64_t smemBudgetBytes_{49152};
+    /// Header recording (Rule 148): roots with slab twins + per-root
+    /// skip notes. Empty unless the option is on (the default output
+    /// stays byte-identical).
+    std::size_t slabRootCount_{0};
+    std::vector<std::string> slabHeaderNotes_{};
 
     [[nodiscard]] std::string uniqueName(std::string base) {
         base = sanitize(std::move(base));
@@ -232,6 +252,18 @@ struct CudaEmitter {
                 auto flat = affine(o.idxCoeffs, o.idxOffset);
                 if (!flat.has_value()) {
                     return std::unexpected<Error>(flat.error());
+                }
+                // Slab redirect (value-identical: the slab holds a copy
+                // of the buffer's reachable range, see slab_plan.h).
+                if (o.index < static_cast<int64_t>(slabSites_.size()) &&
+                    slabSites_[static_cast<std::size_t>(o.index)].valid) {
+                    const SlabSite& site =
+                        slabSites_[static_cast<std::size_t>(o.index)];
+                    return site.base + "[" +
+                           (site.off.empty()
+                                ? std::string()
+                                : site.off + " + ") +
+                           "(" + *flat + ") - (" + site.min + ")]";
                 }
                 return *ptr + "[" + *flat + "]";
             }
@@ -707,6 +739,15 @@ struct CudaEmitter {
     /// Emits ONE device kernel for one forest root. collapsed = the
     /// chain of parallel-marked unit-step loops peeled into the grid
     /// (possibly empty -> a one-thread serial launch, recorded).
+    /// `fn` is caller-minted (the plain form and the slab twin of a
+    /// root share one index); `slab` non-null enables the SLAB TWIN
+    /// form for that root (see slab_plan.h): padding holes become a
+    /// live-flag instead of an early return so EVERY thread of the
+    /// block reaches the cooperative load and the barrier (barrier
+    /// uniformity — a divergent __syncthreads is UB), and the planned
+    /// buffers' reads are redirected to the shared copy. The parallel
+    /// mark counters are consumed by the PLAIN pass only (the twin is
+    /// the same root, not a new one).
     /// Padded grid (spec #GPU-backend: tile loops -> blocks, point
     /// loops -> threads): per-level PADDED trip counts are the exact
     /// interval max of the level's trip over the prefix box, so a flat
@@ -732,9 +773,9 @@ struct CudaEmitter {
     /// by cuda_emission_geometry_helper_behavioral).
     [[nodiscard]] Result<void> emitDeviceKernel(
         const uint32_t rootId,
-        const SmallVector<uint32_t, 8>& collapsed) {
-        const std::string fn = "mlk_dev_" + i64(static_cast<int64_t>(
-                                                  devKernelCount_++));
+        const SmallVector<uint32_t, 8>& collapsed,
+        const std::string& fn,
+        const RootSlabPlan* slab) {
         devBody += "\n__global__ void " + fn + "(";
         bool first = true;
         for (uint32_t bid = 0; bid < km.buffers.size(); ++bid) {
@@ -758,6 +799,34 @@ struct CudaEmitter {
                        dimsName[bid] + ";\n";
         }
         devBody += "    (void)mlk_scalars; (void)mlk_n_scalars;\n";
+
+        // Slab twin prologue (round 21): ONE dynamic shared array; the
+        // planned slabs occupy consecutive ranges (offsets folded into
+        // the redirect positions). The names are minted through the
+        // unique-name pool so module names can never collide.
+        std::string smemName;
+        std::string liveName;
+        if (slab != nullptr) {
+            smemName = uniqueName("mlk_smem");
+            liveName = uniqueName("mlk_live");
+            devBody += "    extern __shared__ double " + smemName +
+                       "[];\n";
+            slabSites_.assign(km.buffers.size(), {});
+            std::vector<std::string> priorSpans;
+            for (const Slab& s : slab->slabs) {
+                auto& site = slabSites_[s.buffer];
+                site.valid = true;
+                site.base = smemName;
+                site.off = priorSpans.empty()
+                               ? std::string()
+                               : "(" + priorSpans[0] + ")";
+                for (std::size_t k = 1; k < priorSpans.size(); ++k) {
+                    site.off += " + (" + priorSpans[k] + ")";
+                }
+                site.min = s.minText;
+                priorSpans.push_back(s.spanText);
+            }
+        }
 
         if (!collapsed.empty()) {
             // Padded collapse — pass 0 + pass 1 via the shared level
@@ -794,7 +863,15 @@ struct CudaEmitter {
                        "(int64_t)blockDim.y + (int64_t)threadIdx.y) *\n"
                        "            (int64_t)blockDim.x +\n"
                        "        (int64_t)threadIdx.x;\n";
-            devBody += "    if (mlk_flat >= mlk_total) return;\n";
+            if (slab != nullptr) {
+                // Slab twin: the flat guard becomes the live flag —
+                // every thread (padding holes and fallback excess
+                // alike) must reach the cooperative load + barrier.
+                devBody += "    const bool " + liveName +
+                           " = mlk_flat < mlk_total;\n";
+            } else {
+                devBody += "    if (mlk_flat >= mlk_total) return;\n";
+            }
             devBody += "    int64_t mlk_rem = mlk_flat;\n";
             for (std::size_t l = 0; l < levels.size(); ++l) {
                 const std::string var = prefixVarNames_[l];
@@ -819,14 +896,64 @@ struct CudaEmitter {
                 devBody += "    int64_t " + var + " = " +
                            levels[l].beginText +
                            " + " + lsuf + ";\n";
-                devBody += "    if (" + var + " > " + levels[l].endText +
-                           ") return;\n";
+                if (slab != nullptr) {
+                    // Level holes fold into the live flag (no early
+                    // return — barrier uniformity).
+                    devBody += "    " + liveName + " = " + liveName +
+                               " && ((" + var + ") <= (" +
+                               levels[l].endText + "));\n";
+                } else {
+                    devBody += "    if (" + var + " > " +
+                               levels[l].endText + ") return;\n";
+                }
                 varNames.push_back(var);
             }
-            ++collapsedRoots;
-            // The collapsed levels' parallel marks ARE the grid proof
-            // (recorded as consumed); deeper marks stay serial.
-            parallelMarks += collapsed.size();
+            if (slab != nullptr) {
+                // Cooperative slab load (ALL threads — the block-local
+                // rank strides the hull; hull-excess / out-of-bounds
+                // positions are skipped, live reads are always
+                // covered). Uniform trip (dims-only texts) keeps the
+                // barrier uniform.
+                const std::string bl = uniqueName("mlk_bl");
+                const std::string rank = uniqueName("mlk_rank");
+                const std::string u = uniqueName("mlk_u");
+                const std::string idx = uniqueName("mlk_idx");
+                devBody += "    {\n";
+                devBody += "        const int64_t " + bl +
+                           " = (int64_t)blockDim.x * (int64_t)blockDim.y "
+                           "* (int64_t)blockDim.z;\n";
+                devBody += "        const int64_t " + rank +
+                           " = ((int64_t)threadIdx.z * "
+                           "(int64_t)blockDim.y + (int64_t)threadIdx.y) * "
+                           "(int64_t)blockDim.x + (int64_t)threadIdx.x;\n";
+                for (const Slab& s : slab->slabs) {
+                    const SlabSite& site =
+                        slabSites_[static_cast<std::size_t>(s.buffer)];
+                    devBody += "        for (int64_t " + u + " = " + rank +
+                               "; " + u + " < " + s.spanText + "; " + u +
+                               " += " + bl + ") {\n";
+                    devBody += "            const int64_t " + idx +
+                               " = (" + s.minText + ") + " + u + ";\n";
+                    devBody += "            if (" + idx + " >= 0 && " +
+                               idx + " < (" + s.elemsText + ")) { " +
+                               smemName + "[" +
+                               (site.off.empty()
+                                    ? std::string()
+                                    : site.off + " + ") +
+                               u + "] = " + ptrName[s.buffer] + "[" +
+                               idx + "]; }\n";
+                    devBody += "        }\n";
+                }
+                devBody += "        __syncthreads();\n";
+                devBody += "    }\n";
+            }
+            if (slab == nullptr) {
+                ++collapsedRoots;
+                // The collapsed levels' parallel marks ARE the grid
+                // proof (recorded as consumed); deeper marks stay
+                // serial. Consumed by the PLAIN pass only.
+                parallelMarks += collapsed.size();
+            }
             // The deepest peeled level's body executes with the
             // collapsed vars seeded on the stack.
             const KernelNode& deepest = km.nodes[collapsed.back()];
@@ -835,18 +962,67 @@ struct CudaEmitter {
                            "cuda emitter: non-unit loop step in a "
                            "multi-dim nest");
             }
+            if (slab != nullptr) {
+                devBody += "    if (" + liveName + ") {\n";
+            }
             depth = 1;
             MLK_TRYV(emitChildList(deepest.children, false));
             depth = 0;
+            if (slab != nullptr) {
+                devBody += "    }\n";
+            }
             prefixIntervals_.clear();
             prefixVarNames_.clear();
         } else {
             // No collapse: the whole root executes in ONE thread (the
             // walker's serial semantics verbatim; recorded in the
             // header — never a silent loss of parallelism).
-            ++serialRoots;
+            if (slab == nullptr) ++serialRoots;
+            if (slab != nullptr) {
+                // Serial launches are 1x1 (the geometry helper's n = 0
+                // shape), so the cooperative load degenerates to one
+                // thread covering the whole hull — the same barrier
+                // discipline keeps the two paths textually uniform.
+                const std::string bl = uniqueName("mlk_bl");
+                const std::string rank = uniqueName("mlk_rank");
+                const std::string u = uniqueName("mlk_u");
+                const std::string idx = uniqueName("mlk_idx");
+                devBody += "    {\n";
+                devBody += "        const int64_t " + bl +
+                           " = (int64_t)blockDim.x * (int64_t)blockDim.y "
+                           "* (int64_t)blockDim.z;\n";
+                devBody += "        const int64_t " + rank +
+                           " = ((int64_t)threadIdx.z * "
+                           "(int64_t)blockDim.y + (int64_t)threadIdx.y) * "
+                           "(int64_t)blockDim.x + (int64_t)threadIdx.x;\n";
+                for (const Slab& s : slab->slabs) {
+                    const SlabSite& site =
+                        slabSites_[static_cast<std::size_t>(s.buffer)];
+                    devBody += "        for (int64_t " + u + " = " + rank +
+                               "; " + u + " < " + s.spanText + "; " + u +
+                               " += " + bl + ") {\n";
+                    devBody += "            const int64_t " + idx +
+                               " = (" + s.minText + ") + " + u + ";\n";
+                    devBody += "            if (" + idx + " >= 0 && " +
+                               idx + " < (" + s.elemsText + ")) { " +
+                               smemName + "[" +
+                               (site.off.empty()
+                                    ? std::string()
+                                    : site.off + " + ") +
+                               u + "] = " + ptrName[s.buffer] + "[" +
+                               idx + "]; }\n";
+                    devBody += "        }\n";
+                }
+                devBody += "        __syncthreads();\n";
+                devBody += "    }\n";
+            }
             depth = 0;
             MLK_TRYV(emitNode(rootId));
+        }
+        if (slab != nullptr) {
+            // The redirect is per-kernel state: clear it so no other
+            // root's plain pass can inherit it.
+            std::fill(slabSites_.begin(), slabSites_.end(), SlabSite{});
         }
         devBody += "}\n";
         varNames.clear();
@@ -1136,12 +1312,41 @@ struct CudaEmitter {
             hostBody += "            const dim3 mlk_block("
                         "(unsigned)mlk_b[0], (unsigned)mlk_b[1], "
                         "(unsigned)mlk_b[2]);\n";
-            hostBody += "            " + L.fn + "<<<mlk_grid, mlk_block>>>(" +
-                        args + ");\n";
-            hostBody += "            if (cudaGetLastError() != cudaSuccess)"
-                        " { mlk_code = 3; goto mlk_fail; }\n";
-            hostBody += "            if (cudaDeviceSynchronize() != "
-                        "cudaSuccess) { mlk_code = 3; goto mlk_fail; }\n";
+            if (L.slabFn.empty()) {
+                hostBody += "            " + L.fn + "<<<mlk_grid, "
+                            "mlk_block>>>(" + args + ");\n";
+                hostBody += "            if (cudaGetLastError() != "
+                            "cudaSuccess) { mlk_code = 3; goto mlk_fail; }\n";
+                hostBody += "            if (cudaDeviceSynchronize() != "
+                            "cudaSuccess) { mlk_code = 3; goto mlk_fail; }\n";
+            } else {
+                // Runtime pick (round 21): the slab twin only when the
+                // runtime byte size fits the declared budget (and is
+                // not negative — statically empty hulls); the plain
+                // form otherwise. Both forms are correct; the pick is
+                // a launch-time decision over runtime dims, recorded
+                // in the generated header.
+                hostBody += "            const int64_t mlk_smem_bytes = " +
+                            L.slabBytesExpr + ";\n";
+                hostBody += "            if (mlk_smem_bytes >= 0 && "
+                            "mlk_smem_bytes <= " +
+                            i64(smemBudgetBytes_) + ") {\n";
+                hostBody += "                " + L.slabFn +
+                            "<<<mlk_grid, mlk_block, mlk_smem_bytes>>>(" +
+                            args + ");\n";
+                hostBody += "                if (cudaGetLastError() != "
+                            "cudaSuccess) { mlk_code = 3; goto mlk_fail; }\n";
+                hostBody += "                if (cudaDeviceSynchronize() != "
+                            "cudaSuccess) { mlk_code = 3; goto mlk_fail; }\n";
+                hostBody += "            } else {\n";
+                hostBody += "                " + L.fn + "<<<mlk_grid, "
+                            "mlk_block>>>(" + args + ");\n";
+                hostBody += "                if (cudaGetLastError() != "
+                            "cudaSuccess) { mlk_code = 3; goto mlk_fail; }\n";
+                hostBody += "                if (cudaDeviceSynchronize() != "
+                            "cudaSuccess) { mlk_code = 3; goto mlk_fail; }\n";
+                hostBody += "            }\n";
+            }
             hostBody += "        }\n";
             hostBody += "    }\n";
         }
@@ -1179,9 +1384,14 @@ struct CudaEmitter {
     }
 
     struct RootLaunch {
-        std::string fn{};         // __global__ function name
+        std::string fn{};         // __global__ function name (plain form)
         std::string totalExpr{};  // host-side trip-count expression
         std::vector<std::string> tripExprs{};  // per-level padded trips
+        /// Slab twin name + the runtime byte-size expression; empty
+        /// when the root has no slab twin (the wrapper then always
+        /// launches the plain form).
+        std::string slabFn{};
+        std::string slabBytesExpr{};
     };
     std::vector<RootLaunch> rootLaunches_{};
 
@@ -1347,6 +1557,12 @@ bool cudaArtifactBitExactPolicy(const KernelModule& kernel,
 
 Result<std::string> emitCudaSource(const KernelModule& kernel,
                                    SymbolTable& symbols) {
+    return emitCudaSource(kernel, symbols, SlabEmitOptions{});
+}
+
+Result<std::string> emitCudaSource(const KernelModule& kernel,
+                                   SymbolTable& symbols,
+                                   const SlabEmitOptions& opts) {
     if (kernel.nodes.empty()) {
         return err(ErrorCode::InvalidGraph,
                    "cannot emit empty kernel module");
@@ -1391,6 +1607,8 @@ Result<std::string> emitCudaSource(const KernelModule& kernel,
         return err(ErrorCode::InvalidGraph,
                    "cuda emitter: module has no bindable buffers");
     }
+    em.slabSites_.assign(kernel.buffers.size(), {});
+    em.smemBudgetBytes_ = opts.smemBudgetBytes;
 
     if (em.multiDim) {
         // Roots (unreferenced nodes) in id order — the walker's root
@@ -1411,18 +1629,65 @@ Result<std::string> emitCudaSource(const KernelModule& kernel,
                            i64(static_cast<int64_t>(kCudaMaxDeviceKernels)) +
                            "-root device-kernel cap");
         }
-        for (const uint32_t rootId : roots) {
+        // Slab planning (round 21, slab_plan.h): one plan per root;
+        // roots with qualifying slabs get BOTH device kernels (plain
+        // + slab twin) and a runtime pick in the wrapper.
+        std::vector<RootSlabPlan> plans;
+        if (opts.sharedMemSlabs) {
+            auto p = planRootSlabs(kernel, roots, em.dimsName, em.stored,
+                                   opts);
+            if (!p.has_value()) {
+                return std::unexpected<Error>(p.error());
+            }
+            plans = std::move(*p);
+        } else {
+            plans.resize(roots.size());
+        }
+        std::size_t slabRootCount = 0;
+        for (std::size_t rootIdx = 0; rootIdx < roots.size(); ++rootIdx) {
+            const uint32_t rootId = roots[rootIdx];
             const SmallVector<uint32_t, 8> chain = em.collapseChain(rootId);
-            const std::size_t fnIdx = em.devKernelCount_;
-            auto emitted = em.emitDeviceKernel(rootId, chain);
+            const std::size_t fnIdx = em.devKernelCount_++;
+            const std::string plainFn =
+                "mlk_dev_" + i64(static_cast<int64_t>(fnIdx));
+            const RootSlabPlan& plan = plans[rootIdx];
+            const bool twin = !plan.slabs.empty();
+            auto emitted =
+                em.emitDeviceKernel(rootId, chain, plainFn, nullptr);
             if (!emitted.has_value()) {
                 return std::unexpected<Error>(emitted.error());
             }
+            std::string slabFn;
+            std::string slabBytes;
+            if (twin) {
+                ++slabRootCount;
+                slabFn = plainFn + "_sm";
+                auto twin2 = em.emitDeviceKernel(rootId, chain, slabFn,
+                                                 &plan);
+                if (!twin2.has_value()) {
+                    return std::unexpected<Error>(twin2.error());
+                }
+                std::string spans;
+                for (const Slab& s : plan.slabs) {
+                    spans = spans.empty()
+                                ? "(" + s.spanText + ")"
+                                : spans + " + (" + s.spanText + ")";
+                }
+                slabBytes =
+                    "(int64_t)sizeof(double) * (" + spans + ")";
+            }
             MLK_TRY_VAR(launch, em.hostLaunchInfo(chain));
             em.rootLaunches_.push_back(CudaEmitter::RootLaunch{
-                "mlk_dev_" + i64(static_cast<int64_t>(fnIdx)),
-                launch.second, launch.first});
+                plainFn, launch.second, launch.first, slabFn,
+                slabBytes});
+            for (const std::string& note : plan.notes) {
+                em.slabHeaderNotes_.push_back("root" +
+                                              i64(static_cast<int64_t>(
+                                                  rootIdx)) +
+                                              ": " + note);
+            }
         }
+        em.slabRootCount_ = slabRootCount;
         auto wrapper = em.emitHostWrapper();
         if (!wrapper.has_value()) {
             return std::unexpected<Error>(wrapper.error());
@@ -1650,6 +1915,19 @@ Result<std::string> emitCudaSource(const KernelModule& kernel,
            "module's static temp dims, zero-initialized (the walker's "
            "temp model); ABI temp table entries are accepted for "
            "uniformity and ignored.\n";
+    if (opts.sharedMemSlabs && em.multiDim) {
+        out += "// Slab emission (round 21): " +
+               i64(static_cast<int64_t>(em.slabRootCount_)) +
+               " root(s) with slab twins; the wrapper picks per launch "
+               "at RUN time — slab twin when the runtime byte size is "
+               "within the declared budget (" +
+               i64(opts.smemBudgetBytes) +
+               " bytes), plain form otherwise (both correct; the pick "
+               "is over runtime dims, never silent).\n";
+        for (const std::string& note : em.slabHeaderNotes_) {
+            out += "// slab plan " + note + "\n";
+        }
+    }
     out += "#include <cstdint>\n";
     if (em.needsPoly7) emitPoly7DevicePrologue(out);
     out += "\n";
