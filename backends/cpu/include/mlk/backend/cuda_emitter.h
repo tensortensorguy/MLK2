@@ -34,7 +34,7 @@
 // Thread mapping from proven marks (spec #GPU-backend): the outermost
 // chain of parallel-marked loops with RECTANGULAR bounds (constants or
 // buffer-dim refs only — a grid launch needs constant trip counts) is
-// collapsed into a 1-D grid, one thread per instance tuple, decomposed
+// collapsed into a GRID, one thread per instance tuple, decomposed
 // row-major (outermost first — the walker's stack order). Every deeper
 // level — serial, carried, tile/point, guards, split segments — executes
 // as a serial loop inside the thread in the walker's exact order, so the
@@ -42,6 +42,25 @@
 // computes identically. A root whose first loop is not parallel-marked
 // (or a root that is a Guard/compute region) launches with ONE thread and
 // records the boundary in the header (Rule 148: recorded, never silent).
+//
+// MULTI-AXIS launch geometry (round 20): the collapsed levels are mapped
+// onto the full CUDA (gridDim, blockDim) product space by a generated
+// host-side greedy over the RUNTIME padded trips — the innermost levels
+// take the block axes (packed, cumulative product <= 1024, per-axis caps
+// 1024/1024/64), the remaining levels take the grid axes innermost-first
+// (gx, then gy, then gz; caps 2^31-1/65535/65535), and any shape that
+// cannot be covered without clamping a dim keeps the historical 1-D flat
+// geometry (grid = ceil(total/1024), block = min(total, 1024)). The
+// helper NEVER clamps: every launch dim equals its axis product exactly,
+// so the hardware thread space bijectively covers the padded instance
+// space. Because the axis runs are consecutive in chain order, radix
+// associativity makes the hardware flat linearization (x fastest over
+// gz,gy,gx,bz,by,bx products) EQUAL the row-major per-level decomposition
+// for any conforming geometry — the device's div/mod chain is invariant
+// to the assignment. The helper's generated text is plain C++ and is
+// behaviorally pinned by cuda_emission_geometry_helper_behavioral, which
+// compiles the emitted text with cc and checks assignments plus the
+// flat-invariance property natively.
 //   - Affine-equality guards and piecewise-split segment bounds evaluate
 //     per-thread with the thread's own coordinates: segments that exclude
 //     it have empty ranges and cost zero iterations — the split form

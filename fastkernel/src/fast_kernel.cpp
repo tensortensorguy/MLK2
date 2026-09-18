@@ -538,6 +538,7 @@ const char* execPathName(const ExecPath p) noexcept {
         case ExecPath::Walker: return "walker";
         case ExecPath::NativeAsm: return "native-asm";
         case ExecPath::NativeCpp: return "native-cpp";
+        case ExecPath::NativeCuda: return "native-cuda";
     }
     return "unknown";
 }
@@ -720,11 +721,15 @@ template <typename Fn>
 
 /// The fingerprint binds EVERY cache-relevant component (Axiom 14.22):
 /// kernel source hash, artifact kind, compiler, policy, budget mode,
-/// environment descriptor, cache format version.
+/// environment descriptor, cache format version — and, for the Cuda
+/// path, the DECLARED GPU compiler + arch (two arch declarations are
+/// different artifacts and must never share a cache entry).
 [[nodiscard]] std::string artifactFingerprint(const KernelModule& kernel,
                                               const ExecPath exec,
                                               const BackendDriverConfig&
                                                   driver,
+                                              const GpuBackendDriverConfig&
+                                                  gpu,
                                               const BudgetMode mode,
                                               const EnvironmentModel& env) {
     uint64_t h = 0xcbf29ce484222325ULL;
@@ -735,6 +740,10 @@ template <typename Fn>
     const uint8_t execV = static_cast<uint8_t>(exec);
     h = fnv1a64(&execV, sizeof(execV), h);
     h = fnv1a64String(driver.compiler, h);
+    if (exec == ExecPath::NativeCuda) {
+        h = fnv1a64String(gpu.compiler, h);
+        h = fnv1a64String(gpu.arch, h);
+    }
     const char* policy = kFastKernelPolicy;
     h = fnv1a64(policy, std::strlen(policy), h);
     const uint8_t modeV = static_cast<uint8_t>(mode);
@@ -782,6 +791,9 @@ template <typename Fn>
 }
 
 /// Native path resolution: cache probe (M^reuse) or build (M^first).
+/// The Cuda path builds through the dedicated GPU entry points (the
+/// plain buildKernelArtifact rejects Cuda by contract so the arch flag
+/// can never be silently defaulted — spec #GPU-backend).
 [[nodiscard]] Result<std::pair<LoadedKernel, VariantCertificate>>
 obtainNativeKernel(const KernelModule& kernel, SymbolTable& symbols,
                    const ExecPath exec,
@@ -793,7 +805,7 @@ obtainNativeKernel(const KernelModule& kernel, SymbolTable& symbols,
                                   : ArtifactKind::Cpp;
     VariantCertificate cert;
     const std::string fp =
-        artifactFingerprint(kernel, exec, config.driver,
+        artifactFingerprint(kernel, exec, config.driver, config.gpu,
                             config.budget.mode, env);
     cert.fingerprint = fp;
     const bool caching = !config.cacheDir.empty();
@@ -838,10 +850,15 @@ obtainNativeKernel(const KernelModule& kernel, SymbolTable& symbols,
         artifactDir = cacheDirName;
     }
     auto built =
-        artifactDir.empty()
-            ? buildKernelArtifact(kernel, symbols, kind, config.driver)
-            : buildKernelArtifactInDir(kernel, symbols, kind,
-                                       config.driver, artifactDir);
+        exec == ExecPath::NativeCuda
+            ? (artifactDir.empty()
+                   ? buildGpuKernelArtifact(kernel, symbols, config.gpu)
+                   : buildGpuKernelArtifactInDir(kernel, symbols,
+                                                 config.gpu, artifactDir))
+            : (artifactDir.empty()
+                   ? buildKernelArtifact(kernel, symbols, kind, config.driver)
+                   : buildKernelArtifactInDir(kernel, symbols, kind,
+                                              config.driver, artifactDir));
     const double t1 = nowSeconds();
     if (!built.has_value()) {
         return err(built.error().code,

@@ -146,11 +146,18 @@ struct LaunchCoverage {
 
 /// Execution path of a variant (part of the launch configuration,
 /// Axiom 14.13): the buffer executor (walker) or a native artifact
-/// built out-of-process from the emitted assembly / C++ source.
+/// built out-of-process from the emitted assembly / C++ source / CUDA
+/// source (the GPU artifact builds through the dedicated GPU driver
+/// entry points — the arch flag is DECLARED, never defaulted; spec
+/// #GPU-backend). A Cuda candidate without an nvcc toolchain is a
+/// structured CapabilityUnsupported rejection naming the probe (the
+/// declared space is reported in full — Axiom 14.20), never a silent
+/// omission.
 enum class ExecPath : uint8_t {
     Walker = 0,
     NativeAsm = 1,
     NativeCpp = 2,
+    NativeCuda = 3,
 };
 
 [[nodiscard]] const char* execPathName(ExecPath p) noexcept;
@@ -282,10 +289,14 @@ struct FastKernelSearchConfig {
     /// Tile sizes to synthesize; 0 = the untiled kernel (poly.tile kill
     /// switch). Deduplicated, declaration order preserved.
     SmallVector<int64_t, 8> tileSizes{0, 16, 32};
-    /// Execution paths to certify.
+    /// Execution paths to certify. The Cuda path builds through the
+    /// GPU driver (nvcc out-of-process); on a machine without the
+    /// toolchain its candidates end in a structured rejection that
+    /// names the failed probe (recorded, never silent — Rule 148).
     SmallVector<ExecPath, 4> execPaths{ExecPath::Walker,
                                        ExecPath::NativeAsm,
-                                       ExecPath::NativeCpp};
+                                       ExecPath::NativeCpp,
+                                       ExecPath::NativeCuda};
     /// Walker thread-count overrides; 0 = executor default. Values above
     /// the executor cap are part of the declared space and get REJECTED
     /// with ResourceLimit (Axioms 14.16/14.20 — rejections are reported,
@@ -295,6 +306,10 @@ struct FastKernelSearchConfig {
     uint32_t benchReps{5};
     BudgetContract budget{};
     BackendDriverConfig driver{};
+    /// GPU driver knobs for the Cuda execution path (compiler + the
+    /// DECLARED arch flag — the arch is fingerprint material, so two
+    /// arch declarations never share a cache entry).
+    GpuBackendDriverConfig gpu{};
     /// Artifact cache directory; empty disables artifact caching
     /// (Axiom 14.22). Cached entries are keyed by a completeness
     /// fingerprint (kernel hash, backend, compiler, policy, environment).

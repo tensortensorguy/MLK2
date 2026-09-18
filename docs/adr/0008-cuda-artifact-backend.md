@@ -80,6 +80,28 @@ The hard constraints, declared up front in the spec:
 6. **Bench**: the `cuda` path joins the Rule 49 protocol — honest
    skip rows on CUDA-less machines, bit-exact gating for device-exact
    modules, measured max-ULP recorded for ULP-bounded modules.
+7. **Multi-axis launch geometry (round 20, never clamps)**: every
+   device kernel computes its flat thread id from the FULL hardware
+   linearization (x fastest over the six axes); the launch geometry is
+   chosen at RUN TIME by a GENERATED host-side greedy over the padded
+   trips (`mlk_assign_geometry`, plain C, emitted once per module) —
+   innermost levels pack the block axes (cumulative product ≤ 1024,
+   per-axis caps 1024/1024/64), the rest pack the grid axes innermost-
+   first (gx 2^31-1, then gy/gz 65535 as overflow valves), and any
+   shape that fits no axis keeps the 1-D flat fallback. The helper
+   never clamps: multi-axis launches satisfy threads == total exactly,
+   so the hardware thread space bijectively covers the padded instance
+   space; soundness is assignment-invariant because the device's
+   div/mod chain reads flat directly (row-major over level trips). The
+   generated helper is behaviorally verified by extracting its text
+   and compiling it with cc (cuda_emission_geometry_helper_behavioral).
+8. **Fast-kernel GPU candidates (round 20)**: ExecPath::NativeCuda
+   joins the DECLARED search space; Cuda candidates build through the
+   GPU entry points with the arch DECLARED per search config (the
+   artifact-cache fingerprint binds the declared GPU compiler + arch),
+   and toolchain/device absence yields structured rejections naming
+   the failed probe — the declared space is reported in full and the
+   winner claim downgrades honestly (Axiom 14.20/14.21).
 
 ## Consequences
 
@@ -91,6 +113,7 @@ The hard constraints, declared up front in the spec:
   contract, determinism, policy boundary, and driver rejection paths
   are fully test-verified; the live compile/run path is probe-gated
   and activates automatically where nvcc + a device exist.
-- Open (roadmap): multi-dim grids beyond the first collapsed axis, GPU
-  candidates in the fast-kernel search, stream orchestration,
-  shared-memory tiling, PTX emission.
+- Open (roadmap): block-geometry heuristics are untuned (spread
+  heuristic, shared-memory tiling, stream orchestration, PTX emission
+  — each needs hardware evidence before being claimed as an
+  optimization).

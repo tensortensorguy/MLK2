@@ -2735,6 +2735,48 @@ MLK_TEST(poly, create_dirs_recursive_semantics) {
     ::rmdir(base.c_str());
 }
 
+/// Legacy 1-D elementwise module: out[i] = A[i] * B[i] over a dynamic
+/// bound (the historical ABI form). Shared by the legacy artifact test
+/// and the CUDA multi-axis text test (which asserts the legacy form
+/// does NOT gain the multi-dim geometry helper).
+[[nodiscard]] KernelModule buildLegacyMulModule(SymbolTable& symbols) {
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.isInput = true;
+    KernelBuffer b;
+    b.name = symbols.intern("B");
+    b.isInput = true;
+    KernelBuffer out;
+    out.name = symbols.intern("Out");
+    out.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufB = km.addBuffer(b);
+    const uint32_t bufOut = km.addBuffer(out);
+    const SymbolId vi = symbols.intern("i");
+    KernelNode loop;
+    loop.op = mlk::KernelOp::Loop;
+    loop.var = vi;
+    loop.begin = 0;
+    loop.end = mlk::constants::kKernelLoopDynamicBound;  // n
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    compute.math = mlk::MathOp::Mul;  // legacy single-op form
+    compute.bufferA = bufA;
+    compute.bufferB = bufB;
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = bufOut;
+    {
+        const uint32_t cid = km.addNode(compute);
+        const uint32_t sid = km.addNode(store);
+        loop.children.push_back(cid);
+        loop.children.push_back(sid);
+        (void)km.addNode(loop);
+    }
+    return km;
+}
+
 /// The full-chain GEMM module (scop -> dependences -> schedule ->
 /// codegen) shared by the native-artifact tests; tileSize 0 = untiled.
 [[nodiscard]] mlk::Result<KernelModule> buildScheduledGemm(
@@ -2760,41 +2802,7 @@ MLK_TEST(poly, backend_legacy_elementwise_bitexact) {
     // the historical ABI form (n + fixed scalars tail). Both artifact
     // forms must match the 1-D executor bit-exact.
     SymbolTable symbols;
-    KernelModule km;
-    KernelBuffer a;
-    a.name = symbols.intern("A");
-    a.isInput = true;
-    KernelBuffer b;
-    b.name = symbols.intern("B");
-    b.isInput = true;
-    KernelBuffer out;
-    out.name = symbols.intern("Out");
-    out.isOutput = true;
-    const uint32_t bufA = km.addBuffer(a);
-    const uint32_t bufB = km.addBuffer(b);
-    const uint32_t bufOut = km.addBuffer(out);
-    const SymbolId vi = symbols.intern("i");
-
-    KernelNode loop;
-    loop.op = mlk::KernelOp::Loop;
-    loop.var = vi;
-    loop.begin = 0;
-    loop.end = mlk::constants::kKernelLoopDynamicBound;  // n
-    KernelNode compute;
-    compute.op = mlk::KernelOp::Compute;
-    compute.math = mlk::MathOp::Mul;  // legacy single-op form
-    compute.bufferA = bufA;
-    compute.bufferB = bufB;
-    KernelNode store;
-    store.op = mlk::KernelOp::Store;
-    store.bufferOut = bufOut;
-    {
-        const uint32_t cid = km.addNode(compute);
-        const uint32_t sid = km.addNode(store);
-        loop.children.push_back(cid);
-        loop.children.push_back(sid);
-        (void)km.addNode(loop);
-    }
+    KernelModule km = buildLegacyMulModule(symbols);
 
     constexpr int64_t n = 16;
     SmallVector<double, 8> dataA(static_cast<std::size_t>(n));
@@ -4149,6 +4157,388 @@ MLK_TEST(poly, cuda_emission_legacy_elementwise) {
     MLK_CHECK(s.find("mlk_i[") == std::string::npos);  // no affine machinery
     // Policy: a pure Mul module is device-exact.
     MLK_CHECK(mlk::cudaArtifactBitExactPolicy(km, symbols));
+}
+
+MLK_TEST(poly, cuda_emission_multiaxis_text) {
+    // Round 20 multi-axis geometry: the emitted artifact carries (a)
+    // the generated host geometry helper (deterministic greedy, never
+    // clamps, 1-D flat fallback), (b) per-root padded-trip arrays
+    // feeding it, (c) dim3 launches over the helper's axis products,
+    // and (d) the FULL hardware flat linearization (all six axes) in
+    // the device text — invariant to the assignment by radix
+    // associativity. The legacy 1-D path keeps its own n-based flat
+    // grid and must NOT gain the helper.
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    auto mod = buildScheduledGemm(symbols, base, 0);
+    MLK_CHECK(mod.has_value());
+    if (!mod.has_value()) return;
+    auto src = mlk::emitCudaSource(*mod, symbols);
+    MLK_CHECK(src.has_value());
+    if (!src.has_value()) {
+        std::fprintf(stderr, "  emit: %s\n", src.error().message.c_str());
+        return;
+    }
+    const std::string& s = *src;
+    // The geometry helper exists exactly once, before the wrapper.
+    const std::size_t helper = s.find("static void mlk_assign_geometry(");
+    MLK_CHECK(helper != std::string::npos);
+    MLK_CHECK(s.find("static void mlk_assign_geometry(",
+                     helper + 1) == std::string::npos);
+    MLK_CHECK(s.find("extern \"C\" int mlk_kernel(") != std::string::npos);
+    MLK_CHECK(s.find("extern \"C\" int mlk_kernel(") > helper);
+    // Declared caps in the generated greedy (the envelope is text, so
+    // it is pinned): block 1024/1024/64 cumulative 1024, grid
+    // 2^31-1/65535/65535, division-form cap checks.
+    MLK_CHECK(s.find("(mlk_ax == 2) ? 64 : 1024") != std::string::npos);
+    MLK_CHECK(s.find("mlk_bprod <= 1024 / mlk_t[mlk_i]") !=
+              std::string::npos);
+    MLK_CHECK(s.find("2147483647LL") != std::string::npos);
+    MLK_CHECK(s.find("65535LL") != std::string::npos);
+    MLK_CHECK(s.find("(mlk_total + 1023) / 1024") != std::string::npos);
+    // Per-root trips array + the geometry call + dim3 launch shapes.
+    // The untiled scheduled GEMM's collapse chain is ONE level [i]:
+    // the piecewise-split k segments are SIBLING subtrees, so j is
+    // duplicated per segment and the interior-single-loop-child rule
+    // stops the collapse at i (the split is the recorded structural
+    // form of the guarded re-entry).
+    MLK_CHECK(s.find("const int64_t mlk_trips[] = {") != std::string::npos);
+    MLK_CHECK(s.find("mlk_assign_geometry(mlk_trips, 1, mlk_g, mlk_b)") !=
+              std::string::npos);
+    MLK_CHECK(s.find("const dim3 mlk_grid((unsigned)mlk_g[0], "
+                     "(unsigned)mlk_g[1], (unsigned)mlk_g[2]);") !=
+              std::string::npos);
+    MLK_CHECK(s.find("const dim3 mlk_block((unsigned)mlk_b[0], "
+                     "(unsigned)mlk_b[1], (unsigned)mlk_b[2]);") !=
+              std::string::npos);
+    // The device flat id is the FULL hardware linearization: every
+    // index space except gridDim.z appears (gridDim.z is ABSENT BY
+    // MATH — bz is the slowest axis and has no suffix radix in the
+    // linearization; gridDim.y/blockIdx.z prove the multi-axis form).
+    MLK_CHECK(s.find("(int64_t)gridDim.y") != std::string::npos);
+    MLK_CHECK(s.find("(int64_t)blockIdx.z") != std::string::npos);
+    MLK_CHECK(s.find("(int64_t)blockDim.y") != std::string::npos);
+    MLK_CHECK(s.find("(int64_t)blockDim.z") != std::string::npos);
+    MLK_CHECK(s.find("(int64_t)blockIdx.y") != std::string::npos);
+    MLK_CHECK(s.find("(int64_t)threadIdx.y") != std::string::npos);
+    MLK_CHECK(s.find("(int64_t)threadIdx.z") != std::string::npos);
+    // The guard + row-major decomposition survive unchanged.
+    MLK_CHECK(s.find("if (mlk_flat >= mlk_total) return;") !=
+              std::string::npos);
+    MLK_CHECK(s.find("= mlk_rem;") != std::string::npos ||
+              s.find("mlk_rem %=") != std::string::npos);
+    // Byte-identical re-emission with the helper in the text.
+    auto again = mlk::emitCudaSource(*mod, symbols);
+    MLK_CHECK(again.has_value() && *again == s);
+
+    // The legacy 1-D form has no geometry helper (its flat grid comes
+    // from n directly; the multi-axis machinery is multi-dim only).
+    SymbolTable legacySymbols;
+    KernelModule legacy = buildLegacyMulModule(legacySymbols);
+    auto legacySrc = mlk::emitCudaSource(legacy, legacySymbols);
+    MLK_CHECK(legacySrc.has_value());
+    if (legacySrc.has_value()) {
+        MLK_CHECK(legacySrc->find("mlk_assign_geometry") ==
+                  std::string::npos);
+        MLK_CHECK(legacySrc->find("blockIdx.x * (int64_t)blockDim.x") !=
+                  std::string::npos);
+    }
+}
+
+MLK_TEST(poly, cuda_emission_multiaxis_tiled_gemm_text) {
+    // Tiled scheduled GEMM: the collapsed chain is the tile/point band
+    // [ti, i, tj, j] — the trips array carries FOUR padded trips (the
+    // point-loop trips are interval maxima over the tile prefix; the
+    // split k segments stop deeper collapse), and the geometry call
+    // passes the level count to the helper.
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    auto mod = buildScheduledGemm(symbols, base, 2);
+    MLK_CHECK(mod.has_value());
+    if (!mod.has_value()) return;
+    auto src = mlk::emitCudaSource(*mod, symbols);
+    MLK_CHECK(src.has_value());
+    if (!src.has_value()) {
+        std::fprintf(stderr, "  emit: %s\n", src.error().message.c_str());
+        return;
+    }
+    const std::string& s = *src;
+    // The tiled chain is the tile/point prefix [ti, i] (the split k
+    // segments stop deeper collapse): the tile level's padded trip is
+    // exact (2 for tile 2 over M = 4) and the POINT level's padded
+    // trip is the interval max over the tile box (4 = the full M —
+    // partial tiles pad). Both feed the geometry helper.
+    MLK_CHECK(s.find("mlk_assign_geometry(mlk_trips, 2, mlk_g, mlk_b)") !=
+              std::string::npos);
+    MLK_CHECK(s.find("mlk_tmax0 = ") != std::string::npos);
+    MLK_CHECK(s.find("mlk_tmax1 = ") != std::string::npos);
+    // Byte-identical re-emission (tiled form, helper included).
+    auto again = mlk::emitCudaSource(*mod, symbols);
+    MLK_CHECK(again.has_value() && *again == s);
+}
+
+// The C harness around the EXTRACTED generated geometry helper: hand-
+// computed assignments, the hardware-caps envelope, the soundness
+// condition (multi-axis threads == total exactly; fallback threads >=
+// total with the device's mlk_flat guard absorbing the ceil excess),
+// and exhaustive hardware-index -> flat injectivity for small spaces
+// (each padded instance realized by exactly one hardware thread).
+// clang-format off
+const char* kGeomHarnessPrelude = R"mlkgeom(#include <stdint.h>
+#include <stdio.h>
+
+static int mlk_fails = 0;
+
+static void mlk_expect(const char* what, long long got, long long want) {
+    if (got != want) {
+        printf("HARNESS-FAIL %s: got %lld want %lld\n", what, got, want);
+        ++mlk_fails;
+    }
+}
+
+static int64_t mlk_prod(const int64_t* a, int n) {
+    int64_t p = 1;
+    for (int i = 0; i < n; ++i) p *= a[i];
+    return p;
+}
+)mlkgeom";
+
+const char* kGeomHarnessBody = R"mlkgeom(
+static void mlk_rank_check(const char* name, const int64_t* g,
+                           const int64_t* b, int64_t total) {
+    const int64_t bprod = b[0] * b[1] * b[2];
+    /* hardware axes, x fastest: tx, ty, tz (block dims), then
+       bx, by, bz (grid dims) */
+    const int64_t dims[6] = {b[0], b[1], b[2], g[0], g[1], g[2]};
+    const int64_t space = mlk_prod(dims, 6);
+    if (space != total) return; /* fallback shape: no bijection claim */
+    if (space > 4194304) return; /* exhaustive only for small spaces */
+    static unsigned char seen[4194304];
+    for (int64_t i = 0; i < space; ++i) seen[i] = 0;
+    int64_t idx[6] = {0, 0, 0, 0, 0, 0};
+    for (int64_t rank = 0; rank < space; ++rank) {
+        const int64_t flat =
+            idx[5] * (g[1] * g[0] * bprod) + idx[4] * (g[0] * bprod) +
+            idx[3] * bprod + idx[2] * (b[1] * b[0]) + idx[1] * b[0] +
+            idx[0];
+        if (flat != rank || seen[flat]) {
+            printf("HARNESS-FAIL %s: flat %lld at rank %lld (disorder "
+                   "or duplicate hardware thread)\n",
+                   name, (long long)flat, (long long)rank);
+            ++mlk_fails;
+            return;
+        }
+        seen[flat] = 1;
+        for (int p = 0; p < 6; ++p) {  /* x-fastest odometer */
+            if (++idx[p] < dims[p]) break;
+            idx[p] = 0;
+        }
+    }
+}
+
+static void mlk_check_case(const char* name, const int64_t* t, int n) {
+    int64_t g[3] = {1, 1, 1};
+    int64_t b[3] = {1, 1, 1};
+    mlk_assign_geometry(t, n, g, b);
+    const int64_t total = mlk_prod(t, n);
+    const int64_t threads = mlk_prod(g, 3) * mlk_prod(b, 3);
+    if (!(b[0] <= 1024 && b[1] <= 1024 && b[2] <= 64 &&
+          b[0] * b[1] * b[2] <= 1024 && g[1] <= 65535 &&
+          g[2] <= 65535)) {
+        printf("HARNESS-FAIL %s: caps g=(%lld,%lld,%lld) "
+               "b=(%lld,%lld,%lld)\n", name, (long long)g[0],
+               (long long)g[1], (long long)g[2], (long long)b[0],
+               (long long)b[1], (long long)b[2]);
+        ++mlk_fails;
+    }
+    if (threads == total) {
+        mlk_rank_check(name, g, b, total);
+    } else if (threads > total) {
+        /* the 1-D fallback: the ceil excess must keep the flat form */
+        if (b[0] != 1024 || b[1] != 1 || b[2] != 1 || g[1] != 1 ||
+            g[2] != 1) {
+            printf("HARNESS-FAIL %s: unexpected fallback shape\n", name);
+            ++mlk_fails;
+        }
+    } else {
+        printf("HARNESS-FAIL %s: threads %lld < total %lld (lost "
+               "coverage)\n", name, (long long)threads,
+               (long long)total);
+        ++mlk_fails;
+    }
+}
+
+int main(void) {
+    /* Hand-computed assignments (chain order outermost first). */
+    {
+        const int64_t t[4] = {8, 32, 8, 32}; /* [ti, i, tj, j] band */
+        int64_t g[3] = {1, 1, 1}, b[3] = {1, 1, 1};
+        mlk_assign_geometry(t, 4, g, b);
+        /* block sweep packs j=32 then tj=8 into bx=256; i=32 and
+           ti=8 overflow the 1024 cumulative cap onto gx=256 */
+        mlk_expect("A g0", (long long)g[0], 256);
+        mlk_expect("A g1", (long long)g[1], 1);
+        mlk_expect("A g2", (long long)g[2], 1);
+        mlk_expect("A b0", (long long)b[0], 256);
+        mlk_expect("A b1", (long long)b[1], 1);
+        mlk_expect("A b2", (long long)b[2], 1);
+    }
+    {
+        const int64_t t[2] = {32, 32};
+        int64_t g[3] = {1, 1, 1}, b[3] = {1, 1, 1};
+        mlk_assign_geometry(t, 2, g, b);
+        mlk_expect("B g0", (long long)g[0], 1);
+        mlk_expect("B b0", (long long)b[0], 1024);
+    }
+    {
+        const int64_t t[2] = {4, 5}; /* the test GEMM chain [i, j] */
+        int64_t g[3] = {1, 1, 1}, b[3] = {1, 1, 1};
+        mlk_assign_geometry(t, 2, g, b);
+        mlk_expect("C g0", (long long)g[0], 1);
+        mlk_expect("C b0", (long long)b[0], 20);
+    }
+    {
+        const int64_t t[2] = {60000, 40000}; /* beyond the gy valve */
+        int64_t g[3] = {1, 1, 1}, b[3] = {1, 1, 1};
+        mlk_assign_geometry(t, 2, g, b);
+        /* gx takes the inner 40000; the outer 60000 overflows gx's
+           cumulative product? no: gx=40000, then 60000 needs
+           40000*60000 > 2^31-1 on gx -> gy=60000 (<= 65535) */
+        mlk_expect("D g0", (long long)g[0], 40000);
+        mlk_expect("D g1", (long long)g[1], 60000);
+        mlk_expect("D g2", (long long)g[2], 1);
+        mlk_expect("D b0", (long long)b[0], 1);
+    }
+    {
+        const int64_t t[2] = {70000, 70000}; /* no grid axis fits */
+        int64_t g[3] = {1, 1, 1}, b[3] = {1, 1, 1};
+        mlk_assign_geometry(t, 2, g, b);
+        mlk_expect("E b0", (long long)b[0], 1024);
+        mlk_expect("E g0", (long long)g[0], (70000LL * 70000LL + 1023) / 1024);
+    }
+    /* Envelope + coverage over a shape sweep. */
+    {
+        const int64_t shapes[][8] = {
+            {4, 0, 0, 0, 0, 0, 0, 0},
+            {4, 5, 0, 0, 0, 0, 0, 0},
+            {32, 32, 0, 0, 0, 0, 0, 0},
+            {8, 32, 8, 32, 0, 0, 0, 0},
+            {2, 2, 3, 2, 0, 0, 0, 0},
+            {3, 5, 7, 2, 4, 6, 0, 0},
+            {1024, 1024, 0, 0, 0, 0, 0, 0},
+            {1024, 1024, 1024, 0, 0, 0, 0, 0},
+            {60000, 40000, 0, 0, 0, 0, 0, 0},
+            {70000, 70000, 0, 0, 0, 0, 0, 0},
+            {2, 0, 0, 0, 0, 0, 0, 0},
+        };
+        const int ns[] = {1, 2, 2, 4, 4, 6, 2, 3, 2, 2, 1};
+        const char* names[] = {"s1",     "s2",     "s3",     "s4",
+                               "s5",     "s6",     "s7",     "s8",
+                               "s9",     "s10",    "s11"};
+        const unsigned count =
+            (unsigned)(sizeof(shapes) / sizeof(shapes[0]));
+        for (unsigned i = 0; i < count; ++i) {
+            mlk_check_case(names[i], shapes[i], ns[i]);
+        }
+    }
+    if (mlk_fails == 0) printf("GEOM-HARNESS OK\n");
+    return mlk_fails == 0 ? 0 : 1;
+}
+)mlkgeom";
+// clang-format on
+
+MLK_TEST(poly, cuda_emission_geometry_helper_behavioral) {
+    // The geometry helper's generated text is plain C — compile THIS
+    // exact text with cc (the same toolchain the cpp artifact path
+    // probes) and verify its behavior natively:
+    //   1. hand-computed assignments for representative shapes,
+    //   2. the hardware-caps envelope on every returned dim,
+    //   3. the SOUNDNESS condition: multi-axis launches satisfy
+    //      threads == total exactly (never-clamp bijection onto the
+    //      padded instance space), fallback launches threads >= total
+    //      (the device's mlk_flat guard absorbs the ceil excess),
+    //   4. for small multi-axis shapes, exhaustive injectivity of the
+    //      hardware-index -> flat map (each instance executed once).
+    // Without cc the test skips honestly (the skip condition IS the
+    // recorded probe).
+    if (!backendToolchainReady()) return;
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    auto mod = buildScheduledGemm(symbols, base, 0);
+    MLK_CHECK(mod.has_value());
+    if (!mod.has_value()) return;
+    auto src = mlk::emitCudaSource(*mod, symbols);
+    MLK_CHECK(src.has_value());
+    if (!src.has_value()) return;
+    // Extract the helper text (marker to the first unindented close).
+    const std::string marker = "static void mlk_assign_geometry(";
+    const std::size_t begin = src->find(marker);
+    MLK_CHECK(begin != std::string::npos);
+    if (begin == std::string::npos) return;
+    const std::size_t end = src->find("\n}\n", begin);
+    MLK_CHECK(end != std::string::npos);
+    if (end == std::string::npos) return;
+    const std::string helper = src->substr(begin, end - begin + 3);
+
+    // Run-unique workdir under the cwd (ctest's build tree — never
+    // /tmp, matching the driver's own workdir policy).
+    const std::string dir = std::string("./fk_cudaGeom_test-") +
+                            std::to_string(static_cast<long long>(
+                                std::chrono::steady_clock::now()
+                                    .time_since_epoch()
+                                    .count()));
+    auto made = mlk::createDirs(dir);
+    MLK_CHECK(made.has_value());
+    if (!made.has_value()) return;
+    const std::string harnessSrc = dir + "/harness.c";
+    const std::string harnessBin = dir + "/harness";
+    {
+        FILE* f = std::fopen(harnessSrc.c_str(), "wb");
+        MLK_CHECK(f != nullptr);
+        if (f == nullptr) return;
+        std::fprintf(f, "%s", kGeomHarnessPrelude);
+        std::fprintf(f, "%s", helper.c_str());
+        std::fprintf(f, "%s", kGeomHarnessBody);
+        std::fclose(f);
+    }
+    const std::string cmd =
+        std::string("cc -O2 -o ") + harnessBin + " " + harnessSrc +
+        " 2> " + dir + "/cc.log";
+    const int ccStatus = std::system(cmd.c_str());
+    MLK_CHECK(ccStatus == 0);
+    if (ccStatus != 0) {
+        std::fprintf(stderr, "  harness compile failed; cc.log:\n");
+        FILE* lg = std::fopen((dir + "/cc.log").c_str(), "rb");
+        if (lg != nullptr) {
+            char buf[512];
+            std::size_t rd = std::fread(buf, 1, sizeof(buf), lg);
+            std::fwrite(buf, 1, rd, stderr);
+            std::fclose(lg);
+        }
+        return;
+    }
+    const int runStatus = std::system((harnessBin + " > " + dir +
+                                       "/run.log 2>&1").c_str());
+    if (runStatus != 0) {
+        std::fprintf(stderr, "  harness run failed; run.log:\n");
+        FILE* lg = std::fopen((dir + "/run.log").c_str(), "rb");
+        if (lg != nullptr) {
+            char buf[4096];
+            std::size_t rd = std::fread(buf, 1, sizeof(buf), lg);
+            std::fwrite(buf, 1, rd, stderr);
+            std::fclose(lg);
+        }
+    }
+    MLK_CHECK(runStatus == 0);
+    // Self-cleanup (best effort — a leaked run-unique dir is noise,
+    // not a failure): the logs stay on failure so the trace survives.
+    if (runStatus == 0 && ccStatus == 0) {
+        ::remove((dir + "/harness.c").c_str());
+        ::remove(harnessBin.c_str());
+        ::remove((dir + "/cc.log").c_str());
+        ::remove((dir + "/run.log").c_str());
+        ::rmdir(dir.c_str());
+    }
 }
 
 MLK_TEST(poly, cuda_emission_policy_classification) {

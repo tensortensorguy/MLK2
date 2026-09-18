@@ -666,6 +666,44 @@ struct CudaEmitter {
     /// by the device emission so the two passes agree).
     SmallVector<std::string, 8> prefixVarNames_{};
 
+    struct CollapsedLevel {
+        std::string tripText{};   // padded trip (interval max over the prefix box)
+        std::string beginText{};  // begin form over the prefix names
+        std::string endText{};    // inclusive end form
+    };
+
+    /// Per-level texts for a collapsed chain (pass 0 + pass 1 of the
+    /// padded collapse): interval-exact padded trips plus the begin/end
+    /// forms. Leaves prefixVarNames_/prefixIntervals_ POPULATED (the
+    /// device decomposition reuses the minted names; callers clear when
+    /// done). A pure function of the module — the device and host sites
+    /// call it independently and the trip texts come out byte-identical
+    /// (they expand to constants and dims reads only, never a var name).
+    [[nodiscard]] Result<std::vector<CollapsedLevel>> collapseLevels(
+        const SmallVector<uint32_t, 8>& chain) {
+        prefixVarNames_.clear();
+        for (const uint32_t lid : chain) {
+            prefixVarNames_.push_back(
+                uniqueName(symbols.text(km.nodes[lid].var)));
+        }
+        std::vector<CollapsedLevel> levels;
+        prefixIntervals_.clear();
+        for (const uint32_t lid : chain) {
+            const KernelNode& n = km.nodes[lid];
+            MLK_TRY_VAR(bm, beginExprAndMin(n));
+            MLK_TRY_VAR(em2, endExprAndMax(n));
+            CollapsedLevel L;
+            L.beginText = bm.first;
+            L.endText = em2.first;
+            L.tripText = "((" + em2.second + ") - (" + bm.second +
+                         ") + 1) > 0 ? ((" + em2.second + ") - (" +
+                         bm.second + ") + 1) : 0";
+            levels.push_back(std::move(L));
+            prefixIntervals_.emplace_back(bm.second, em2.second);
+        }
+        return levels;
+    }
+
     /// Emits ONE device kernel for one forest root. collapsed = the
     /// chain of parallel-marked unit-step loops peeled into the grid
     /// (possibly empty -> a one-thread serial launch, recorded).
@@ -680,6 +718,18 @@ struct CudaEmitter {
     /// exact because the padded trip is >= every prefix tuple's real
     /// trip (interval arithmetic on affine forms) and holes return
     /// before any payload runs.
+    ///
+    /// MULTI-AXIS geometry (round 20): the flat thread id is the full
+    /// hardware linearization over (gz, gy, gx, bz, by, bx) products,
+    /// x fastest — with a 1-D launch it degenerates to the historical
+    /// blockIdx.x * blockDim.x + threadIdx.x text. The host geometry
+    /// helper (emitGeometryHelper) assigns consecutive level runs to
+    /// the six axes without ever clamping a dim, and because the runs
+    /// are consecutive in chain order, radix associativity makes the
+    /// hardware flat EQUAL the row-major per-level decomposition for
+    /// any conforming geometry — the div/mod chain below is invariant
+    /// to how the levels were split across axes (behaviorally pinned
+    /// by cuda_emission_geometry_helper_behavioral).
     [[nodiscard]] Result<void> emitDeviceKernel(
         const uint32_t rootId,
         const SmallVector<uint32_t, 8>& collapsed) {
@@ -710,60 +760,52 @@ struct CudaEmitter {
         devBody += "    (void)mlk_scalars; (void)mlk_n_scalars;\n";
 
         if (!collapsed.empty()) {
-            // Padded collapse — pass 0: create the prefix var names
-            // once (the analysis and the device emission share them).
-            prefixVarNames_.clear();
-            for (const uint32_t lid : collapsed) {
-                prefixVarNames_.push_back(
-                    uniqueName(symbols.text(km.nodes[lid].var)));
-            }
-            // Pass 1: per-level padded trips + var intervals (text
-            // expressions; identical on the host side because both
-            // sides share the dims-arg names).
-            std::vector<std::string> tmax;
-            std::vector<std::string> beginE, endE;
-            prefixIntervals_.clear();
-            for (const uint32_t lid : collapsed) {
-                const KernelNode& n = km.nodes[lid];
-                MLK_TRY_VAR(bm, beginExprAndMin(n));
-                MLK_TRY_VAR(em2, endExprAndMax(n));
-                const std::string t = "((" + em2.second + ") - (" +
-                                      bm.second + ") + 1) > 0 ? ((" +
-                                      em2.second + ") - (" + bm.second +
-                                      ") + 1) : 0";
-                tmax.push_back(t);
-                beginE.push_back(bm.first);
-                endE.push_back(em2.first);
-                prefixIntervals_.emplace_back(bm.second, em2.second);
-            }
-            // Pass 2: device text — padded trips, flat id, row-major
-            // decomposition, per-thread ACTUAL range checks.
-            for (std::size_t l = 0; l < tmax.size(); ++l) {
+            // Padded collapse — pass 0 + pass 1 via the shared level
+            // texts (the prefix var names minted here are reused by
+            // the decomposition below).
+            MLK_TRY_VAR(levels, collapseLevels(collapsed));
+            // Pass 2: device text — padded trips, flat id (full
+            // hardware linearization), row-major decomposition,
+            // per-thread ACTUAL range checks.
+            for (std::size_t l = 0; l < levels.size(); ++l) {
                 devBody += "    const int64_t mlk_tmax" + i64(
                                            static_cast<int64_t>(l)) +
-                           " = " + tmax[l] + ";\n";
+                           " = " + levels[l].tripText + ";\n";
             }
             std::string total = "mlk_tmax0";
-            for (std::size_t l = 1; l < tmax.size(); ++l) {
+            for (std::size_t l = 1; l < levels.size(); ++l) {
                 total = "(" + total + " * mlk_tmax" +
                         i64(static_cast<int64_t>(l)) + ")";
             }
             devBody += "    const int64_t mlk_total = " + total + ";\n";
-            devBody += "    const int64_t mlk_flat = "
-                       "(int64_t)blockIdx.x * (int64_t)blockDim.x + "
-                       "(int64_t)threadIdx.x;\n";
+            // Flat thread id: hardware linearization, x fastest, over
+            // all six axes (grid z,y,x then block z,y,x). Degenerates
+            // to blockIdx.x * blockDim.x + threadIdx.x when the launch
+            // is 1-D; matches the host geometry helper's assignment
+            // exactly (see the function comment).
+            devBody += "    const int64_t mlk_flat =\n"
+                       "        (((int64_t)blockIdx.z * "
+                       "(int64_t)gridDim.y + (int64_t)blockIdx.y) *\n"
+                       "             (int64_t)gridDim.x +\n"
+                       "         (int64_t)blockIdx.x) *\n"
+                       "            ((int64_t)blockDim.x * "
+                       "(int64_t)blockDim.y * (int64_t)blockDim.z) +\n"
+                       "        ((int64_t)threadIdx.z * "
+                       "(int64_t)blockDim.y + (int64_t)threadIdx.y) *\n"
+                       "            (int64_t)blockDim.x +\n"
+                       "        (int64_t)threadIdx.x;\n";
             devBody += "    if (mlk_flat >= mlk_total) return;\n";
             devBody += "    int64_t mlk_rem = mlk_flat;\n";
-            for (std::size_t l = 0; l < collapsed.size(); ++l) {
+            for (std::size_t l = 0; l < levels.size(); ++l) {
                 const std::string var = prefixVarNames_[l];
                 const std::string lsuf =
                     "mlk_l" + i64(static_cast<int64_t>(l));
-                if (l + 1 < collapsed.size()) {
+                if (l + 1 < levels.size()) {
                     // Divide by the suffix product (row-major: the
                     // outermost var has the largest stride).
                     std::string suffix = "mlk_tmax" +
                                          i64(static_cast<int64_t>(l + 1));
-                    for (std::size_t m = l + 2; m < collapsed.size(); ++m) {
+                    for (std::size_t m = l + 2; m < levels.size(); ++m) {
                         suffix = "(" + suffix + " * mlk_tmax" +
                                  i64(static_cast<int64_t>(m)) + ")";
                     }
@@ -774,9 +816,10 @@ struct CudaEmitter {
                     devBody += "    const int64_t " + lsuf +
                                " = mlk_rem;\n";
                 }
-                devBody += "    int64_t " + var + " = " + beginE[l] +
+                devBody += "    int64_t " + var + " = " +
+                           levels[l].beginText +
                            " + " + lsuf + ";\n";
-                devBody += "    if (" + var + " > " + endE[l] +
+                devBody += "    if (" + var + " > " + levels[l].endText +
                            ") return;\n";
                 varNames.push_back(var);
             }
@@ -822,7 +865,94 @@ struct CudaEmitter {
     /// or sync error, 4 = no CUDA device. The driver maps every
     /// nonzero code to an error Result (the caller discards partial
     /// outputs — same observable contract as the walker's InvalidGraph).
+    /// The generated launch-geometry helper (host side; emitted ONCE
+    /// per module before the wrapper). Deterministic greedy over the
+    /// RUNTIME padded trips — never clamps a dim, falls back to the
+    /// historical 1-D flat geometry when multi-axis coverage would
+    /// need one:
+    ///   1. block sweep: the INNERMOST levels take the block axes
+    ///      (packed onto bx, then by, then bz; per-axis caps 1024,
+    ///      1024, 64; cumulative product capped at 1024 threads),
+    ///   2. grid sweep: the remaining levels take the grid axes
+    ///      INNERMOST-first (packed onto gx, then gy, then gz; caps
+    ///      2^31-1, 65535, 65535),
+    ///   3. any level that fits no axis keeps the 1-D fallback
+    ///      (grid = ceil(total/1024), block = min(total, 1024)).
+    /// Every returned dim EQUALS its axis product exactly, so the
+    /// hardware thread space bijectively covers the padded instance
+    /// space. Because the axis runs are consecutive in chain order,
+    /// radix associativity makes the hardware flat linearization
+    /// equal the row-major per-level decomposition for ANY conforming
+    /// geometry — the device's div/mod chain never needs to know the
+    /// assignment (behaviorally pinned by
+    /// cuda_emission_geometry_helper_behavioral, which compiles THIS
+    /// generated text with cc and checks the assignment and the
+    /// flat-invariance property natively).
+    void emitGeometryHelper() {
+        hostBody += "\n// Launch geometry: deterministic greedy over the padded"
+                    " trips (never clamps; 1-D flat fallback).\n";
+        hostBody += "static void mlk_assign_geometry(const int64_t* mlk_t, "
+                    "int mlk_n, int64_t* mlk_g, int64_t* mlk_b) {\n";
+        // The 1-D flat fallback: always legal up to the grid.x
+        // envelope (beyond it the launch fails honestly, code 3 —
+        // the same envelope the historical text had).
+        hostBody += "    int64_t mlk_total = 1;\n";
+        hostBody += "    for (int mlk_i = 0; mlk_i < mlk_n; ++mlk_i) "
+                    "mlk_total *= mlk_t[mlk_i];\n";
+        hostBody += "    mlk_g[0] = (mlk_total + 1023) / 1024;\n";
+        hostBody += "    mlk_g[1] = 1;\n";
+        hostBody += "    mlk_g[2] = 1;\n";
+        hostBody += "    mlk_b[0] = mlk_total < 1024 ? mlk_total : 1024;\n";
+        hostBody += "    mlk_b[1] = 1;\n";
+        hostBody += "    mlk_b[2] = 1;\n";
+        // Multi-axis attempt. Division-form cap checks (no overflow:
+        // bprod <= 1024/T <=> bprod*T <= 1024 for T >= 1; the t > 0
+        // guard keeps the division defined — the wrapper's rt > 0
+        // guard already excludes zero trips, this is belt-and-braces).
+        hostBody += "    int64_t mlk_mg[3] = {1, 1, 1};\n";
+        hostBody += "    int64_t mlk_mb[3] = {1, 1, 1};\n";
+        hostBody += "    int64_t mlk_bprod = 1;\n";
+        hostBody += "    int mlk_i = mlk_n - 1;\n";
+        hostBody += "    int mlk_ax = 0;\n";
+        hostBody += "    int mlk_ok = 1;\n";
+        hostBody += "    while (mlk_i >= 0 && mlk_ax < 3) {\n";
+        hostBody += "        const int64_t mlk_cap = "
+                    "(mlk_ax == 2) ? 64 : 1024;\n";
+        hostBody += "        if (mlk_t[mlk_i] > 0 && mlk_t[mlk_i] <= "
+                    "mlk_cap && mlk_bprod <= 1024 / mlk_t[mlk_i]) {\n";
+        hostBody += "            mlk_mb[mlk_ax] *= mlk_t[mlk_i];\n";
+        hostBody += "            mlk_bprod *= mlk_t[mlk_i];\n";
+        hostBody += "            --mlk_i;\n";
+        hostBody += "        } else {\n";
+        hostBody += "            ++mlk_ax;\n";
+        hostBody += "        }\n";
+        hostBody += "    }\n";
+        hostBody += "    int mlk_gax = 0;\n";
+        hostBody += "    while (mlk_ok && mlk_i >= 0) {\n";
+        hostBody += "        const int64_t mlk_cap = (mlk_gax == 0) ? "
+                    "2147483647LL : 65535LL;\n";
+        hostBody += "        if (mlk_t[mlk_i] > 0 && mlk_t[mlk_i] <= "
+                    "mlk_cap && mlk_mg[mlk_gax] <= mlk_cap / "
+                    "mlk_t[mlk_i]) {\n";
+        hostBody += "            mlk_mg[mlk_gax] *= mlk_t[mlk_i];\n";
+        hostBody += "            --mlk_i;\n";
+        hostBody += "        } else if (mlk_gax < 2) {\n";
+        hostBody += "            ++mlk_gax;\n";
+        hostBody += "        } else {\n";
+        hostBody += "            mlk_ok = 0;\n";
+        hostBody += "        }\n";
+        hostBody += "    }\n";
+        hostBody += "    if (mlk_ok) {\n";
+        hostBody += "        for (int mlk_i2 = 0; mlk_i2 < 3; ++mlk_i2) {\n";
+        hostBody += "            mlk_g[mlk_i2] = mlk_mg[mlk_i2];\n";
+        hostBody += "            mlk_b[mlk_i2] = mlk_mb[mlk_i2];\n";
+        hostBody += "        }\n";
+        hostBody += "    }\n";
+        hostBody += "}\n";
+    }
+
     [[nodiscard]] Result<void> emitHostWrapper() {
+        emitGeometryHelper();
         hostBody += "\nextern \"C\" int mlk_kernel(\n";
         bool first = true;
         for (uint32_t bid = 0; bid < km.buffers.size(); ++bid) {
@@ -978,12 +1108,34 @@ struct CudaEmitter {
             hostBody += "        const int64_t mlk_rt = " + L.totalExpr +
                         ";\n";
             hostBody += "        if (mlk_rt > 0) {\n";
-            hostBody += "            const unsigned mlk_block = (unsigned)"
-                        "(mlk_rt < " + i64(kCudaMaxThreadsPerBlock) +
-                        " ? mlk_rt : " + i64(kCudaMaxThreadsPerBlock) +
-                        ");\n";
-            hostBody += "            const unsigned mlk_grid = (unsigned)"
-                        "((mlk_rt + mlk_block - 1) / mlk_block);\n";
+            // Multi-axis geometry: the padded trips feed the generated
+            // greedy (block axes from the innermost levels, grid axes
+            // for the rest, 1-D flat fallback); the launch dims equal
+            // the axis products exactly (never clamped).
+            hostBody += "            int64_t mlk_g[3] = {1, 1, 1};\n";
+            hostBody += "            int64_t mlk_b[3] = {1, 1, 1};\n";
+            if (L.tripExprs.empty()) {
+                hostBody += "            mlk_assign_geometry("
+                            "(const int64_t*)0, 0, mlk_g, mlk_b);\n";
+            } else {
+                std::string arr =
+                    "            const int64_t mlk_trips[] = {";
+                for (std::size_t l = 0; l < L.tripExprs.size(); ++l) {
+                    arr += (l == 0 ? "" : ",\n                                   ") +
+                           L.tripExprs[l];
+                }
+                arr += "};\n";
+                hostBody += arr;
+                hostBody += "            mlk_assign_geometry(mlk_trips, " +
+                            i64(static_cast<int64_t>(L.tripExprs.size())) +
+                            ", mlk_g, mlk_b);\n";
+            }
+            hostBody += "            const dim3 mlk_grid("
+                        "(unsigned)mlk_g[0], (unsigned)mlk_g[1], "
+                        "(unsigned)mlk_g[2]);\n";
+            hostBody += "            const dim3 mlk_block("
+                        "(unsigned)mlk_b[0], (unsigned)mlk_b[1], "
+                        "(unsigned)mlk_b[2]);\n";
             hostBody += "            " + L.fn + "<<<mlk_grid, mlk_block>>>(" +
                         args + ");\n";
             hostBody += "            if (cudaGetLastError() != cudaSuccess)"
@@ -1029,6 +1181,7 @@ struct CudaEmitter {
     struct RootLaunch {
         std::string fn{};         // __global__ function name
         std::string totalExpr{};  // host-side trip-count expression
+        std::vector<std::string> tripExprs{};  // per-level padded trips
     };
     std::vector<RootLaunch> rootLaunches_{};
 
@@ -1057,41 +1210,28 @@ struct CudaEmitter {
         return chain;
     }
 
-    /// Host-side total trip expression for a root launch: the product
-    /// of the collapsed levels' PADDED trip forms over the caller's
-    /// dims arrays (1 for a serial root). The text is generated by the
-    /// SAME interval machinery as the device's mlk_total, so the two
-    /// sides can never diverge.
-    [[nodiscard]] Result<std::string> hostTotalExpr(
-        const SmallVector<uint32_t, 8>& chain) {
-        if (chain.empty()) return std::string("1");
-        // Rebuild the padded-trip texts (pass 0 + pass 1 of
-        // emitDeviceKernel, minus the device emission). The resulting
-        // text contains only constants and dims reads — never a var
-        // name — so host and device totals cannot diverge.
-        prefixVarNames_.clear();
-        for (const uint32_t lid : chain) {
-            prefixVarNames_.push_back(
-                uniqueName(symbols.text(km.nodes[lid].var)));
+    /// Host-side launch info for a root: the per-level padded-trip
+    /// texts (the geometry helper's inputs — generated by the SAME
+    /// machinery as the device's tmax texts, so host and device can
+    /// never diverge) plus the total product (the launch guard). An
+    /// empty trip list for a serial root (total 1).
+    [[nodiscard]] Result<std::pair<std::vector<std::string>, std::string>>
+    hostLaunchInfo(const SmallVector<uint32_t, 8>& chain) {
+        if (chain.empty()) {
+            return std::make_pair(std::vector<std::string>{},
+                                  std::string("1"));
         }
-        std::vector<std::string> tmax;
-        prefixIntervals_.clear();
-        for (const uint32_t lid : chain) {
-            const KernelNode& n = km.nodes[lid];
-            MLK_TRY_VAR(bm, beginExprAndMin(n));
-            MLK_TRY_VAR(em2, endExprAndMax(n));
-            tmax.push_back("((" + em2.second + ") - (" + bm.second +
-                           ") + 1) > 0 ? ((" + em2.second + ") - (" +
-                           bm.second + ") + 1) : 0");
-            prefixIntervals_.emplace_back(bm.second, em2.second);
+        MLK_TRY_VAR(levels, collapseLevels(chain));
+        std::vector<std::string> trips;
+        std::string total = "(" + levels[0].tripText + ")";
+        trips.push_back(levels[0].tripText);
+        for (std::size_t l = 1; l < levels.size(); ++l) {
+            total = "(" + total + " * (" + levels[l].tripText + "))";
+            trips.push_back(levels[l].tripText);
         }
         prefixIntervals_.clear();
         prefixVarNames_.clear();
-        std::string total = "(" + tmax[0] + ")";
-        for (std::size_t l = 1; l < tmax.size(); ++l) {
-            total = "(" + total + " * (" + tmax[l] + "))";
-        }
-        return total;
+        return std::make_pair(std::move(trips), total);
     }
 };
 
@@ -1228,7 +1368,8 @@ Result<std::string> emitCudaSource(const KernelModule& kernel,
                           "mlk_na", "mlk_allocs", "mlk_fail", "mlk_rt",
                           "mlk_block", "mlk_grid", "mlk_host_status",
                           "mlk_dev_count", "mlk_dscalars", "mlk_dstatus",
-                          "mlk_i"}) {
+                          "mlk_i", "mlk_trips", "mlk_g", "mlk_b",
+                          "mlk_assign_geometry"}) {
         (void)em.uniqueName(r);
     }
     for (uint32_t bid = 0; bid < kernel.buffers.size(); ++bid) {
@@ -1277,9 +1418,10 @@ Result<std::string> emitCudaSource(const KernelModule& kernel,
             if (!emitted.has_value()) {
                 return std::unexpected<Error>(emitted.error());
             }
-            MLK_TRY_VAR(total, em.hostTotalExpr(chain));
+            MLK_TRY_VAR(launch, em.hostLaunchInfo(chain));
             em.rootLaunches_.push_back(CudaEmitter::RootLaunch{
-                "mlk_dev_" + i64(static_cast<int64_t>(fnIdx)), total});
+                "mlk_dev_" + i64(static_cast<int64_t>(fnIdx)),
+                launch.second, launch.first});
         }
         auto wrapper = em.emitHostWrapper();
         if (!wrapper.has_value()) {
@@ -1488,6 +1630,7 @@ Result<std::string> emitCudaSource(const KernelModule& kernel,
            " (below collapse, serial=" +
            i64(static_cast<int64_t>(em.nestedParallelSerial)) +
            "), simd hints=" + i64(static_cast<int64_t>(em.simdLoops)) +
+           ", multi-axis geometry (never clamps; 1-D flat fallback)" +
            ".\n";
     out += "// Exactness policy: " +
            std::string(em.transcendental

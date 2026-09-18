@@ -13,7 +13,8 @@
 //                 compiles any graph at Tier2 and dumps the kernel
 //                 JSON (non-affine kernels report baseline fallback)
 //   mlk-poly autotune [--m=M --k=K --n=N] [--tiles=0,16,32]
-//                 [--exec=walker,asm,cpp] [--budget-mode=same|extra|
+//                 [--exec=walker,asm,cpp,cuda] [--arch=sm_XX]
+//                 [--budget-mode=same|extra|
 //                 amortized] [--comptime-budget-ms=X] [--extra-budget-ms=X]
 //                 [--tau-ms=X] [--alpha=A] [--executions=N] [--warmup=W]
 //                 [--reps=R] [--cache-dir=D] [--workdir=D] [--json-out=F]
@@ -395,6 +396,7 @@ int runAutotune(int argc, char** argv) {
            alpha = 1.0;
     int64_t executions = 1;
     std::string mode = "same";
+    std::string arch;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         auto val = [&a](const char* key) -> std::string {
@@ -439,6 +441,8 @@ int runAutotune(int argc, char** argv) {
             cacheDir = val("cache-dir");
         } else if (!val("workdir").empty()) {
             workdir = val("workdir");
+        } else if (!val("arch").empty()) {
+            arch = val("arch");
         } else if (!val("json-out").empty()) {
             jsonOut = val("json-out");
         } else {
@@ -469,6 +473,8 @@ int runAutotune(int argc, char** argv) {
                 paths.push_back(mlk::fastkernel::ExecPath::NativeAsm);
             } else if (tok == "cpp") {
                 paths.push_back(mlk::fastkernel::ExecPath::NativeCpp);
+            } else if (tok == "cuda") {
+                paths.push_back(mlk::fastkernel::ExecPath::NativeCuda);
             } else if (!tok.empty()) {
                 std::fprintf(stderr, "mlk-poly: bad --exec token %s\n",
                              tok.c_str());
@@ -495,6 +501,10 @@ int runAutotune(int argc, char** argv) {
     cfg.budget.alpha = alpha;
     cfg.budget.amortizedExecutions = executions;
     cfg.driver.workdirBase = workdir;
+    cfg.gpu.workdirBase = workdir;
+    if (!arch.empty()) {
+        cfg.gpu.arch = arch;
+    }
     cfg.cacheDir = cacheDir;
 
     mlk::SymbolTable symbols;
@@ -597,7 +607,8 @@ int main(int argc, char** argv) {
         std::fputs("usage: mlk-poly demo [--backend=asm|cpp]\n"
                    "       mlk-poly show <graph.mlk>\n"
                    "       mlk-poly autotune [--m=M --k=K --n=N] "
-                   "[--tiles=..] [--exec=..] [--budget-mode=..]\n"
+                   "[--tiles=..] [--exec=..] [--arch=sm_XX] "
+                   "[--budget-mode=..]\n"
                    "                         [--comptime-budget-ms=X] "
                    "[--extra-budget-ms=X] [--tau-ms=X] [--json-out=F]\n"
                    "       mlk-poly emit <graph.mlk> [--asm|--cpp] "

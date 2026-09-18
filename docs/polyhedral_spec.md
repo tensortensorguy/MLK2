@@ -721,9 +721,64 @@ exists, mechanism by mechanism:
   rejection (cuda_emission_rejects_call_nodes). The differential gates
   activate automatically wherever nvcc + a device exist; on CUDA-less
   machines the skip conditions themselves are the recorded checks.
+
+### GPU backend — implementation status (round 20): multi-axis launch geometry + fast-kernel GPU candidates
+
+Two open roadmap items closed:
+
+- **Multi-axis launch geometry (never clamps).** The flat thread id in
+  every device kernel is now the FULL hardware linearization over the
+  six CUDA axes (x fastest: bz, by, bx block grid; tz, ty, tx block
+  threads) — with a 1-D launch it degenerates to the historical
+  `blockIdx.x * blockDim.x + threadIdx.x`. The launch geometry itself
+  is chosen by a GENERATED host-side helper (`mlk_assign_geometry`,
+  plain C, emitted once per module before the wrapper): a deterministic
+  greedy over the RUNTIME padded trips — the innermost levels pack onto
+  the block axes (bx, then by, then bz; per-axis caps 1024/1024/64,
+  cumulative product ≤ 1024 threads), the remaining levels pack onto
+  the grid axes innermost-first (gx, then gy, then gz; caps 2^31-1 /
+  65535 / 65535 — gy/gz are the overflow valves for grids beyond the
+  x-axis limit), and any shape that fits no axis keeps the historical
+  1-D flat fallback (grid = ceil(total/1024), block = min(total,1024)).
+  The helper NEVER clamps a dim: multi-axis launches satisfy
+  threads == total EXACTLY, so the hardware thread space bijectively
+  covers the padded instance space and every instance executes exactly
+  once (the fallback's ceil excess is absorbed by the existing
+  `mlk_flat >= mlk_total` guard). Soundness is assignment-invariant:
+  the device's per-level div/mod chain reads the flat index directly
+  (row-major over the level trips), so the geometry only shapes HOW
+  flat values are realized in hardware, never WHAT they mean — for any
+  dims the positional linearization is a bijection onto [0, threads).
+  Cap checks are division-form (no overflow); serial roots launch
+  1×1 through the same helper (n = 0). The generated helper is plain
+  C and is behaviorally pinned by
+  `cuda_emission_geometry_helper_behavioral`: the test extracts THIS
+  exact text from the emitted artifact, compiles it with cc, and
+  checks hand-computed assignments (tile-band packing, the gy overflow
+  valve, the 1-D fallback shape), the hardware-caps envelope on every
+  returned dim, the threads==total / threads>=total soundness
+  condition, and exhaustive hardware-index → flat injectivity (rank
+  == flat for every hardware tuple; each instance realized once).
+- **Fast-kernel GPU candidates.** `ExecPath::NativeCuda` joins the
+  DECLARED search space (default execPaths now walker/asm/cpp/cuda):
+  Cuda candidates build through the GPU driver entry points (the arch
+  flag is DECLARED per `FastKernelSearchConfig.gpu`, never defaulted),
+  flow through the same budget gate → artifact-cache probe → bit-exact
+  identity differential → benchmarked U^run pipeline as the CPU native
+  paths, and — where the toolchain or device is missing — end in a
+  structured `CapabilityUnsupported`/`BuildFailed` rejection naming the
+  failed probe (the declared space is reported in full, Axiom 14.20;
+  the winner claim downgrades to "best certified kernel in searched
+  space" honestly). The artifact-cache fingerprint binds the DECLARED
+  GPU compiler + arch for Cuda candidates (two arch declarations are
+  different artifacts and never share a cache entry). CLI:
+  `mlk-poly autotune --exec=walker,asm,cpp,cuda [--arch=sm_XX]`.
 - **Honest boundaries (roadmap).** No device has touched these
   artifacts yet in this environment (no nvcc): the emission is
-  structure-verified, the compile/run path is probe-gated. Multi-dim
-  grids (one block axis per collapsed level beyond the first), GPU
-  candidates inside the fast-kernel search, stream orchestration, and
-  shared-memory tiling stay open.
+  structure-verified, the geometry helper is behaviorally verified on
+  the CPU via the extracted generated text, and the compile/run path
+  stays probe-gated. Block-geometry HEURISTICS are untuned (packing is
+  chosen for simplicity and determinism; a spread heuristic, shared-
+  memory tiling, stream orchestration, and PTX emission stay open —
+  each needs hardware evidence before it is claimed as an
+  optimization, Rule 90).

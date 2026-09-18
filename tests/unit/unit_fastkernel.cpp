@@ -34,6 +34,18 @@ bool backendToolchainReady() {
     return ready;
 }
 
+/// Cold, cached probe for the Cuda execution path (the GPU driver's
+/// recorded check: compiler on PATH; device presence deliberately NOT
+/// probed — it is discovered at run time through the artifact's own
+/// structured ABI codes).
+bool cudaToolchainReady() {
+    static const bool ready = [] {
+        mlk::GpuBackendDriverConfig cfg;
+        return mlk::cudaToolchainAvailable(cfg);
+    }();
+    return ready;
+}
+
 /// Builds an M*K*N MatMul graph (the searched specification s).
 mlk::MathGraph buildGemm(mlk::SymbolTable& symbols, const int64_t m,
                          const int64_t k, const int64_t n) {
@@ -509,6 +521,68 @@ MLK_TEST(fastkernel, cache_reuse_and_invalidation) {
     if (!third.has_value()) return;
     MLK_CHECK_EQ(third->cacheMisses, 1u);
     MLK_CHECK_EQ(third->cacheHits, 0u);
+}
+
+MLK_TEST(fastkernel, cuda_candidate_declared_space) {
+    // The Cuda execution path is part of the DECLARED variant space
+    // (Axiom 14.20): without the nvcc toolchain its candidate ends in
+    // a structured CapabilityUnsupported rejection naming the failed
+    // probe (recorded, never silent — Rule 148), and the search still
+    // completes with an honest no-winner claim. With the toolchain the
+    // same candidate must certify identity + runtime like any native
+    // path — or, on a machine with a compiler but no DEVICE, fail at
+    // run time through the artifact's own structured ABI code (the
+    // discovery is recorded as a BuildFailed rejection detail).
+    mlk::SymbolTable symbols;
+    mlk::passes::registerAllPasses(symbols);
+    mlk::MathDomainProfile profile = tensorProfile(symbols);
+
+    mlk::fastkernel::FastKernelSearchConfig cfg;
+    cfg.tileSizes = {0};
+    cfg.execPaths = {mlk::fastkernel::ExecPath::NativeCuda};
+    cfg.threadCounts = {0};
+    cfg.warmupReps = 1;
+    cfg.benchReps = 2;
+    cfg.budget.mode = mlk::fastkernel::BudgetMode::SameComptime;
+    cfg.budget.baselineComptimeSec = 600.0;
+    cfg.driver.workdirBase = "/home/z/my-project/mlk2/build/fkwork";
+    cfg.gpu.workdirBase = "/home/z/my-project/mlk2/build/fkwork";
+    cfg.measureEnvironment = false;
+    cfg.env = fixedEnv();
+
+    mlk::MathGraph graph = buildGemm(symbols, 16, 12, 14);
+    auto r = mlk::fastkernel::runFastKernelSearch(graph, symbols, profile,
+                                                  cfg);
+    MLK_CHECK(r.has_value());
+    if (!r.has_value()) return;
+    MLK_CHECK_EQ(r->candidates.size(), 1u);
+    const auto& o = r->candidates[0];
+    MLK_CHECK_EQ(o.config.exec, mlk::fastkernel::ExecPath::NativeCuda);
+    if (cudaToolchainReady()) {
+        // Compiler present: the artifact builds through the GPU driver.
+        // Without a device the run discovers it (ABI code 4) and the
+        // rejection detail records the structured failure.
+        if (o.admissible) {
+            MLK_CHECK(o.cert.identityCertified);
+            MLK_CHECK(o.cert.identityMaxAbsDiff == 0.0);
+            MLK_CHECK(o.cert.runtimeCertified);
+            MLK_CHECK(o.cert.runtimeUpperBoundSec > 0.0);
+            MLK_CHECK(!o.cert.fingerprint.empty());
+        } else {
+            MLK_CHECK(o.reject ==
+                      mlk::fastkernel::RejectReason::BuildFailed);
+            MLK_CHECK(!o.rejectDetail.empty());
+            MLK_CHECK(r->winnerIndex < 0);
+        }
+    } else {
+        // No toolchain: the structured rejection IS the honest skip.
+        MLK_CHECK(o.reject ==
+                  mlk::fastkernel::RejectReason::CapabilityUnsupported);
+        MLK_CHECK(!o.rejectDetail.empty());
+        MLK_CHECK(r->winnerIndex < 0);
+        MLK_CHECK(r->budgetFailure);
+        MLK_CHECK(r->claim.find("budget failure") != std::string::npos);
+    }
 }
 
 MLK_TEST_MAIN("fastkernel")
