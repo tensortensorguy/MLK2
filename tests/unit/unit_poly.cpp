@@ -7,6 +7,7 @@
 #include "mlk/runtime/execution.h"
 #include "mlk/backend/cpp_emitter.h"
 #include "mlk/backend/asm_emitter.h"
+#include "mlk/backend/cuda_emitter.h"
 #include "mlk/backend/backend_driver.h"
 
 #include <cmath>
@@ -4004,6 +4005,308 @@ MLK_TEST(poly, max_accumulate_store_native_bitexact) {
         MLK_CHECK(std::memcmp(nativeY.data(), walkerY.data(),
                               4 * sizeof(double)) == 0);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Round 19: the CUDA backend (spec #GPU-backend; ADR-0008). The .cu text
+// artifact is fully machine-checkable WITHOUT a GPU: structure asserts pin
+// the grid mapping (proven-parallel collapse), the ABI wrapper (device
+// memory behind the SAME mlk_kernel ABI), the --fmad=false build contract,
+// and the declared exactness policy. Compile/run paths are gated by the
+// recorded nvcc probe — honest skip, never a silent green.
+// ---------------------------------------------------------------------------
+
+/// Cold, cached probe: live CUDA tests require nvcc on PATH. On this
+/// platform the tests SKIP honestly (the skip condition itself is the
+/// recorded check); every OTHER failure fails the test.
+bool cudaToolchainReady() {
+    static const bool ready = [] {
+        mlk::GpuBackendDriverConfig cfg;
+        return mlk::cudaToolchainAvailable(cfg);
+    }();
+    return ready;
+}
+
+MLK_TEST(poly, cuda_emission_gemm_structure) {
+    // Scheduled GEMM -> .cu text: one __global__ per root, the collapsed
+    // [i,j] parallel chain (proven by the scheduler) becomes a flat grid
+    // with row-major decomposition, the carried k runs serially inside
+    // the thread, and the host wrapper manages device memory behind the
+    // SAME ABI. No OpenMP pragmas exist on the device path; no std::
+    // calls either (device code uses the unqualified math functions).
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    auto mod = buildScheduledGemm(symbols, base, 0);
+    MLK_CHECK(mod.has_value());
+    if (!mod.has_value()) return;
+    auto src = mlk::emitCudaSource(*mod, symbols);
+    MLK_CHECK(src.has_value());
+    if (!src.has_value()) {
+        std::fprintf(stderr, "  emit: %s\n", src.error().message.c_str());
+        return;
+    }
+    const std::string& s = *src;
+    // Device kernel + host wrapper + the exactness/flags contract.
+    MLK_CHECK(s.find("__global__ void mlk_dev_0(") != std::string::npos);
+    MLK_CHECK(s.find("extern \"C\" int mlk_kernel(") != std::string::npos);
+    MLK_CHECK(s.find("--fmad=false") != std::string::npos);
+    // Grid collapse: flat thread id + bounds guard + row-major
+    // decomposition. The scheduled GEMM collapses its outermost
+    // parallel chain (the split k segments stop deeper collapse), so
+    // the decomposition is a direct assignment; deeper chains divide
+    // by the suffix product (mlk_rem %= covers that form).
+    MLK_CHECK(s.find("blockIdx.x") != std::string::npos);
+    MLK_CHECK(s.find("threadIdx.x") != std::string::npos);
+    MLK_CHECK(s.find("if (mlk_flat >= mlk_total) return;") !=
+              std::string::npos);
+    MLK_CHECK(s.find("= mlk_rem;") != std::string::npos ||
+              s.find("mlk_rem %=") != std::string::npos);
+    // Device memory management behind the ABI (the wrapper owns it).
+    MLK_CHECK(s.find("cudaMalloc") != std::string::npos);
+    MLK_CHECK(s.find("cudaMemcpy") != std::string::npos);
+    MLK_CHECK(s.find("cudaMemset") != std::string::npos);
+    MLK_CHECK(s.find("cudaFree") != std::string::npos);
+    MLK_CHECK(s.find("cudaDeviceSynchronize") != std::string::npos);
+    // The negative-flat structural check (ABI code 1 <-> walker
+    // InvalidGraph) at the store site.
+    MLK_CHECK(s.find("if (mlk_flat < 0) { *mlk_status = 1; return; }") !=
+              std::string::npos);
+    // Device-exact policy recorded for a pure mul/add GEMM.
+    MLK_CHECK(s.find("Exactness policy: bit-exact") != std::string::npos);
+    MLK_CHECK(s.find("#pragma omp") == std::string::npos);
+    MLK_CHECK(s.find("std::") == std::string::npos);
+    // Rule 148 recorded line exists.
+    MLK_CHECK(s.find("Rule 148 recorded") != std::string::npos);
+}
+
+MLK_TEST(poly, cuda_emission_deterministic) {
+    // Byte-identical re-emission (the asm snapshot contract): the .cu
+    // text is a pure function of the module (hash + recorded marks; no
+    // clocks, no addresses).
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    auto mod = buildScheduledGemm(symbols, base, 0);
+    MLK_CHECK(mod.has_value());
+    if (!mod.has_value()) return;
+    auto a = mlk::emitCudaSource(*mod, symbols);
+    auto b = mlk::emitCudaSource(*mod, symbols);
+    MLK_CHECK(a.has_value() && b.has_value());
+    if (!a.has_value() || !b.has_value()) return;
+    MLK_CHECK(*a == *b);
+}
+
+MLK_TEST(poly, cuda_emission_legacy_elementwise) {
+    // Legacy 1-D module: one thread per element over the caller's n,
+    // the static-range guard mirrors the 1-D executor's loop bounds,
+    // and the wrapper sizes device buffers by n (the shared dynamic
+    // bound of the legacy ABI).
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.isInput = true;
+    KernelBuffer b;
+    b.name = symbols.intern("B");
+    b.isInput = true;
+    KernelBuffer out;
+    out.name = symbols.intern("Out");
+    out.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufB = km.addBuffer(b);
+    const uint32_t bufOut = km.addBuffer(out);
+    const SymbolId vi = symbols.intern("i");
+    KernelNode loop;
+    loop.op = mlk::KernelOp::Loop;
+    loop.var = vi;
+    loop.begin = 0;
+    loop.end = mlk::constants::kKernelLoopDynamicBound;
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    compute.math = mlk::MathOp::Mul;
+    compute.bufferA = bufA;
+    compute.bufferB = bufB;
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = bufOut;
+    {
+        const uint32_t cid = km.addNode(compute);
+        const uint32_t sid = km.addNode(store);
+        loop.children.push_back(cid);
+        loop.children.push_back(sid);
+        (void)km.addNode(loop);
+    }
+    auto src = mlk::emitCudaSource(km, symbols);
+    MLK_CHECK(src.has_value());
+    if (!src.has_value()) {
+        std::fprintf(stderr, "  emit: %s\n", src.error().message.c_str());
+        return;
+    }
+    const std::string& s = *src;
+    MLK_CHECK(s.find("__global__ void mlk_dev_0(") != std::string::npos);
+    MLK_CHECK(s.find("extern \"C\" void mlk_kernel(") != std::string::npos);
+    MLK_CHECK(s.find("blockIdx.x * (int64_t)blockDim.x") !=
+              std::string::npos);
+    MLK_CHECK(s.find("mlk_i[") == std::string::npos);  // no affine machinery
+    // Policy: a pure Mul module is device-exact.
+    MLK_CHECK(mlk::cudaArtifactBitExactPolicy(km, symbols));
+}
+
+MLK_TEST(poly, cuda_emission_policy_classification) {
+    // The exactness boundary is OP-SET based, declared, never silent:
+    // mul/add GEMM -> bit-exact; any device-libm transcendental
+    // (exp, the softmax class) -> ULP-bounded. The classification the
+    // gate consumes is the SAME scan the emitter's apply() performs.
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    MLK_CHECK(mlk::cudaArtifactBitExactPolicy(base, symbols));
+    // A module touching device libm exp: policy flips (conservative).
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{4};
+    a.isInput = true;
+    KernelBuffer y;
+    y.name = symbols.intern("Y");
+    y.dims = SmallVector<int64_t, 4>{4};
+    y.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufY = km.addBuffer(y);
+    const SymbolId vi = symbols.intern("i");
+    KernelNode loop;
+    loop.op = mlk::KernelOp::Loop;
+    loop.var = vi;
+    loop.begin = 0;
+    loop.end = mlk::constants::kKernelLoopDynamicBound;
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    compute.math = mlk::MathOp::Exp;  // legacy single-op form
+    compute.bufferA = bufA;
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = bufY;
+    {
+        const uint32_t cid = km.addNode(compute);
+        const uint32_t sid = km.addNode(store);
+        loop.children.push_back(cid);
+        loop.children.push_back(sid);
+        (void)km.addNode(loop);
+    }
+    MLK_CHECK(!mlk::cudaArtifactBitExactPolicy(km, symbols));
+    auto src = mlk::emitCudaSource(km, symbols);
+    MLK_CHECK(src.has_value());
+    if (src.has_value()) {
+        MLK_CHECK(src->find("Exactness policy: ULP-BOUNDED") !=
+                  std::string::npos);
+    }
+}
+
+MLK_TEST(poly, cuda_driver_honest_skip) {
+    // The recorded-probe contract, three ways:
+    //   1. buildKernelArtifact(kind=Cuda) is an InvalidArgument (GPU
+    //      builds go through the GPU entry points — the arch flag must
+    //      be declared, never defaulted),
+    //   2. an invalid arch is an InvalidArgument,
+    //   3. without nvcc the GPU build is an honest UnsupportedCapability
+    //      naming the compiler (the skip condition IS the recorded
+    //      check); WITH nvcc the same call must produce a loadable
+    //      artifact that runs the GEMM bit-exact vs the walker.
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    auto mod = buildScheduledGemm(symbols, base, 0);
+    MLK_CHECK(mod.has_value());
+    if (!mod.has_value()) return;
+    mlk::BackendDriverConfig cfg;
+    auto wrong = mlk::buildKernelArtifact(*mod, symbols,
+                                          mlk::ArtifactKind::Cuda, cfg);
+    MLK_CHECK(!wrong.has_value());
+    if (wrong.has_value()) return;
+    MLK_CHECK(wrong.error().code == mlk::ErrorCode::InvalidArgument);
+
+    mlk::GpuBackendDriverConfig gcfg;
+    gcfg.arch = "not-an-arch";
+    auto badArch = mlk::buildGpuKernelArtifact(*mod, symbols, gcfg);
+    MLK_CHECK(!badArch.has_value());
+    if (badArch.has_value()) return;
+    MLK_CHECK(badArch.error().code == mlk::ErrorCode::InvalidArgument);
+
+    gcfg.arch = "sm_70";
+    auto art = mlk::buildGpuKernelArtifact(*mod, symbols, gcfg);
+    if (!cudaToolchainReady()) {
+        // Honest skip: the structured error names the toolchain.
+        MLK_CHECK(!art.has_value());
+        if (art.has_value()) return;
+        MLK_CHECK(art.error().code ==
+                      mlk::ErrorCode::UnsupportedCapability ||
+                  art.error().code == mlk::ErrorCode::InvalidArtifact);
+        return;
+    }
+    // Live path (CUDA-equipped machine only): four-way bit-exact.
+    MLK_CHECK(art.has_value());
+    if (!art.has_value()) {
+        std::fprintf(stderr, "  gpu build: %s\n",
+                     art.error().message.c_str());
+        return;
+    }
+    MLK_CHECK(art->isGpu());
+    constexpr std::size_t nA = static_cast<std::size_t>(kTestM * kTestK);
+    constexpr std::size_t nB = static_cast<std::size_t>(kTestK * kTestN);
+    constexpr std::size_t nC = static_cast<std::size_t>(kTestM * kTestN);
+    SmallVector<double, 8> bufA(nA), bufB(nB), outW(nC, 0.0), outG(nC, 0.0);
+    for (std::size_t i = 0; i < nA; ++i) {
+        bufA[i] = static_cast<double>(i % 7) * 0.25;
+    }
+    for (std::size_t i = 0; i < nB; ++i) {
+        bufB[i] = static_cast<double>(i % 5) * 0.5;
+    }
+    auto bind = [&](SmallVector<double, 8>& outC) {
+        mlk::KernelBufferBindings io;
+        io.inputs.push_back(bufA.data());
+        io.inputs.push_back(bufB.data());
+        io.outputs.push_back(outC.data());
+        io.elements = nC;
+        return io;
+    };
+    auto rw = mlk::executeKernelOnBuffers(*mod, symbols, bind(outW),
+                                          nullptr);
+    MLK_CHECK(rw.has_value());
+    if (!rw.has_value()) return;
+    auto rg = art->run(*mod, symbols, bind(outG));
+    MLK_CHECK(rg.has_value());
+    if (!rg.has_value()) {
+        std::fprintf(stderr, "  gpu run: %s\n",
+                     rg.error().message.c_str());
+        return;
+    }
+    for (std::size_t i = 0; i < nC; ++i) {
+        MLK_CHECK(outW[i] == outG[i]);  // bit-exact (Rule 43)
+    }
+}
+
+MLK_TEST(poly, cuda_emission_rejects_call_nodes) {
+    // Call nodes must be lowered by poly.synth first (Rule 121) — the
+    // CUDA emitter refuses them exactly like the C++/assembly emitters.
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{4, 4};
+    a.isInput = true;
+    KernelBuffer y;
+    y.name = symbols.intern("Y");
+    y.dims = SmallVector<int64_t, 4>{4, 4};
+    y.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufY = km.addBuffer(y);
+    KernelNode call;
+    call.op = mlk::KernelOp::Call;
+    call.math = mlk::MathOp::MatMul;
+    call.bufferA = bufA;
+    call.bufferOut = bufY;
+    (void)km.addNode(call);
+    auto src = mlk::emitCudaSource(km, symbols);
+    MLK_CHECK(!src.has_value());
+    if (src.has_value()) return;
+    MLK_CHECK(src.error().code == mlk::ErrorCode::UnsupportedCapability);
 }
 
 MLK_TEST_MAIN("poly")

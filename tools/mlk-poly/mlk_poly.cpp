@@ -23,7 +23,7 @@
 //                 runtime upper bounds, roofline lower bound + gap,
 //                 budget gates, and the honest winner claim (Axiom 14.21).
 //                 --json-out writes the full machine-readable report.
-//   mlk-poly emit <graph.mlk> [--asm|--cpp] [--out=<path>]
+//   mlk-poly emit <graph.mlk> [--asm|--cpp|--cuda] [--arch=sm_XX] [--out=<path>]
 //                 [--workdir=<dir>] [--compile]
 //                 compiles the graph at Tier2 and emits the standalone
 //                 artifact text (kernel.s | kernel.cpp) to stdout or
@@ -52,6 +52,7 @@
 #include "mlk/backend/asm_emitter.h"
 #include "mlk/backend/backend_driver.h"
 #include "mlk/backend/cpp_emitter.h"
+#include "mlk/backend/cuda_emitter.h"
 #include "mlk/fastkernel/fast_kernel.h"
 #include "mlk/core/symbol_table.h"
 #include "mlk/ir/graph_builder.h"
@@ -263,10 +264,13 @@ int runDemo(const std::string& backendFlag) {
 
 /// Compiles a graph file at Tier2 (the `show` pipeline) and emits the
 /// standalone artifact text; --compile additionally builds and loads the
-/// shared object out-of-process and prints the library path.
+/// shared object out-of-process and prints the library path (for --cuda
+/// the build runs through the GPU driver config: nvcc --fmad=false
+/// with the declared arch).
 int runEmit(const std::string& path, const bool useAsm,
-            const std::string& outPath, const std::string& workdir,
-            const bool compile) {
+            const bool useCuda, const std::string& outPath,
+            const std::string& workdir, const bool compile,
+            const std::string& arch) {
     mlk::SymbolTable symbols;
     mlk::passes::registerAllPasses(symbols);
     mlk::DiagnosticEngine diag;
@@ -300,8 +304,9 @@ int runEmit(const std::string& path, const bool useAsm,
                      r.error().message.c_str());
         return 1;
     }
-    auto src = useAsm ? mlk::emitAsmSource(kernel, symbols)
-                      : mlk::emitCppSource(kernel, symbols);
+    auto src = useCuda   ? mlk::emitCudaSource(kernel, symbols)
+               : useAsm  ? mlk::emitAsmSource(kernel, symbols)
+                         : mlk::emitCppSource(kernel, symbols);
     if (!src.has_value()) {
         std::fprintf(stderr, "mlk-poly: emit failed: %s\n",
                      src.error().message.c_str());
@@ -321,20 +326,37 @@ int runEmit(const std::string& path, const bool useAsm,
         std::fwrite(src->data(), 1, src->size(), stdout);
     }
     if (compile) {
-        mlk::BackendDriverConfig cfg;
-        if (!workdir.empty()) cfg.workdirBase = workdir;
-        auto loaded = mlk::buildKernelArtifact(
-            kernel, symbols,
-            useAsm ? mlk::ArtifactKind::Asm : mlk::ArtifactKind::Cpp, cfg);
-        if (!loaded.has_value()) {
-            std::fprintf(stderr, "mlk-poly: artifact failed: %s\n",
-                         loaded.error().message.c_str());
-            return 1;
+        if (useCuda) {
+            mlk::GpuBackendDriverConfig gcfg;
+            if (!workdir.empty()) gcfg.workdirBase = workdir;
+            if (!arch.empty()) gcfg.arch = arch;
+            auto loaded = mlk::buildGpuKernelArtifact(kernel, symbols, gcfg);
+            if (!loaded.has_value()) {
+                std::fprintf(stderr, "mlk-poly: artifact failed: %s\n",
+                             loaded.error().message.c_str());
+                return 1;
+            }
+            std::printf("mlk-poly: compiled artifact: %s\n",
+                        loaded->artifactPath().c_str());
+            std::printf("mlk-poly: shared object:    %s\n",
+                        loaded->libraryPath().c_str());
+        } else {
+            mlk::BackendDriverConfig cfg;
+            if (!workdir.empty()) cfg.workdirBase = workdir;
+            auto loaded = mlk::buildKernelArtifact(
+                kernel, symbols,
+                useAsm ? mlk::ArtifactKind::Asm : mlk::ArtifactKind::Cpp,
+                cfg);
+            if (!loaded.has_value()) {
+                std::fprintf(stderr, "mlk-poly: artifact failed: %s\n",
+                             loaded.error().message.c_str());
+                return 1;
+            }
+            std::printf("mlk-poly: compiled artifact: %s\n",
+                        loaded->artifactPath().c_str());
+            std::printf("mlk-poly: shared object:    %s\n",
+                        loaded->libraryPath().c_str());
         }
-        std::printf("mlk-poly: compiled artifact: %s\n",
-                    loaded->artifactPath().c_str());
-        std::printf("mlk-poly: shared object:    %s\n",
-                    loaded->libraryPath().c_str());
     }
     return 0;
 }
@@ -608,15 +630,22 @@ int main(int argc, char** argv) {
         return polybench::runBench(argc, argv);
     }
     if (mode == "emit" && argc >= 3) {
-        std::string outPath, workdir;
+        std::string outPath, workdir, arch;
         bool useAsm = true;   // the assembly form is the default artifact
+        bool useCuda = false;
         bool compile = false;
         for (int i = 3; i < argc; ++i) {
             const std::string a = argv[i];
             if (a == "--asm") {
                 useAsm = true;
+                useCuda = false;
             } else if (a == "--cpp") {
                 useAsm = false;
+                useCuda = false;
+            } else if (a == "--cuda") {
+                useCuda = true;
+            } else if (a.rfind("--arch=", 0) == 0) {
+                arch = a.substr(7);
             } else if (a.rfind("--out=", 0) == 0) {
                 outPath = a.substr(6);
             } else if (a.rfind("--workdir=", 0) == 0) {
@@ -629,7 +658,8 @@ int main(int argc, char** argv) {
                 return 2;
             }
         }
-        return runEmit(argv[2], useAsm, outPath, workdir, compile);
+        return runEmit(argv[2], useAsm, useCuda, outPath, workdir,
+                       compile, arch);
     }
     if (mode == "show" && argc >= 3) {
         mlk::SymbolTable symbols;
@@ -674,8 +704,8 @@ int main(int argc, char** argv) {
                "<graph.mlk> | autotune [...]\n"
                " | bench [--reps=R] [--warmup=W] [--suites=...] "
                "[--json-out=F] [--workdir=D]\n"
-               " | emit <graph.mlk> [--asm|--cpp] [--out=<path>] "
-               "[--workdir=<dir>] [--compile]\n",
+               " | emit <graph.mlk> [--asm|--cpp|--cuda] [--arch=sm_XX] "
+               "[--out=<path>] [--workdir=<dir>] [--compile]\n",
                stderr);
     return 2;
 }

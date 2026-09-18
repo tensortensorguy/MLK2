@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "mlk/backend/backend_driver.h"
+#include "mlk/backend/cuda_emitter.h"
 #include "mlk/core/constants.h"
 #include "mlk/core/diagnostics.h"
 #include "mlk/core/symbol_table.h"
@@ -67,6 +68,28 @@ double medianOf(std::vector<double> v) {
     if (n == 0) return 0.0;
     if (n % 2 == 1) return v[n / 2];
     return 0.5 * (v[n / 2 - 1] + v[n / 2]);
+}
+
+/// Ordered-bit ULP distance between two doubles (the GPU differential
+/// for transcendental-policy modules: MEASURED and recorded — never
+/// asserted, never silently relaxed, spec #GPU-backend). NaN pairs of
+/// the same class count as equal; one-sided NaN is an infinite gap;
+/// +/-0 are the same value (a == b).
+double ulpDistance(double a, double b) {
+    if (std::isnan(a) && std::isnan(b)) return 0.0;
+    if (std::isnan(a) || std::isnan(b)) return INFINITY;
+    if (a == b) return 0.0;
+    const auto ordered = [](double d) {
+        int64_t bits;
+        std::memcpy(&bits, &d, sizeof(bits));
+        // Monotone map: negatives mirror onto the low half.
+        return bits >= 0 ? bits
+                         : static_cast<int64_t>(0x8000000000000000LL) -
+                               bits;
+    };
+    const int64_t oa = ordered(a);
+    const int64_t ob = ordered(b);
+    return static_cast<double>(oa > ob ? oa - ob : ob - oa);
 }
 
 /// One benchmark row: a (suite case, execution path) pair.
@@ -413,6 +436,15 @@ int runSuiteCase(const Case& c, mlk::SymbolTable& symbols,
             r.note = "toolchain-unavailable";
             rows.push_back(r);
         }
+        // The cuda path is probed independently (its own toolchain);
+        // the row below keeps the report complete on bare machines.
+        Row cu;
+        cu.suite = c.suite;
+        cu.shape = c.shape;
+        cu.path = "cuda";
+        cu.flops = c.flops;
+        cu.note = "cuda-toolchain-unavailable";
+        rows.push_back(cu);
         return 0;
     }
     const mlk::ArtifactKind kinds[2] = {mlk::ArtifactKind::Cpp,
@@ -462,6 +494,83 @@ int runSuiteCase(const Case& c, mlk::SymbolTable& symbols,
             continue;
         }
         rows.push_back(nat);
+    }
+
+    // --- cuda (spec #GPU-backend) ---------------------------------------
+    // Emit .cu -> nvcc out-of-process -> dlopen -> the SAME ABI. Gated
+    // by the recorded toolchain probe (honest skip rows on a CUDA-less
+    // machine, never a silent green) and by the module's exactness
+    // policy: bit-exact rows gate with Rule 43's NaN-never-matches;
+    // transcendental-policy rows record the MEASURED max ULP distance
+    // in the note instead — declared, never relaxed.
+    {
+        Row row;
+        row.suite = c.suite;
+        row.shape = c.shape;
+        row.path = "cuda";
+        row.flops = c.flops;
+        mlk::GpuBackendDriverConfig gcfg;
+        if (!workdir.empty()) gcfg.workdirBase = workdir;
+        if (!mlk::cudaToolchainAvailable(gcfg)) {
+            row.note = "cuda-toolchain-unavailable";
+            rows.push_back(row);
+            return 0;
+        }
+        auto loaded = mlk::buildGpuKernelArtifact(poly, symbols, gcfg);
+        if (!loaded.has_value()) {
+            row.note = "artifact-failed: " +
+                       loaded.error().message.substr(0, 160);
+            rows.push_back(row);
+            return 0;
+        }
+        const bool exactPolicy =
+            mlk::cudaArtifactBitExactPolicy(poly, symbols);
+        mlk::SmallVector<double, 8> outN(nOut, 0.0);
+        auto bind = [&]() {
+            mlk::KernelBufferBindings io;
+            io.inputs.push_back(inA.data());
+            if (c.inArity == 2) io.inputs.push_back(inB.data());
+            io.outputs.push_back(outN.data());
+            io.elements = static_cast<int64_t>(nA);
+            return io;
+        };
+        auto r0 = loaded->run(poly, symbols, bind());
+        if (!r0.has_value()) {
+            row.note = "cuda-run-failed: " +
+                       r0.error().message.substr(0, 160);
+            rows.push_back(row);
+            return 0;
+        }
+        if (exactPolicy) {
+            row.bitexact = bitExact(outN, refOut);
+            if (!row.bitexact) {
+                row.note = "bitexact-FAIL";
+                rows.push_back(row);
+                return 0;
+            }
+            row.note = "bit-exact-policy";
+        } else {
+            double maxUlp = 0.0;
+            const std::size_t cnt =
+                outN.size() < refOut.size() ? outN.size() : refOut.size();
+            for (std::size_t i = 0; i < cnt; ++i) {
+                const double d = ulpDistance(refOut[i], outN[i]);
+                if (d > maxUlp) maxUlp = d;
+            }
+            row.bitexact = maxUlp == 0.0;
+            row.note = "ulp-bounded-policy max=" +
+                       std::to_string(maxUlp) + " ulp (measured)";
+        }
+        auto run = [&]() {
+            return loaded->run(poly, symbols, bind()).has_value();
+        };
+        if (!timedPath(run, warmup, reps, row)) {
+            row.note = "cuda-run-failed";
+            row.timed = false;
+            rows.push_back(row);
+            return 0;
+        }
+        rows.push_back(row);
     }
     return 0;
 }

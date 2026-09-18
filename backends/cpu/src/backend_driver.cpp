@@ -21,6 +21,7 @@
 #endif
 
 #include "mlk/backend/asm_emitter.h"
+#include "mlk/backend/cuda_emitter.h"
 #include "mlk/core/constants.h"
 
 #if !defined(_WIN32)
@@ -155,6 +156,34 @@ inline constexpr std::size_t kDriverMaxBindableBuffers = 8;
     return ::access(path.c_str(), X_OK) == 0;
 #else
     (void)path;
+    return false;
+#endif
+}
+
+/// Shared PATH-walk probe for both toolchains (cc/nvcc): true when the
+/// executable name resolves on PATH (or the name carries a '/' and
+/// exists at that path).
+[[nodiscard]] bool resolveOnPath(const std::string& name) {
+#if !defined(_WIN32)
+    if (name.find('/') != std::string::npos) {
+        return fileExists(name);
+    }
+    const char* pathEnv = std::getenv("PATH");
+    if (pathEnv == nullptr) return false;
+    const std::string path(pathEnv);
+    std::size_t pos = 0;
+    while (pos <= path.size()) {
+        std::size_t next = path.find(':', pos);
+        if (next == std::string::npos) next = path.size();
+        const std::string dir = path.substr(pos, next - pos);
+        if (!dir.empty() && fileExists(joinPath(dir, name))) {
+            return true;
+        }
+        pos = next + 1;
+    }
+    return false;
+#else
+    (void)name;
     return false;
 #endif
 }
@@ -305,6 +334,69 @@ void callLegacy(void* fn, Args... args) {
     return logPath;
 }
 
+/// CUDA variant: nvcc with the GPU build contract (--fmad=false is the
+/// bit-exactness boundary — separate mul/add, matching the walker and
+/// the asm emitter; -arch is the DECLARED target; -Xcompiler -fPIC
+/// keeps the host wrapper a proper shared object). Same
+/// log-capturing spawn as the CPU path, shared verbatim.
+[[nodiscard]] Result<std::string> runCudaCompiler(
+    const GpuBackendDriverConfig& config, const std::string& workdir,
+    const std::string& artifactPath, const std::string& libraryPath) {
+    const std::string logPath = joinPath(workdir, "build_log.txt");
+    std::vector<std::string> argStorage;
+    argStorage.push_back(config.compiler);
+    argStorage.push_back("-shared");
+    argStorage.push_back("-Xcompiler");
+    argStorage.push_back("-fPIC");
+    argStorage.push_back("--fmad=false");
+    argStorage.push_back("-arch=" + config.arch);
+    argStorage.push_back(artifactPath);
+    argStorage.push_back("-o");
+    argStorage.push_back(libraryPath);
+
+    std::vector<char*> argv;
+    argv.reserve(argStorage.size() + 1);
+    for (std::string& a : argStorage) argv.push_back(a.data());
+    argv.push_back(nullptr);
+
+    posix_spawn_file_actions_t actions;
+    if (posix_spawn_file_actions_init(&actions) != 0) {
+        return err(ErrorCode::Internal, "driver: spawn actions init");
+    }
+    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO,
+                                     logPath.c_str(),
+                                     O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO,
+                                     STDERR_FILENO);
+    pid_t pid = -1;
+    const int rc =
+        posix_spawnp(&pid, argv[0], &actions, nullptr, argv.data(),
+                     environ);
+    posix_spawn_file_actions_destroy(&actions);
+    if (rc != 0) {
+        return err(ErrorCode::UnsupportedCapability,
+                   "driver: cannot spawn GPU compiler '" +
+                       config.compiler +
+                       "' (rc=" + std::to_string(rc) + ")");
+    }
+    int status = 0;
+    if (::waitpid(pid, &status, 0) < 0) {
+        return err(ErrorCode::Internal, "driver: waitpid failed");
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        auto log = readFileTail(logPath, 800);
+        return err(
+            ErrorCode::InvalidArtifact,
+            "driver: GPU compiler failed (" +
+                std::string(WIFEXITED(status)
+                                ? "exit " +
+                                      std::to_string(WEXITSTATUS(status))
+                                : "signal") +
+                "): " + (log.has_value() ? *log : "<no log>"));
+    }
+    return logPath;
+}
+
 struct LibHandle {
     void* handle{nullptr};
     void* fn{nullptr};
@@ -338,23 +430,16 @@ struct LibHandle {
 
 bool toolchainAvailable(const BackendDriverConfig& config) {
 #if !defined(_WIN32)
-    if (config.compiler.find('/') != std::string::npos) {
-        return fileExists(config.compiler);
-    }
-    const char* pathEnv = std::getenv("PATH");
-    if (pathEnv == nullptr) return false;
-    const std::string path(pathEnv);
-    std::size_t pos = 0;
-    while (pos <= path.size()) {
-        std::size_t next = path.find(':', pos);
-        if (next == std::string::npos) next = path.size();
-        const std::string dir = path.substr(pos, next - pos);
-        if (!dir.empty() && fileExists(joinPath(dir, config.compiler))) {
-            return true;
-        }
-        pos = next + 1;
-    }
+    return resolveOnPath(config.compiler);
+#else
+    (void)config;
     return false;
+#endif
+}
+
+bool cudaToolchainAvailable(const GpuBackendDriverConfig& config) {
+#if !defined(_WIN32)
+    return resolveOnPath(config.compiler);
 #else
     (void)config;
     return false;
@@ -421,6 +506,7 @@ LoadedKernel::LoadedKernel(LoadedKernel&& other) noexcept
     : handle_(other.handle_),
       fn_(other.fn_),
       multiDim_(other.multiDim_),
+      gpu_(other.gpu_),
       artifactPath_(std::move(other.artifactPath_)),
       libraryPath_(std::move(other.libraryPath_)) {
     other.handle_ = nullptr;
@@ -434,6 +520,7 @@ LoadedKernel& LoadedKernel::operator=(LoadedKernel&& other) noexcept {
         handle_ = other.handle_;
         fn_ = other.fn_;
         multiDim_ = other.multiDim_;
+        gpu_ = other.gpu_;
         artifactPath_ = std::move(other.artifactPath_);
         libraryPath_ = std::move(other.libraryPath_);
         other.handle_ = nullptr;
@@ -447,6 +534,13 @@ Result<LoadedKernel> buildKernelArtifactInDir(
     const ArtifactKind kind, const BackendDriverConfig& config,
     const std::string& artifactDir) {
 #if !defined(_WIN32)
+    if (kind == ArtifactKind::Cuda) {
+        // Explicit selection, never an accidental flag soup: GPU
+        // artifacts go through the GPU entry points (the arch flag
+        // must be declared, not defaulted).
+        return err(ErrorCode::InvalidArgument,
+                   "driver: kind Cuda requires buildGpuKernelArtifact");
+    }
     // Stage 1: emit.
     Result<std::string> source = kind == ArtifactKind::Asm
                                      ? emitAsmSource(kernel, symbols)
@@ -528,6 +622,10 @@ Result<LoadedKernel> buildKernelArtifact(const KernelModule& kernel,
                                          const ArtifactKind kind,
                                          const BackendDriverConfig& config) {
 #if !defined(_WIN32)
+    if (kind == ArtifactKind::Cuda) {
+        return err(ErrorCode::InvalidArgument,
+                   "driver: kind Cuda requires buildGpuKernelArtifact");
+    }
     // Stage 1: emit.
     Result<std::string> source = kind == ArtifactKind::Asm
                                      ? emitAsmSource(kernel, symbols)
@@ -577,6 +675,149 @@ Result<LoadedKernel> buildKernelArtifact(const KernelModule& kernel,
 #endif
 }
 
+/// Arch validation: sm_<digits> (the declared-target contract). An
+/// invalid arch is an InvalidArgument, never a silent default.
+[[nodiscard]] bool validArch(const std::string& arch) {
+    if (arch.rfind("sm_", 0) != 0 || arch.size() <= 3) return false;
+    for (std::size_t i = 3; i < arch.size(); ++i) {
+        if (arch[i] < '0' || arch[i] > '9') return false;
+    }
+    return true;
+}
+
+Result<LoadedKernel> buildGpuKernelArtifactInDir(
+    const KernelModule& kernel, SymbolTable& symbols,
+    const GpuBackendDriverConfig& config,
+    const std::string& artifactDir) {
+#if !defined(_WIN32)
+    if (!validArch(config.arch)) {
+        return err(ErrorCode::InvalidArgument,
+                   "driver: GPU arch must be sm_<digits>, got '" +
+                       config.arch + "'");
+    }
+    // Stage 1: emit (CUDA C++ text).
+    auto source = emitCudaSource(kernel, symbols);
+    if (!source.has_value()) {
+        return std::unexpected<Error>(source.error());
+    }
+    // Stage 2: pin the artifact directory.
+    auto dirMade = createDirs(artifactDir);
+    if (!dirMade.has_value()) {
+        return std::unexpected<Error>(dirMade.error());
+    }
+    // Stage 3: write.
+    const std::string artifactPath = joinPath(artifactDir, "kernel.cu");
+    auto wrote = writeFile(artifactPath, *source);
+    if (!wrote.has_value()) {
+        return std::unexpected<Error>(wrote.error());
+    }
+    // Stage 4: out-of-process toolchain (nvcc).
+    const std::string libraryPath = joinPath(artifactDir, "libmlk_kernel.so");
+    auto built =
+        runCudaCompiler(config, artifactDir, artifactPath, libraryPath);
+    if (!built.has_value()) {
+        return std::unexpected<Error>(built.error());
+    }
+    // Stage 5: load (the same dlopen/dlsym tail as the CPU path — the
+    // ABI symbol is identical).
+    auto lib = loadLibrary(libraryPath);
+    if (!lib.has_value()) {
+        return std::unexpected<Error>(lib.error());
+    }
+    LoadedKernel loaded;
+    loaded.handle_ = lib->handle;
+    loaded.fn_ = lib->fn;
+    loaded.multiDim_ = isMultiDimModule(kernel);
+    loaded.gpu_ = true;
+    loaded.artifactPath_ = artifactPath;
+    loaded.libraryPath_ = libraryPath;
+    return loaded;
+#else
+    (void)kernel;
+    (void)symbols;
+    (void)config;
+    (void)artifactDir;
+    return err(ErrorCode::UnsupportedCapability,
+               "driver: no POSIX toolchain on this platform");
+#endif
+}
+
+Result<LoadedKernel> buildGpuKernelArtifact(const KernelModule& kernel,
+                                            SymbolTable& symbols,
+                                            const GpuBackendDriverConfig& config) {
+#if !defined(_WIN32)
+    if (!validArch(config.arch)) {
+        return err(ErrorCode::InvalidArgument,
+                   "driver: GPU arch must be sm_<digits>, got '" +
+                       config.arch + "'");
+    }
+    // Stage 1: emit.
+    auto source = emitCudaSource(kernel, symbols);
+    if (!source.has_value()) {
+        return std::unexpected<Error>(source.error());
+    }
+    // Stage 2: workdir.
+    std::string base = config.workdirBase;
+    if (base.empty()) {
+        const char* env = std::getenv("MLK_BACKEND_WORKDIR");
+        if (env != nullptr && env[0] != '\0') {
+            base = env;
+        } else {
+            char cwd[4096];
+            if (::getcwd(cwd, sizeof(cwd)) == nullptr) {
+                return err(ErrorCode::IoError,
+                           "driver: cannot resolve cwd for workdir");
+            }
+            base = joinPath(cwd, "mlk_backend_work");
+        }
+    }
+    auto baseMade = createDirs(base);
+    if (!baseMade.has_value()) {
+        return std::unexpected<Error>(baseMade.error());
+    }
+    std::string templ = joinPath(base, "mlkart-XXXXXX");
+    std::vector<char> buf(templ.begin(), templ.end());
+    buf.push_back('\0');
+    if (::mkdtemp(buf.data()) == nullptr) {
+        return err(ErrorCode::IoError,
+                   "driver: mkdtemp failed under " + base);
+    }
+    const std::string workdir(buf.data());
+    // Stage 3: write.
+    const std::string artifactPath = joinPath(workdir, "kernel.cu");
+    auto wrote = writeFile(artifactPath, *source);
+    if (!wrote.has_value()) {
+        return std::unexpected<Error>(wrote.error());
+    }
+    // Stage 4: out-of-process toolchain.
+    const std::string libraryPath = joinPath(workdir, "libmlk_kernel.so");
+    auto built =
+        runCudaCompiler(config, workdir, artifactPath, libraryPath);
+    if (!built.has_value()) {
+        return std::unexpected<Error>(built.error());
+    }
+    // Stage 5: load.
+    auto lib = loadLibrary(libraryPath);
+    if (!lib.has_value()) {
+        return std::unexpected<Error>(lib.error());
+    }
+    LoadedKernel loaded;
+    loaded.handle_ = lib->handle;
+    loaded.fn_ = lib->fn;
+    loaded.multiDim_ = isMultiDimModule(kernel);
+    loaded.gpu_ = true;
+    loaded.artifactPath_ = artifactPath;
+    loaded.libraryPath_ = libraryPath;
+    return loaded;
+#else
+    (void)kernel;
+    (void)symbols;
+    (void)config;
+    return err(ErrorCode::UnsupportedCapability,
+               "driver: no POSIX toolchain on this platform");
+#endif
+}
+
 Result<void> LoadedKernel::run(const KernelModule& kernel,
                                SymbolTable& symbols,
                                const KernelBufferBindings& io) const {
@@ -608,6 +849,19 @@ Result<void> LoadedKernel::run(const KernelModule& kernel,
                 return err(ErrorCode::UnsupportedCapability,
                            "driver: temp buffers belong to the multi-dim "
                            "form (walker parity)");
+            }
+            if (gpu_) {
+                // GPU artifacts materialize their own device scratch
+                // from the module's static temp dims (the walker's
+                // model, enforced inside the artifact). The ABI table
+                // stays arity-identical: a dummy (ptr, dims) entry
+                // rides in the temp slot, the caller's entry (if any)
+                // is accepted and ignored — documented, not silent.
+                static const double kDummyTemp = 0.0;
+                static const int64_t kDummyTempDim = 0;
+                pairs.push_back(
+                    PtrPair{&kDummyTemp, &kDummyTempDim});
+                continue;
             }
             // Walker mirror (kernel_buffers.cpp): dims product (or the
             // elements field), same kKernelTempElementsLimit guard,

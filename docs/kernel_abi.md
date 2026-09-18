@@ -22,6 +22,22 @@ The CPU backend realizes a KernelModule in two artifact forms:
    loads it with dlopen: publication stays file-backed, no in-process
    machine codegen exists (ADR-0003/0006), so the W^X/patching notes
    below are unchanged.
+4. **CUDA C++** (`mlk-poly emit --cuda [--arch=sm_XX]`) — the same
+   contract as form 2 emitted as standalone `.cu` text (see
+   docs/polyhedral_spec.md §GPU-backend and
+   `backends/cpu/include/mlk/backend/cuda_emitter.h`). One `__global__`
+   kernel per forest root launched from the host wrapper in root order;
+   the wrapper manages device memory behind the SAME `mlk_kernel` ABI
+   (cudaMalloc/H2D/launch/D2H inside the artifact — the caller's view
+   of the call is unchanged) and reports violations through the ABI int:
+   0 ok, 1 negative store flat, 2 cuda runtime alloc/copy, 3 launch or
+   sync failure, 4 no CUDA device. Built out-of-process by the GPU
+   driver (`nvcc -shared -Xcompiler -fPIC --fmad=false -arch=<declared>`
+   — the fmad flag is the bit-exactness contract); exactness policy is
+   recorded per module (bit-exact for IEEE mul/add/div/sqrt + poly7,
+   ULP-bounded-measured for device-libm transcendentals). Temp ABI
+   entries stay in the signature for dispatch uniformity; the artifact
+   materializes its own device scratch (the driver passes dummies).
 
 ## Input binding order
 

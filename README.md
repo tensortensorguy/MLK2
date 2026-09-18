@@ -33,7 +33,7 @@ ctest --test-dir build
 | `autotuner/` | Declarative search spaces, verify-before-benchmark harness, roofline pruning, noise filtering, complete-key caching |
 | `superopt/` | Certificated candidate generators: scalar peephole, math-function approximation (measured-ULP degree-13 sin: max 2 ULPs vs libm), algebraic e-graph optimizer |
 | `polyhedral/` | Hermetic polyhedral engine (Presburger sets, Fourier-Motzkin, exact lexmin, rational simplex) + the poly.* pass family: SCoP extraction, exact dependence analysis, affine scheduling, tiling, Kernel IR code generation, schedule verification (docs/polyhedral_spec.md) |
-| `backends/` | Tier 0 interpreter backend, CPU backend (KernelModule execution + native AOT artifacts: C++ source and x86-64 assembly emission, out-of-process build + dlopen driver — docs/polyhedral_spec.md §backend) |
+| `backends/` | Tier 0 interpreter backend, CPU backend (KernelModule execution + native AOT artifacts: C++ source, x86-64 assembly, and CUDA emission; out-of-process cc/nvcc build + dlopen driver — docs/polyhedral_spec.md §backend, §GPU-backend) |
 | `fastkernel/` | Certified, budgeted fast-kernel search (OEIA/Refined/FastKernels): per-variant identity/runtime/comptime/launch certificates, budget modes with regression guard, roofline lower bound, fingerprint-validated artifact cache, honest winner claims — docs/polyhedral_spec.md §fast-kernel-search, `mlk-poly autotune` |
 | `tools/` | `mlkc`, `mlk-poly`, `mlk-verify`, `mlk-tune`, `mlk-bench`, `mlk-profile`, `mlk-replay`, `mlk-generate-profiles` |
 | `tests/` | unit (10 suites), differential (Rule 43), fallback (Rule 102), fuzz (Rule 152), security (Rule 124), replay (Rule 158) |

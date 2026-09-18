@@ -57,8 +57,12 @@ namespace mlk {
 /// Artifact form to build (Rule 78-style explicit selection; the
 /// emitters are independently verified).
 enum class ArtifactKind : uint8_t {
-    Cpp = 0,  // emitCppSource  -> cc -shared -fPIC -fno-exceptions
-    Asm = 1,  // emitAsmSource  -> cc -shared (AT&T x86-64)
+    Cpp = 0,   // emitCppSource  -> cc -shared -fPIC -fno-exceptions
+    Asm = 1,   // emitAsmSource  -> cc -shared (AT&T x86-64)
+    Cuda = 2,  // emitCudaSource -> nvcc (build through the dedicated
+               // GPU entry points below — buildKernelArtifact rejects
+               // Cuda explicitly so the arch flag can never be
+               // accidentally defaulted; spec #GPU-backend)
 };
 
 /// Driver knobs (Rule 27: named, documented; all cold-path).
@@ -76,6 +80,29 @@ struct BackendDriverConfig {
 /// used by tests to SKIP honestly when the platform has no toolchain —
 /// every other failure is an error, never a silent skip).
 [[nodiscard]] bool toolchainAvailable(const BackendDriverConfig& config);
+
+/// GPU artifact driver knobs (spec #GPU-backend: compiler = nvcc, arch
+/// flag DECLARED per config — never defaulted silently; all cold-path).
+struct GpuBackendDriverConfig {
+    /// Compiler driver used to build the shared object (nvcc).
+    std::string compiler{"nvcc"};
+    /// Target architecture flag, validated to sm_<digits> at build
+    /// time. Declared, not probed: the artifact must state the
+    /// hardware it was compiled for (Rule 148 honesty).
+    std::string arch{"sm_70"};
+    /// Base directory for per-build workdirs (same resolution as
+    /// BackendDriverConfig::workdirBase; never /tmp).
+    std::string workdirBase{};
+};
+
+/// True when the configured GPU compiler is resolvable on PATH (cold
+/// probe; the recorded check that lets tests/bench SKIP honestly on
+/// machines without a CUDA toolchain — every other failure is an
+/// error, never a silent skip). Device PRESENCE is intentionally NOT
+/// probed here: it is discovered at run time through the artifact's
+/// own structured ABI codes (4 = no CUDA device).
+[[nodiscard]] bool cudaToolchainAvailable(
+    const GpuBackendDriverConfig& config);
 
 /// Creates `path` and every missing parent (mkdir -p semantics; 0755).
 /// A missing PARENT chain is a normal first-run state (fresh checkout,
@@ -102,6 +129,11 @@ public:
 
     [[nodiscard]] bool valid() const noexcept { return handle_ != nullptr; }
     [[nodiscard]] bool isMultiDim() const noexcept { return multiDim_; }
+    /// True when the artifact was built through the GPU path (kind
+    /// Cuda): temp table entries are accepted for ABI uniformity but
+    /// the artifact materializes its own device scratch, so the driver
+    /// passes dummies instead of host temps.
+    [[nodiscard]] bool isGpu() const noexcept { return gpu_; }
     [[nodiscard]] const std::string& artifactPath() const noexcept {
         return artifactPath_;
     }
@@ -126,9 +158,17 @@ private:
     friend Result<LoadedKernel> loadKernelLibrary(
         const KernelModule& kernel, SymbolTable& symbols,
         const std::string& libraryPath);
+    friend Result<LoadedKernel> buildGpuKernelArtifact(
+        const KernelModule& kernel, SymbolTable& symbols,
+        const GpuBackendDriverConfig& config);
+    friend Result<LoadedKernel> buildGpuKernelArtifactInDir(
+        const KernelModule& kernel, SymbolTable& symbols,
+        const GpuBackendDriverConfig& config,
+        const std::string& artifactDir);
     void* handle_{nullptr};
     void* fn_{nullptr};
     bool multiDim_{false};
+    bool gpu_{false};
     std::string artifactPath_{};
     std::string libraryPath_{};
 };
@@ -157,5 +197,25 @@ private:
 [[nodiscard]] Result<LoadedKernel> buildKernelArtifact(
     const KernelModule& kernel, SymbolTable& symbols, ArtifactKind kind,
     const BackendDriverConfig& config);
+
+/// GPU entry point (spec #GPU-backend): emits the CUDA artifact
+/// (emitCudaSource), compiles it out-of-process with nvcc
+/// (`--fmad=false -arch=<config.arch>` — the fmad flag is the
+/// bit-exactness contract, never negotiable), and dlopens it. The .so
+/// exports the SAME mlk_kernel ABI; device memory is managed inside
+/// the artifact (cudaMalloc/H2D/launch/D2H behind the same
+/// Result-mapped error codes). Reuses every stage of the CPU path —
+/// only the emission + compile tail differ.
+[[nodiscard]] Result<LoadedKernel> buildGpuKernelArtifact(
+    const KernelModule& kernel, SymbolTable& symbols,
+    const GpuBackendDriverConfig& config);
+
+/// GPU entry point pinned to a stable artifact directory (the
+/// fast-kernel cache path — Axiom 14.22; the fingerprint already
+/// covers the compiler and must cover the arch for GPU entries).
+[[nodiscard]] Result<LoadedKernel> buildGpuKernelArtifactInDir(
+    const KernelModule& kernel, SymbolTable& symbols,
+    const GpuBackendDriverConfig& config,
+    const std::string& artifactDir);
 
 }  // namespace mlk

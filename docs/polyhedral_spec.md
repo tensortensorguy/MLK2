@@ -584,7 +584,7 @@ cache reuse + invalidation).
   affine point-loop bound machinery for partial tiles could shrink the
   emitted forest further.
 
-## GPU backend (next phase — design contract)
+## GPU backend (design contract, implemented round 19)
 
 The pipeline extends to GPU targets with NO structural change: the
 polyhedral layer already owns the schedule, the parallel marks are
@@ -632,3 +632,98 @@ Entry point when this phase starts: `ArtifactKind::Cuda` +
 config), reusing `buildKernelArtifactInDir`, the artifact cache
 fingerprint (compiler kind becomes part of it), and `mlk-poly bench
 --paths=cuda` for the same Rule 49 protocol.
+
+### GPU backend — implementation status (round 19)
+
+The contract above is IMPLEMENTED as `cuda_emitter.cpp` (emitCudaSource)
++ the GPU driver entry points (buildGpuKernelArtifact / InDir). What
+exists, mechanism by mechanism:
+
+- **Artifact shape.** One `__global__` device kernel per forest ROOT
+  (mlk_dev_<idx>, capped at kCudaMaxDeviceKernels = 64, honest rejection
+  beyond), each taking the FULL bindable table (ptr + dims per buffer,
+  temps included) + the scalars pair + an `int* mlk_status` slot. The
+  host wrapper `extern "C" int mlk_kernel(...)` keeps the ABI EXACTLY —
+  the driver dispatch is form-based (multiDim/legacy), not
+  backend-based, so run() needs no dispatch changes. Temp table entries
+  stay in the host signature for arity uniformity but are IGNORED by
+  the artifact (device scratch is materialized internally from the
+  module's static temp dims; the driver passes dummies for gpu_ kernels
+  — documented boundary, not a silent drop).
+- **Padded-grid collapse from proven marks.** The outermost chain of
+  parallel-marked unit-step loops whose interior bodies are exactly one
+  loop child is peeled into a flat 1-D grid, one thread per instance
+  tuple, decomposed row-major (outermost first — the walker's stack
+  order). Point loops with AFFINE bounds over the prefix (tile → point
+  pairs) ARE peelable: per-level PADDED trip counts are the exact
+  interval max of the level's trip over the prefix box (interval
+  arithmetic on affine forms, text-generated so host and device totals
+  share one form), and each thread checks its var against its OWN
+  begin/end forms, returning on padding holes. Soundness: the parallel
+  marks prove every collapsed level's instances slab-disjoint, so any
+  enumeration is deterministic; coverage is exact because the padded
+  trip is ≥ every prefix tuple's real trip and holes exit before any
+  payload runs. Interior bodies with sibling sub-nests stop the chain
+  (peeling would duplicate the siblings across threads); everything
+  deeper — serial, carried, guards, split segments — walks inside the
+  thread in the walker's exact order. A root without a parallel chain
+  launches single-thread and the header RECORDS it (Rule 148: never a
+  silent loss of parallelism).
+- **Host wrapper semantics.** cudaMalloc per bindable buffer + per dims
+  array + scalars + status; H2D for inputs AND outputs (accumulate/Max
+  stores read the output slot); device temps from static dims,
+  zero-initialized (cudaMemset, the walker's model, the same
+  kKernelTempElementsLimit enforced at emission); one launch per root
+  IN ROOT ORDER with cudaDeviceSynchronize between (the walker's
+  sequential root discipline); status readback maps device violations
+  to the ABI int; D2H for the writable set; a cleanup ladder frees
+  exactly what was allocated on every path. ABI error codes: 0 ok, 1
+  negative store flat (checked at every store site — the walker's
+  InvalidGraph), 2 cuda runtime alloc/copy, 3 launch/sync, 4 no CUDA
+  device.
+- **Exactness policy (declared per module, consumed by the gate).**
+  `cudaArtifactBitExactPolicy()` classifies the module with the SAME
+  scan the emitter's apply() performs: {Add, Sub, Mul, Div, Neg, Sqrt,
+  Rsqrt, poly7-Sin} are device-exact (IEEE correctly rounded mul/add/
+  div/sqrt; floor/fmod exact; the poly7 device snapshot is pure
+  mul/add) — the differential vs the walker is bit-exact BY
+  CONSTRUCTION under the mandatory `--fmad=false` build flag. Any
+  device-libm op (Exp, Log, libm-Sin, Cos, Tan, Tanh, Erf, Gelu, Pow's
+  non-fast form) flips the module to ULP-BOUNDED: the differential is
+  MEASURED (max ordered-bit ULP distance) and recorded in the report —
+  never asserted, never silently relaxed. NaN/inf constants emit as
+  bit-exact intrinsic forms (__longlong_as_double), never libm macros.
+- **Driver.** `GpuBackendDriverConfig{compiler="nvcc", arch="sm_70",
+  workdirBase}` — the arch is DECLARED (validated sm_<digits>, an
+  invalid arch is InvalidArgument; the artifact states the hardware it
+  targets) and the build spawns `nvcc -shared -Xcompiler -fPIC
+  --fmad=false -arch=<arch> kernel.cu` out-of-process with the same
+  log-capturing spawn as the CPU path. buildKernelArtifact(kind=Cuda)
+  is an explicit InvalidArgument so the arch flag can never be
+  accidentally defaulted. `cudaToolchainAvailable()` is the recorded
+  PATH probe (device PRESENCE is intentionally not probed — it is
+  discovered at run time through the artifact's own ABI code 4).
+- **CLI + bench.** `mlk-poly emit <graph.mlk> --cuda [--arch=sm_XX]
+  [--compile]` emits/loads the .cu artifact; `mlk-poly bench` gains the
+  `cuda` path — honest `cuda-toolchain-unavailable` skip rows when the
+  probe fails, bit-exact gating for device-exact modules, and the
+  measured max-ULP recorded in the row note for ULP-bounded modules.
+- **Verification without a device.** The .cu text is fully
+  machine-checkable in-network: structure asserts pin the grid
+  collapse, the ABI wrapper, the --fmad=false contract, the negative-
+  flat check, and the policy line (cuda_emission_gemm_structure);
+  byte-identical re-emission (cuda_emission_deterministic); legacy 1-D
+  thread-per-element mapping (cuda_emission_legacy_elementwise); the
+  policy classification boundary (cuda_emission_policy_classification);
+  the recorded-probe honest skip + arch validation + explicit-selection
+  rejection (cuda_driver_honest_skip — which doubles as the LIVE
+  four-way bit-exact test on a CUDA-equipped machine); Call-node
+  rejection (cuda_emission_rejects_call_nodes). The differential gates
+  activate automatically wherever nvcc + a device exist; on CUDA-less
+  machines the skip conditions themselves are the recorded checks.
+- **Honest boundaries (roadmap).** No device has touched these
+  artifacts yet in this environment (no nvcc): the emission is
+  structure-verified, the compile/run path is probe-gated. Multi-dim
+  grids (one block axis per collapsed level beyond the first), GPU
+  candidates inside the fast-kernel search, stream orchestration, and
+  shared-memory tiling stay open.
