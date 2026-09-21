@@ -1,5 +1,7 @@
 // Superoptimizer tests: certificates present (Rule 52), ULP verification
 // (Rule 50), domain gating (Rule 51).
+#include <cmath>
+
 #include "mlk/core/symbol_table.h"
 #include "mlk/ir/graph_builder.h"
 #include "mlk/superopt/enumerator.h"
@@ -91,6 +93,40 @@ MLK_TEST(superopt, scalar_peephole_needs_fma_profile) {
     for (const auto& c : *cands) {
         MLK_CHECK(!c.proof.appliedRules.empty());
         MLK_CHECK(c.origin != mlk::kInvalidSymbolId);
+    }
+}
+
+MLK_TEST(superopt, speedups_are_measured_not_constants) {
+    // Rule 29: the estimated speedup is a measured ratio (steady-clock
+    // medians over the deterministic workload), not a hardcoded constant.
+    // The test asserts sanity (positive, finite, recorded on every
+    // candidate) — the ratio itself is machine-dependent by design.
+    SEnv env(true);
+    mlk::GraphBuilder b(env.symbols);
+    const mlk::MathType f64 =
+        mlk::MathType::scalar(mlk::Domain::Float, mlk::Dtype::F64);
+    const mlk::ValueId x = b.placeholder("x", f64);
+    auto s = b.op(mlk::MathOp::Sin, {x});
+    MLK_CHECK(s.has_value());
+    b.output(*s);
+    mlk::MathFunctionApproximator approx(env.symbols);
+    auto cands = approx.generate(b.graph(), env.contract, env.profile);
+    MLK_CHECK(cands.has_value());
+    for (const auto& c : *cands) {
+        MLK_CHECK(c.estimatedSpeedup > 0.0);
+        MLK_CHECK(std::isfinite(c.estimatedSpeedup));
+    }
+    auto sq = b.op(mlk::MathOp::Mul, {x, x});
+    MLK_CHECK(sq.has_value());
+    auto sum = b.op(mlk::MathOp::Add, {*sq, x});
+    MLK_CHECK(sum.has_value());
+    b.output(*sum);
+    mlk::ScalarPeepholeSuperoptimizer peephole(env.symbols);
+    auto pcands = peephole.generate(b.graph(), env.contract, env.profile);
+    MLK_CHECK(pcands.has_value());
+    for (const auto& c : *pcands) {
+        MLK_CHECK(c.estimatedSpeedup > 0.0);
+        MLK_CHECK(std::isfinite(c.estimatedSpeedup));
     }
 }
 

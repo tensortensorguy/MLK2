@@ -8,6 +8,7 @@
 #include "mlk/core/sparse_set.h"
 #include "mlk/core/symbol_table.h"
 #include "mlk/support/json.h"
+#include "mlk/type/domain.h"
 
 #include "mlk_test.h"
 
@@ -141,6 +142,22 @@ MLK_TEST(core, json_rejects_malformed) {
     deep += "1";
     for (int i = 0; i < 300; ++i) deep += "]";
     MLK_CHECK(!mlk::json::parse(deep).has_value());  // depth bound
+}
+
+MLK_TEST(core, dtype_bytes_complex_are_pairs) {
+    // Complex elements are (real, imag) pairs of the component float:
+    // C64 = 2 x f32 = 8 bytes, C128 = 2 x f64 = 16 bytes. The previous
+    // 4/8 values under-counted every complex byte figure in the cost
+    // model by 2x (round-23 review finding).
+    MLK_CHECK_EQ(mlk::dtypeBytes(mlk::Dtype::C64), 8);
+    MLK_CHECK_EQ(mlk::dtypeBytes(mlk::Dtype::C128), 16);
+    // Component sanity alongside (one complex = two components).
+    MLK_CHECK_EQ(mlk::dtypeBytes(mlk::Dtype::C64),
+                 2 * mlk::dtypeBytes(mlk::Dtype::F32));
+    MLK_CHECK_EQ(mlk::dtypeBytes(mlk::Dtype::C128),
+                 2 * mlk::dtypeBytes(mlk::Dtype::F64));
+    MLK_CHECK_EQ(mlk::dtypeBytes(mlk::Dtype::F64), 8);
+    MLK_CHECK_EQ(mlk::dtypeBytes(mlk::Dtype::None), 0);
 }
 
 MLK_TEST_MAIN("core")

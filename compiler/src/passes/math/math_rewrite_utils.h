@@ -23,6 +23,28 @@ namespace mlk::passes {
     return true;
 }
 
+/// Typed constant probes. ALWAYS prefer these over the raw isConst() in
+/// identity checks: isConst(v, &f) returns true for INT constants too
+/// (leaving *f untouched), so `isConst(v, &f) && *f == k` silently reads a
+/// default-initialized 0.0 for int payloads — the root cause of the
+/// add(x, int 5) -> x miscompile fixed alongside these helpers (Rule 87:
+/// rewrite legality starts with knowing the operand's exact type).
+[[nodiscard]] inline bool isFpConst(const MathGraph& g, ValueId v,
+                                    double* f) {
+    const Value& val = g.value(v);
+    if (val.kind != ValueKind::Constant || val.constant.isInt) return false;
+    *f = val.constant.f64;
+    return true;
+}
+
+[[nodiscard]] inline bool isIntConst(const MathGraph& g, ValueId v,
+                                     int64_t* i) {
+    const Value& val = g.value(v);
+    if (val.kind != ValueKind::Constant || !val.constant.isInt) return false;
+    *i = val.constant.i64;
+    return true;
+}
+
 [[nodiscard]] inline bool isIntDtype(const MathGraph& g, ValueId v) {
     const Dtype dt = g.value(v).type.dtype;
     return dt == Dtype::I8 || dt == Dtype::I16 || dt == Dtype::I32 ||

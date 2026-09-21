@@ -53,12 +53,20 @@ uint32_t TelemetrySink::countKind(TelemetryEventKind k) const {
     return count;
 }
 
-json::Value TelemetrySink::toJson() const {
+json::Value TelemetrySink::toJson() const { return toJson(nullptr); }
+
+json::Value TelemetrySink::toJson(const SymbolTable* symbols) const {
     std::lock_guard<std::mutex> lock(mutex_);
     json::Value arr = json::Array{};
     for (const auto& e : events_) {
         json::Value eo = json::Object{};
         eo.set("kind", json::Value{telemetryEventName(e.kind)});
+        if (symbols != nullptr && e.pass != kInvalidSymbolId) {
+            eo.set("pass", json::Value{symbols->text(e.pass)});
+        }
+        if (symbols != nullptr && e.reason != kInvalidSymbolId) {
+            eo.set("reason", json::Value{symbols->text(e.reason)});
+        }
         eo.set("counter", json::Value{
                               static_cast<int64_t>(e.counter)});
         eo.set("from_tier", json::Value{static_cast<int64_t>(e.fromTier)});

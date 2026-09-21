@@ -28,32 +28,60 @@ public:
             }
             ValueId replacement = kInvalidValueId;
             if (n.op == MathOp::Add && n.numInputs() == 2) {
+                // INT path: integer arithmetic is exact; x + 0 -> x for any
+                // int constant payload. The previous code probed int
+                // constants through the FP slot of isConst(), which leaves
+                // the caller's double untouched — so add(x, int 5) read as
+                // "constant 0.0" and folded to x (certified miscompile).
+                int64_t ci = 0;
                 double c = 0.0;
-                // x + 0 == x except (-0.0) + (+0.0) == +0.0: gated.
-                if (isConst(graph, n.inputs[0], &c) && c == 0.0 &&
-                    (!preserveNegZero || !std::signbit(c))) {
+                if (isIntConst(graph, n.inputs[0], &ci) && ci == 0) {
                     replacement = n.inputs[1];
-                } else if (isConst(graph, n.inputs[1], &c) && c == 0.0 &&
-                           (!preserveNegZero || !std::signbit(c))) {
+                } else if (isIntConst(graph, n.inputs[1], &ci) && ci == 0) {
                     replacement = n.inputs[0];
+                }
+                // FP path. The sign that matters is the OPERAND's, not the
+                // constant's: x + (-0.0) == x for EVERY x (both zeros:
+                // (+0)+(-0)=+0, (-0)+(-0)=-0), so this folds under any
+                // profile. x + (+0.0) == x fails for x = -0.0 (IEEE gives
+                // +0), so it folds only when the domain drops -0
+                // (preserveNegativeZero=false). The previous gate tested
+                // signbit(constant) — exactly inverted: it blocked the
+                // sound x+(-0) form and fired the unsound x+(+0) form
+                // (certified: execution at x=-0 flipped +0 -> -0).
+                else if (isFpConst(graph, n.inputs[0], &c) && c == 0.0) {
+                    if (std::signbit(c) || !preserveNegZero) {
+                        replacement = n.inputs[1];
+                    }
+                } else if (isFpConst(graph, n.inputs[1], &c) && c == 0.0) {
+                    if (std::signbit(c) || !preserveNegZero) {
+                        replacement = n.inputs[0];
+                    }
                 }
             } else if (n.op == MathOp::Mul && n.numInputs() == 2) {
                 double c = 0.0;
-                if (isConst(graph, n.inputs[0], &c) && c == 1.0) {
+                int64_t ci = 0;
+                // x * 1 -> x: exact for FP (any x) and for INT (exact).
+                // Int constants are probed through the typed helper (see
+                // the Add arm note; mul(x, int 1) never fired before).
+                if (isFpConst(graph, n.inputs[0], &c) && c == 1.0) {
                     replacement = n.inputs[1];
-                } else if (isConst(graph, n.inputs[1], &c) && c == 1.0) {
+                } else if (isFpConst(graph, n.inputs[1], &c) && c == 1.0) {
+                    replacement = n.inputs[0];
+                } else if (isIntConst(graph, n.inputs[0], &ci) && ci == 1) {
+                    replacement = n.inputs[1];
+                } else if (isIntConst(graph, n.inputs[1], &ci) && ci == 1) {
                     replacement = n.inputs[0];
                 }
                 // x * 0 -> 0 is FORBIDDEN for FP unless x is provably
                 // non-NaN (NaN*0 = NaN) — Rule 87/90. Integers fold.
-                int64_t ci = 0;
                 if (replacement == kInvalidValueId &&
-                    isConst(graph, n.inputs[0], nullptr, &ci) && ci == 0 &&
+                    isIntConst(graph, n.inputs[0], &ci) && ci == 0 &&
                     isIntDtype(graph, n.inputs[1])) {
                     replacement = n.inputs[0];
                 } else if (replacement == kInvalidValueId &&
-                           isConst(graph, n.inputs[1], nullptr, &ci) &&
-                           ci == 0 && isIntDtype(graph, n.inputs[0])) {
+                           isIntConst(graph, n.inputs[1], &ci) && ci == 0 &&
+                           isIntDtype(graph, n.inputs[0])) {
                     replacement = n.inputs[1];
                 }
             } else if (n.op == MathOp::Transpose) {

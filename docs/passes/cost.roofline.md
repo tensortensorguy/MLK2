@@ -3,10 +3,10 @@
 **Category:** cost · **Tier support:** T1-T3 · **Kill switch:** yes (Rule 60/150)
 
 ## Purpose
-Computes FLOPs/bytes/latency estimates and the roofline lower bound (Rule 55).
+Computes FLOPs/bytes/latency estimates and the roofline lower bound (Rule 55), and records the bound on the SANCTIONED channel: a PerfCounter telemetry event with reason `roofline_lower_bound_ns` and the bound in whole nanoseconds (ceiled — a positive bound never reports 0). The bound is telemetry, never stored in the math graph (Rule 23). The autotuner's per-candidate pruning (`rooflineCandidateLowerBoundNs`, resource-capped by threads/vector-width knobs) shares the model.
 
 ## Inputs
-A verified Math IR graph (with types inferred), PassContext (domain profile, accuracy contract, budget, kill switches, diagnostics).
+A verified Math IR graph (with types inferred), PassContext (domain profile, accuracy contract, budget, kill switches, diagnostics, cost model, telemetry sink).
 
 ## Outputs
 Transformed graph (new values; originals recoverable — Rule 21) and pass result metadata.

@@ -37,7 +37,7 @@ ctest --test-dir build
 | `fastkernel/` | Certified, budgeted fast-kernel search (OEIA/Refined/FastKernels): per-variant identity/runtime/comptime/launch certificates over the declared walker/asm/cpp/cuda space, budget modes with regression guard, roofline lower bound, fingerprint-validated artifact cache (arch-bound for cuda variants), honest winner claims — docs/polyhedral_spec.md §fast-kernel-search, `mlk-poly autotune` |
 | `tools/` | `mlkc`, `mlk-poly`, `mlk-verify`, `mlk-tune`, `mlk-bench`, `mlk-profile`, `mlk-replay`, `mlk-generate-profiles` |
 | `tests/` | unit (10 suites), differential (Rule 43), fallback (Rule 102), fuzz (Rule 152), security (Rule 124), replay (Rule 158) |
-| `docs/` | architecture, IR/property/effect/profile/autotuner/superoptimizer/bytecode/ABI/cache specs, 47 pass docs, ADRs, compliance matrix, measured benchmarks (docs/benchmarks.md) |
+| `docs/` | architecture, IR/property/effect/profile/autotuner/superoptimizer/bytecode/ABI/cache specs, 48 pass docs (registry + docs verified in sync), ADRs, compliance matrix, measured benchmarks (docs/benchmarks.md) |
 
 ## Design laws (selection)
 

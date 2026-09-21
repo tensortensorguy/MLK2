@@ -62,6 +62,12 @@ public:
 
     /// Dump as JSON lines (stable schema, schemas/telemetry.schema.json).
     [[nodiscard]] json::Value toJson() const;
+    /// Table-resolving dump: when the embedding's SymbolTable is provided,
+    /// pass/reason ids become their text (ids are table-scoped, Rule 16 —
+    /// only the table that recorded the events may resolve them; the tool
+    /// boundary passes exactly that table). Without it the fields stay
+    /// absent rather than lying with raw ids.
+    [[nodiscard]] json::Value toJson(const SymbolTable* symbols) const;
 
 private:
     mutable std::mutex mutex_;  // cold path only (Rule 137: not on hot paths)

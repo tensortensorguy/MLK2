@@ -1,9 +1,11 @@
 // Analysis pass tests: type/shape/property/effect inference + verifier.
 #include "mlk/core/diagnostics.h"
 #include "mlk/core/symbol_table.h"
+#include "mlk/cost/cost_model.h"
 #include "mlk/ir/graph_builder.h"
 #include "mlk/pass/register_all.h"
 #include "mlk/pass/pass_registry.h"
+#include "mlk/runtime/telemetry.h"
 #include "mlk/type/domain_profile.h"
 #include "mlk/verifier/graph_verifier.h"
 
@@ -121,6 +123,41 @@ MLK_TEST(analysis, verifier_catches_dangling_reference) {
     mlk::VerifyOptions opts;
     MLK_CHECK(!mlk::verifyGraph(b.graph(), &env.profile, opts, diag));
     MLK_CHECK(!diag.entries().empty());
+}
+
+MLK_TEST(analysis, cost_roofline_records_bound_telemetry) {
+    // The roofline bound rides the Rule 23 channel: a PerfCounter event
+    // with reason "roofline_lower_bound_ns". The bound used to be computed
+    // and discarded into a local.
+    Env env;
+    mlk::TelemetrySink sink;
+    env.ctx.telemetry = &sink;
+    mlk::BasicCostModel model;
+    env.ctx.costModel = &model;
+    mlk::GraphBuilder b(env.symbols);
+    const mlk::MathType f64 =
+        mlk::MathType::scalar(mlk::Domain::Float, mlk::Dtype::F64);
+    auto x = b.placeholder("x", f64);
+    auto s = b.op(mlk::MathOp::Sin, {x});
+    MLK_CHECK(s.has_value());
+    b.output(*s);
+    MLK_CHECK(env.pass("shape.infer")->run(env.ctx, b.graph()).has_value());
+    auto pass = env.pass("cost.roofline");
+    MLK_CHECK(pass != nullptr);
+    auto r = pass->run(env.ctx, b.graph());
+    MLK_CHECK(r.has_value());
+    const mlk::SymbolId reason =
+        env.symbols.intern("roofline_lower_bound_ns");
+    bool found = false;
+    for (std::size_t i = 0; i < sink.size(); ++i) {
+        const mlk::TelemetryEvent e = sink.at(i);
+        if (e.kind == mlk::TelemetryEventKind::PerfCounter &&
+            e.reason == reason) {
+            found = true;
+            MLK_CHECK(e.counter > 0);  // a positive bound in whole ns
+        }
+    }
+    MLK_CHECK(found);
 }
 
 MLK_TEST_MAIN("analysis")

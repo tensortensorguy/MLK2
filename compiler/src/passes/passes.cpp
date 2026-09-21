@@ -25,11 +25,9 @@ void registerAllPasses(SymbolTable& symbols) {
     register_accuracy_analyze_pass(symbols);
     register_cost_roofline_pass(symbols);
     register_workload_bucket_pass(symbols);
-    register_alias_infer_pass(symbols);
     // Math canonicalization (spec §8.2)
     register_math_canonicalize_pass(symbols);
     register_math_normalize_ops_pass(symbols);
-    register_math_associative_flatten_pass(symbols);
     register_math_commutative_sort_pass(symbols);
     register_math_constant_fold_pass(symbols);
     register_math_identity_elim_pass(symbols);
@@ -37,7 +35,6 @@ void registerAllPasses(SymbolTable& symbols) {
     register_math_cse_pass(symbols);
     register_math_dce_pass(symbols);
     register_math_algebraic_simplify_pass(symbols);
-    register_math_expression_balance_pass(symbols);
     // E-graph (spec §8.3)
     register_egraph_build_pass(symbols);
     register_egraph_saturate_pass(symbols);
@@ -58,14 +55,19 @@ void registerAllPasses(SymbolTable& symbols) {
     register_approx_policy_gate_pass(symbols);
     register_approx_function_lower_pass(symbols);
     register_approx_ulp_verify_pass(symbols);
-    // Schedule (spec §8.7)
-    register_schedule_region_extract_pass(symbols);
-    register_schedule_fuse_pass(symbols);
+    // Schedule (spec §8.7). NOTE (ADR-0009): the former schedule.fuse and
+    // schedule.region_extract no-op placeholders were removed — the fusion
+    // decision is tensor.fusion_find's marking plus lower.to_kernel_ir's
+    // realization, and region formation is the lowering's one-region-per-
+    // output-subgraph rule. There is no third mechanism to register.
     register_schedule_tile_pass(symbols);
     register_schedule_vectorize_pass(symbols);
     register_schedule_parallelize_pass(symbols);
-    // Physical/memory (spec §8.8)
-    register_memory_liveness_pass(symbols);
+    // Physical/memory (spec §8.8). NOTE (ADR-0009): the former
+    // memory.liveness pass was removed — after math.dce every live node is
+    // reachable from an output (SSA-like IR), so a standalone liveness
+    // analysis had no consumer and no non-trivial result. It returns with
+    // buffer-sharing work, as an analysis with a declared consumer.
     register_memory_buffer_plan_pass(symbols);
     register_memory_place_pass(symbols);
     register_memory_layout_select_pass(symbols);

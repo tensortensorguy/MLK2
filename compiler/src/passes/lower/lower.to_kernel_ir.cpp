@@ -146,7 +146,9 @@ public:
             // Elementwise chain: gather the FULL fused subgraph reachable
             // from the root through ALL inputs (not just input 0 — e.g.
             // Mul(x2, sin(x)) has two elementwise producers). Fusion
-            // boundary = fusion_group attr, per the schedule.fuse contract.
+            // boundary = fusion_group attr, per the tensor.fusion_find
+            // contract (ADR-0009: the former schedule.fuse placeholder was
+            // removed; this lowering IS the realization).
             SmallVector<const Node*, 8> chain;  // gather order (root-first)
             const int64_t* rootGroup = nullptr;
             {

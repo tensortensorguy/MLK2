@@ -179,4 +179,36 @@ double rooflineLowerBoundNs(const CostEstimate& c, const HardwareInfo& hw) {
     return ns;
 }
 
+double rooflineCandidateLowerBoundNs(const CostEstimate& c,
+                                     const HardwareInfo& hw, int64_t threads,
+                                     int64_t vectorWidth) {
+    // Resource fractions (Rule 27: named, bounded, defensible). A thread
+    // count above the machine's core count is clamped to 1.0 — extra
+    // threads cannot create cores. An unset knob (<= 0) keeps the
+    // machine-wide peak.
+    double coreFrac = 1.0;
+    if (threads > 0 && hw.cores > 0) {
+        const double t = static_cast<double>(threads);
+        const double cores = static_cast<double>(hw.cores);
+        coreFrac = t < cores ? t / cores : 1.0;
+    }
+    double vecFrac = 1.0;
+    if (vectorWidth > 0 && hw.simdWidthF32 > 0) {
+        const double v = static_cast<double>(vectorWidth);
+        const double simdw = static_cast<double>(hw.simdWidthF32);
+        vecFrac = v < simdw ? v / simdw : 1.0;
+    }
+    const double peakFlopsPerSec = hw.cores * hw.peakFlopsPerCycleF32 *
+                                   hw.clockGHz * 1e9 * coreFrac * vecFrac;
+    const double bwBytesPerSec =
+        hw.memoryBandwidthGiBs * 1024.0 * 1024.0 * 1024.0 * coreFrac;
+    double ns = 0.0;
+    if (peakFlopsPerSec > 0.0) ns = c.flops / peakFlopsPerSec * 1e9;
+    if (bwBytesPerSec > 0.0) {
+        const double memNs = c.bytesMoved / bwBytesPerSec * 1e9;
+        if (memNs > ns) ns = memNs;
+    }
+    return ns;
+}
+
 }  // namespace mlk

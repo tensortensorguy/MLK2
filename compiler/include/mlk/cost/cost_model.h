@@ -63,4 +63,18 @@ public:
 [[nodiscard]] double rooflineLowerBoundNs(const CostEstimate& c,
                                           const HardwareInfo& hw);
 
+/// Roofline lower bound under CANDIDATE resource limits (Rule 55: a
+/// config-aware bound makes pruning sound). A candidate that uses
+/// `threads` of the machine's cores cannot exceed that fraction of the
+/// all-core peak — neither for flops nor for memory bandwidth — and a
+/// candidate whose vector width is below the machine SIMD width cannot
+/// exceed that fraction of the flop peak. Both caps can only LOWER the
+/// achievable throughput, so the resulting bound stays a valid lower
+/// bound for that candidate. threads <= 0 / vectorWidth <= 0 (unset
+/// knobs) fall back to the machine-wide bound.
+[[nodiscard]] double rooflineCandidateLowerBoundNs(const CostEstimate& c,
+                                                   const HardwareInfo& hw,
+                                                   int64_t threads,
+                                                   int64_t vectorWidth);
+
 }  // namespace mlk

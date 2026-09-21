@@ -98,11 +98,9 @@ mlk_add_library(mlk_passes
         src/passes/analysis/accuracy.analyze.cpp
         src/passes/analysis/cost.roofline.cpp
         src/passes/analysis/workload.bucket.cpp
-        src/passes/analysis/alias.infer.cpp
         # Math canonicalization (spec §8.2)
         src/passes/math/math.canonicalize.cpp
         src/passes/math/math.normalize_ops.cpp
-        src/passes/math/math.associative_flatten.cpp
         src/passes/math/math.commutative_sort.cpp
         src/passes/math/math.constant_fold.cpp
         src/passes/math/math.identity_elim.cpp
@@ -110,7 +108,6 @@ mlk_add_library(mlk_passes
         src/passes/math/math.cse.cpp
         src/passes/math/math.dce.cpp
         src/passes/math/math.algebraic_simplify.cpp
-        src/passes/math/math.expression_balance.cpp
         # E-graph (spec §8.3); egraph.cpp = shared engine
         src/passes/egraph/egraph.cpp
         src/passes/egraph/egraph.build.cpp
@@ -132,14 +129,11 @@ mlk_add_library(mlk_passes
         src/passes/approx/approx.policy_gate.cpp
         src/passes/approx/approx.function_lower.cpp
         src/passes/approx/approx.ulp_verify.cpp
-        # Schedule (spec §8.7)
-        src/passes/schedule/schedule.region_extract.cpp
-        src/passes/schedule/schedule.fuse.cpp
+        # Schedule (spec §8.7; ADR-0009: fusion/region placeholders removed)
         src/passes/schedule/schedule.tile.cpp
         src/passes/schedule/schedule.vectorize.cpp
         src/passes/schedule/schedule.parallelize.cpp
-        # Physical/memory (spec §8.8)
-        src/passes/physical/memory.liveness.cpp
+        # Physical/memory (spec §8.8; ADR-0009: liveness placeholder removed)
         src/passes/physical/memory.buffer_plan.cpp
         src/passes/physical/memory.place.cpp
         src/passes/physical/memory.layout_select.cpp

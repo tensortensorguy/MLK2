@@ -1,7 +1,10 @@
 // cost.roofline — roofline lower-bound analysis (spec §8.1; Rule 23: the
 // bound is telemetry, never stored in the math graph).
 #include "../passes_common.h"
+#include "mlk/core/event_sink.h"
 #include "mlk/cost/cost_model.h"
+
+#include <cmath>
 
 namespace mlk::passes {
 
@@ -28,9 +31,25 @@ public:
         total.flops = totalFlops;
         total.bytesMoved = totalBytes;
         const double lowerNs = rooflineLowerBoundNs(total, hw);
-        // Roofline bound is exposed via pass result telemetry; storing it in
-        // the IR would contaminate the math graph (Rule 23).
-        (void)lowerNs;
+        // The bound rides the SANCTIONED channel (Rule 23: telemetry, never
+        // the IR): a PerfCounter event whose counter is the lower bound in
+        // whole nanoseconds (saturating on overflow — bounds beyond ~584
+        // years report UINT64_MAX; still a valid "astronomically large"
+        // signal). Previously the bound was computed and discarded.
+        if (ctx.telemetry != nullptr) {
+            uint64_t bound = 0;
+            if (lowerNs > 0.0) {
+                // Ceil so a positive bound never truncates to 0 (scalar
+                // graphs have sub-ns bounds); the 1.8e19 cap keeps the
+                // double->uint64 conversion inside range (anything above
+                // is reported at the cap — still "astronomically large").
+                const double capped = lowerNs >= 1.8e19 ? 1.8e19 : lowerNs;
+                bound = static_cast<uint64_t>(std::ceil(capped));
+            }
+            ctx.telemetry->event(
+                11, nameId(*ctx.symbols),
+                ctx.symbols->intern("roofline_lower_bound_ns"), bound);
+        }
         return r;
     }
 };

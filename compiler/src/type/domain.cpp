@@ -14,10 +14,16 @@ int dtypeBytes(Dtype dt) noexcept {
         case Dtype::I8: case Dtype::U8: return 1;
         case Dtype::I16: case Dtype::U16: case Dtype::F16: case Dtype::BF16:
             return 2;
-        case Dtype::I32: case Dtype::U32: case Dtype::F32: case Dtype::C64:
+        case Dtype::I32: case Dtype::U32: case Dtype::F32:
             return 4;
-        case Dtype::I64: case Dtype::U64: case Dtype::F64: case Dtype::C128:
+        // Complex elements are (real, imag) pairs of the component float:
+        // C64 = 2 x f32, C128 = 2 x f64. The previous 4/8 values under-
+        // counted every byte figure the cost model computed for complex
+        // graphs by 2x (review finding, round 23).
+        case Dtype::C64: return 8;
+        case Dtype::I64: case Dtype::U64: case Dtype::F64:
             return 8;
+        case Dtype::C128: return 16;
     }
     return 0;
 }

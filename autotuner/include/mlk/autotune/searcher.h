@@ -20,6 +20,22 @@ struct TuningContext {
     BenchmarkProtocol protocol{};
 };
 
+/// The roofline prune DECISION, factored out for deterministic testing
+/// (Rule 55/59): a candidate whose provable minimum time (lower bound in
+/// ns) exceeds the best measured median (ms) by more than the noise
+/// margin cannot win and is skipped without measurement. Noise can only
+/// make the best measurement SLOWER (raising the margin — conservative);
+/// the margin guards the lucky-fast direction.
+[[nodiscard]] inline bool pruneByRoofline(double boundNs,
+                                          double bestMedianMs,
+                                          double noiseRelStddev) {
+    // A non-positive median is a degenerate MEASUREMENT (timer collapse),
+    // not an "infinitely fast" candidate — never prune against it.
+    if (!(bestMedianMs > 0.0)) return false;
+    const double marginMs = bestMedianMs * (1.0 + noiseRelStddev);
+    return boundNs > marginMs * 1e6;
+}
+
 class Autotuner {
 public:
     Autotuner(SymbolTable& symbols, TelemetrySink& telemetry);

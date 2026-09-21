@@ -37,11 +37,12 @@ SmallVector<SymbolId, 16> tierPipeline(Tier tier, SymbolTable& symbols,
             add("property.infer");
             add("effect.infer");
             add("math.canonicalize");
+            add("math.algebraic_simplify");
+            add("math.strength_reduce");
             add("math.dce");
             add("math.cse");
             add("tensor.layout_infer");
             add("tensor.fusion_find");
-            add("schedule.region_extract");
             add("schedule.tile");
             add("schedule.vectorize");
             add("schedule.parallelize");
@@ -57,10 +58,11 @@ SmallVector<SymbolId, 16> tierPipeline(Tier tier, SymbolTable& symbols,
             add("shape.infer");
             add("property.infer");
             add("effect.infer");
-            add("alias.infer");
             add("accuracy.analyze");
             add("cost.roofline");
             add("math.canonicalize");
+            add("math.algebraic_simplify");
+            add("math.strength_reduce");
             add("math.cse");
             add("math.dce");
             add("approx.policy_gate");
@@ -77,7 +79,6 @@ SmallVector<SymbolId, 16> tierPipeline(Tier tier, SymbolTable& symbols,
             add("tensor.transpose_elim");
             add("tensor.matmul_algorithm_select");
             add("tensor.fusion_find");
-            add("schedule.region_extract");
             add("schedule.tile");
             add("schedule.vectorize");
             add("schedule.parallelize");
@@ -104,10 +105,11 @@ SmallVector<SymbolId, 16> tierPipeline(Tier tier, SymbolTable& symbols,
             add("shape.infer");
             add("property.infer");
             add("effect.infer");
-            add("alias.infer");
             add("accuracy.analyze");
             add("cost.roofline");
             add("math.canonicalize");
+            add("math.algebraic_simplify");
+            add("math.strength_reduce");
             add("math.cse");
             add("math.dce");
             add("egraph.build");
@@ -129,7 +131,6 @@ SmallVector<SymbolId, 16> tierPipeline(Tier tier, SymbolTable& symbols,
             add("tensor.contraction_path");
             add("tensor.matmul_algorithm_select");
             add("tensor.fusion_find");
-            add("schedule.region_extract");
             add("schedule.tile");
             add("schedule.vectorize");
             add("schedule.parallelize");

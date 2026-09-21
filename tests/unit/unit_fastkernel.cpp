@@ -453,8 +453,11 @@ MLK_TEST(fastkernel, cache_reuse_and_invalidation) {
     // would legitimately register as a HIT and break the miss/hit
     // script of THIS run (the cache is doing its job — the test must
     // start clean).
+    // Portable, cwd-relative workroot (never /tmp, no machine-specific
+    // paths): ctest runs each suite from its build directory, so "fkwork"
+    // lands inside the build tree on every machine (review finding).
     const std::string cacheDir =
-        "/home/z/my-project/mlk2/build/fkwork/cache_test-" +
+        std::string("fkwork/cache_test-") +
         std::to_string(
             static_cast<long long>(::std::chrono::steady_clock::now()
                                        .time_since_epoch()
@@ -469,8 +472,7 @@ MLK_TEST(fastkernel, cache_reuse_and_invalidation) {
     cfg.budget.mode = mlk::fastkernel::BudgetMode::SameComptime;
     cfg.budget.baselineComptimeSec = 600.0;
     cfg.cacheDir = cacheDir;
-    cfg.driver.workdirBase =
-        "/home/z/my-project/mlk2/build/fkwork";
+    cfg.driver.workdirBase = "fkwork";
     cfg.measureEnvironment = false;
     cfg.env = fixedEnv();
 
@@ -545,8 +547,8 @@ MLK_TEST(fastkernel, cuda_candidate_declared_space) {
     cfg.benchReps = 2;
     cfg.budget.mode = mlk::fastkernel::BudgetMode::SameComptime;
     cfg.budget.baselineComptimeSec = 600.0;
-    cfg.driver.workdirBase = "/home/z/my-project/mlk2/build/fkwork";
-    cfg.gpu.workdirBase = "/home/z/my-project/mlk2/build/fkwork";
+    cfg.driver.workdirBase = "fkwork";
+    cfg.gpu.workdirBase = "fkwork";
     cfg.measureEnvironment = false;
     cfg.env = fixedEnv();
 

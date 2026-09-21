@@ -45,7 +45,11 @@ public:
 void register_memory_buffer_plan_pass(SymbolTable& symbols) {
     static BufferPlanPass pass(symbols, "memory.buffer_plan",
                                PassKind::Transform);
-    registerPass(symbols, pass, PassKind::Transform, {"memory.liveness"},
+    // Contract prerequisite fixed (ADR-0009): the plan's true inputs are
+    // the shape/effect facts and output set — the former "memory.liveness"
+    // prerequisite named a pass that the pipelines never ran and that no
+    // consumer ever read (a phantom dependency, Rule 142 honesty).
+    registerPass(symbols, pass, PassKind::Transform, {"effect.inferred"},
                  {"memory.planned"}, {},
                  {kPhysTiers[0], kPhysTiers[1], kPhysTiers[2]});
 }

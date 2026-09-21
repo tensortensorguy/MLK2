@@ -4,6 +4,8 @@
 
 #include "mlk/support/math_families.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 
 #include "mlk/ir/graph_hash.h"
@@ -14,6 +16,57 @@ namespace {
 // ulpDistance now lives in math_families.h as the single source of truth
 // shared with approx.ulp_verify (Rule 77: no duplicated quality logic).
 using mlk::families::ulpDistance;
+
+// --- measured speedups (Rule 29: claims carry their measurement) -----------
+// The previous implementation wrote estimatedSpeedup = 1.15 / 4.0 with a
+// "(measured)" comment and no measurement. Both numbers are now real
+// ratios of steady-clock medians over a deterministic workload; the
+// workload and rep counts are named constants (Rule 27).
+constexpr std::size_t kSpeedupSamples = 512;
+constexpr uint32_t kSpeedupReps = 31;  // odd: the median is a real sample
+
+double speedupWorkload(uint64_t i) {
+    const double x = static_cast<double>(i % 4096) / 512.0;
+    return 0.5 * std::sin(x) + 0.25 * std::cos(2.0 * x) + 0.5;
+}
+
+double medianMs(const SmallVector<double, 64>& samples) {
+    SmallVector<double, 64> sorted = samples;
+    std::sort(sorted.begin(), sorted.end());
+    return sorted.empty() ? 0.0 : sorted[sorted.size() / 2];
+}
+
+/// Times refFn (reference) against candFn (candidate) over the
+/// deterministic workload; returns tRef/tCand, or fallbackRatio when
+/// either side fails to produce a positive median (degenerate timing —
+/// reported as the fallback, never guessed).
+template <typename FA, typename FB>
+double measuredSpeedupRatio(FA&& refFn, FB&& candFn, double fallbackRatio) {
+    double refSink = 0.0;
+    double candSink = 0.0;
+    SmallVector<double, 64> refTimes;
+    SmallVector<double, 64> candTimes;
+    for (uint32_t r = 0; r < kSpeedupReps; ++r) {
+        const auto t0 = std::chrono::steady_clock::now();
+        for (std::size_t i = 0; i < kSpeedupSamples; ++i) {
+            refSink += refFn(speedupWorkload(i));
+        }
+        const auto t1 = std::chrono::steady_clock::now();
+        for (std::size_t i = 0; i < kSpeedupSamples; ++i) {
+            candSink += candFn(speedupWorkload(i));
+        }
+        const auto t2 = std::chrono::steady_clock::now();
+        refTimes.push_back(
+            std::chrono::duration<double, std::milli>(t1 - t0).count());
+        candTimes.push_back(
+            std::chrono::duration<double, std::milli>(t2 - t1).count());
+    }
+    if (refSink == 0.0 || candSink != candSink) return fallbackRatio;
+    const double refMs = medianMs(refTimes);
+    const double candMs = medianMs(candTimes);
+    if (refMs <= 0.0 || candMs <= 0.0) return fallbackRatio;
+    return refMs / candMs;
+}
 }  // namespace
 
 ScalarPeepholeSuperoptimizer::ScalarPeepholeSuperoptimizer(
@@ -54,7 +107,11 @@ ScalarPeepholeSuperoptimizer::generate(const MathGraph& graph,
         proof.appliedRules.push_back(symbols_.intern("fma_formation"));
         proof.predicates.push_back(symbols_.intern("fma_exactly_rounded"));
         cand.proof = proof;
-        cand.estimatedSpeedup = 1.15;  // fma latency saving (measured; Rule 29)
+        // Measured HERE (Rule 29): mul+add vs fma over the deterministic
+        // workload. No FMA hardware -> the ratio honestly reports < 1.
+        cand.estimatedSpeedup = measuredSpeedupRatio(
+            [](double x) { return x * x + 3.0 * x; },
+            [](double x) { return std::fma(x, x, 3.0 * x); }, 1.0);
         cand.origin = name_;
         cand.fallbackPlan = symbols_.intern("scalar_libm_path");
         out.push_back(std::move(cand));
@@ -132,7 +189,12 @@ MathFunctionApproximator::generate(const MathGraph& graph,
         proof.errorBoundUlps = maxUlps;
         proof.predicates.push_back(symbols_.intern("ulp_bound_verified"));
         cand.proof = proof;
-        cand.estimatedSpeedup = 4.0;  // poly vs libm sin (documented)
+        // Measured HERE (Rule 29): libm sin vs the polynomial family over
+        // the deterministic workload — the ratio this machine actually
+        // shows, not a documented constant.
+        cand.estimatedSpeedup = measuredSpeedupRatio(
+            [](double x) { return std::sin(x); },
+            [](double x) { return families::polySin(x); }, 1.0);
         cand.origin = name_;
         cand.fallbackPlan = symbols_.intern("libm_sin");
         out.push_back(std::move(cand));

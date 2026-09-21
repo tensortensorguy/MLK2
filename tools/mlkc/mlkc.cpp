@@ -27,10 +27,13 @@ int usage() {
         "mlkc — MLK+ compiler driver\n"
         "usage:\n"
         "  mlkc compile <graph.mlk> --tier=0..3 --profile=<name> "
-        "[--emit=ir|kernel|cpp] [--out=<path>]\n"
+        "[--emit=ir|kernel|cpp] [--out=<path>] [--telemetry[=path]]\n"
         "  mlkc run     <graph.mlk> --tier=0..3 --profile=<name> "
         "[--x1=1.0 --x2=2.0 ...]\n"
-        "  mlkc list-passes\n",
+        "  mlkc list-passes\n"
+        "telemetry: --telemetry dumps the structured event stream "
+        "(schemas/telemetry.schema.json) to <path> or stderr; pipe it "
+        "into mlk-profile for aggregation.\n",
         stderr);
     return 2;
 }
@@ -65,6 +68,8 @@ int runCompile(int argc, char** argv) {
     std::string profileName = "scalar_f64";
     std::string emit = "ir";
     std::string outPath;
+    std::string telemetryPath;
+    bool dumpTelemetry = false;
     for (int i = 3; i < argc; ++i) {
         const char* a = argv[i];
         auto starts = [&](const char* p) {
@@ -74,6 +79,12 @@ int runCompile(int argc, char** argv) {
         else if (starts("--profile=")) profileName = a + 10;
         else if (starts("--emit=")) emit = a + 7;
         else if (starts("--out=")) outPath = a + 6;
+        else if (starts("--telemetry=")) {
+            dumpTelemetry = true;
+            telemetryPath = a + 12;
+        } else if (std::strcmp(a, "--telemetry") == 0) {
+            dumpTelemetry = true;
+        }
     }
     bool ok = false;
     const mlk::Tier tier = parseTier(tierArg, ok);
@@ -171,6 +182,25 @@ int runCompile(int argc, char** argv) {
                  "mlkc: compiled tier=%s profile=%s changed=%d nodes=%u\n",
                  mlk::tierName(tier), profileName.c_str(),
                  result.changed ? 1 : 0, result.nodesAfter);
+    if (dumpTelemetry) {
+        // Tool-boundary dump (Rule 157): the structured event stream, with
+        // pass/reason resolved through THIS table (ids are table-scoped).
+        const std::string json = mlk::json::serializePretty(
+            telemetry.toJson(&symbols));
+        if (telemetryPath.empty()) {
+            std::fputs(json.c_str(), stderr);
+            std::fputc('\n', stderr);
+        } else {
+            FILE* f = std::fopen(telemetryPath.c_str(), "wb");
+            if (f == nullptr) {
+                std::fprintf(stderr, "mlkc: cannot write %s\n",
+                             telemetryPath.c_str());
+                return 2;
+            }
+            std::fwrite(json.c_str(), 1, json.size(), f);
+            std::fclose(f);
+        }
+    }
     return 0;
 }
 

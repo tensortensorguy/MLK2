@@ -331,37 +331,61 @@ Result<CacheEntry> Autotuner::tune(const MathGraph& graph,
                    58);
     }
 
-    // Rule 55: prune by roofline lower bound before measuring.
+    // Rule 55: per-candidate roofline pruning. The bound is now
+    // CANDIDATE-dependent — rooflineCandidateLowerBoundNs caps achievable
+    // throughput by the candidate's threads and vector-width knobs — and
+    // the seed is measured FIRST, so any candidate whose provable minimum
+    // already exceeds the best measured time (within the Rule 59 noise
+    // margin) is skipped without measurement. The previous implementation
+    // computed ONE graph-level bound, assigned it to every candidate, and
+    // then kept everything within 2x of "the best" — an identity
+    // comparison that pruned nothing, ever.
     const CostEstimate total = BasicCostModel().graphCost(graph, ctx.hardware);
+    const SymbolId parallelId = symbols_.intern("parallel");
+    const SymbolId vectorWidthId = symbols_.intern("vector_width");
+    auto candidateBoundNs = [&](const TuningCandidate& c) {
+        const OpenHashMap<SymbolId, int64_t> params = space_.realize(c.config);
+        int64_t threads = 0;
+        if (const int64_t* t = params.find(parallelId)) threads = *t;
+        int64_t vw = 0;
+        if (const int64_t* v = params.find(vectorWidthId)) vw = *v;
+        return rooflineCandidateLowerBoundNs(total, ctx.hardware, threads, vw);
+    };
     for (auto& c : verified) {
-        c.costLowerBoundNs = rooflineLowerBoundNs(total, ctx.hardware);
+        c.costLowerBoundNs = candidateBoundNs(c);
     }
-    double bestLower = 1e18;
-    for (const auto& c : verified) {
-        bestLower = std::min(bestLower, c.costLowerBoundNs);
-    }
-    SmallVector<TuningCandidate, 16> viable;
-    for (auto& c : verified) {
-        // Keep everything within a factor of the best lower bound.
-        if (c.costLowerBoundNs <= bestLower * 2.0) viable.push_back(c);
-    }
+    const double noise = constants::kBenchNoiseRelativeStddev;
 
-    // Measure survivors; Rule 59: noise filter via relative stddev.
+    // Measure the survivors (seed first, then bound-gated candidates);
+    // Rule 59: noise filter via relative stddev.
     TuningCandidate* best = nullptr;
-    for (auto& c : viable) {
+    for (auto& c : verified) {
+        if (best != nullptr) {
+            // Pure decision (deterministically tested): prune when the
+            // candidate's provable minimum exceeds the best measured time
+            // by more than the noise margin.
+            if (pruneByRoofline(c.costLowerBoundNs,
+                                best->measured->medianMs, noise)) {
+                TelemetryEvent prune;
+                prune.kind = TelemetryEventKind::PerfCounter;
+                prune.reason = symbols_.intern("candidate_pruned_roofline");
+                prune.counter = 1;
+                telemetry_.record(prune);
+                continue;
+            }
+        }
         MLK_TRY_VAR(m, measureCandidate(graph, ctx, c));
         c.measured = m;
         const bool noisy =
-            m.medianMs > 0.0 &&
-            (m.stddevMs / m.medianMs) > constants::kBenchNoiseRelativeStddev;
+            m.medianMs > 0.0 && (m.stddevMs / m.medianMs) > noise;
         if (noisy) continue;
         if (best == nullptr || m.medianMs < best->measured->medianMs) {
             best = &c;
         }
     }
     // Rule 59: ties within noise prefer simpler/lower compile cost — the
-    // seed (priors) wins ties because it appears first in `viable`.
-    if (best == nullptr && !viable.empty()) best = &viable[0];
+    // seed (priors) wins ties because it appears first in `verified`.
+    if (best == nullptr && !verified.empty()) best = &verified[0];
 
     CacheEntry entry;
     entry.key.graphHash = graphHash(graph);

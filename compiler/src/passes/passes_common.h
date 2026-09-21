@@ -62,11 +62,9 @@ void register_effect_infer_pass(SymbolTable& symbols);
 void register_accuracy_analyze_pass(SymbolTable& symbols);
 void register_cost_roofline_pass(SymbolTable& symbols);
 void register_workload_bucket_pass(SymbolTable& symbols);
-void register_alias_infer_pass(SymbolTable& symbols);
 // Math (math/)
 void register_math_canonicalize_pass(SymbolTable& symbols);
 void register_math_normalize_ops_pass(SymbolTable& symbols);
-void register_math_associative_flatten_pass(SymbolTable& symbols);
 void register_math_commutative_sort_pass(SymbolTable& symbols);
 void register_math_constant_fold_pass(SymbolTable& symbols);
 void register_math_identity_elim_pass(SymbolTable& symbols);
@@ -74,7 +72,6 @@ void register_math_strength_reduce_pass(SymbolTable& symbols);
 void register_math_cse_pass(SymbolTable& symbols);
 void register_math_dce_pass(SymbolTable& symbols);
 void register_math_algebraic_simplify_pass(SymbolTable& symbols);
-void register_math_expression_balance_pass(SymbolTable& symbols);
 // E-graph (egraph/)
 void register_egraph_build_pass(SymbolTable& symbols);
 void register_egraph_saturate_pass(SymbolTable& symbols);
@@ -95,14 +92,13 @@ void register_tensor_matmul_algorithm_select_pass(SymbolTable& symbols);
 void register_approx_policy_gate_pass(SymbolTable& symbols);
 void register_approx_function_lower_pass(SymbolTable& symbols);
 void register_approx_ulp_verify_pass(SymbolTable& symbols);
-// Schedule (schedule/)
-void register_schedule_region_extract_pass(SymbolTable& symbols);
-void register_schedule_fuse_pass(SymbolTable& symbols);
+// Schedule (schedule/; ADR-0009: fusion/region placeholders removed —
+// realized by tensor.fusion_find + lower.to_kernel_ir)
 void register_schedule_tile_pass(SymbolTable& symbols);
 void register_schedule_vectorize_pass(SymbolTable& symbols);
 void register_schedule_parallelize_pass(SymbolTable& symbols);
-// Physical/memory (physical/)
-void register_memory_liveness_pass(SymbolTable& symbols);
+// Physical/memory (physical/; ADR-0009: memory.liveness removed — no
+// consumer; returns with buffer-sharing work)
 void register_memory_buffer_plan_pass(SymbolTable& symbols);
 void register_memory_place_pass(SymbolTable& symbols);
 void register_memory_layout_select_pass(SymbolTable& symbols);

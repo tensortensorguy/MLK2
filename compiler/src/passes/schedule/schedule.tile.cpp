@@ -59,7 +59,7 @@ public:
 
 void register_schedule_tile_pass(SymbolTable& symbols) {
     static TilePass pass(symbols, "schedule.tile", PassKind::Transform);
-    registerPass(symbols, pass, PassKind::Transform, {"schedule.fused"},
+    registerPass(symbols, pass, PassKind::Transform, {"schedule.fusable"},
                  {"schedule.tiled"}, {},
                  {kSchedTiers[0], kSchedTiers[1], kSchedTiers[2]});
 }
