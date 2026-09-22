@@ -9,7 +9,9 @@ compiled artifacts buy). Everything here is reproducible from the repo:
 
 Record: 2026-09-23 — the first full sweep after the P0 correctness
 remediation (e-graph identity/transplant, lexMin/lexMax, measured ULP
-verify) and the pass-catalog truth round. All rows are gated by the usual
+verify) and the pass-catalog truth round; re-measured the same day with
+the packed-2 asm emitter (GEMM asm rows below are the post-packed
+numbers, 2.1x over the scalar form, bit-exact). All rows are gated by the usual
 honesty rules: bench claims bit-exactness per row (the `OK` column), CUDA
 rows are skipped with `cuda-toolchain-unavailable` when no toolchain exists
 (no device in the measurement environment), and no speedup is claimed
@@ -39,15 +41,15 @@ claim).
 | gemm | 64x48x56 | tier1 | 0.036 | 1.00x | 9.47 | OK (reference) |
 | gemm | 64x48x56 | walker | 33.21 | 0.00x | 0.010 | OK |
 | gemm | 64x48x56 | cpp | 0.027 | 1.35x | 12.80 | OK |
-| gemm | 64x48x56 | asm | 0.938 | 0.04x | 0.37 | OK |
+| gemm | 64x48x56 | asm | 0.437 | 0.09x | 0.79 | OK |
 | gemm | 128x128x128 | tier1 | 0.270 | 1.00x | 15.53 | OK (reference) |
 | gemm | 128x128x128 | walker | 289.04 | 0.00x | 0.015 | OK |
 | gemm | 128x128x128 | cpp | 0.348 | 0.78x | 12.05 | OK |
-| gemm | 128x128x128 | asm | 11.37 | 0.02x | 0.37 | OK |
+| gemm | 128x128x128 | asm | 5.385 | 0.05x | 0.78 | OK |
 | gemm | 256x256x256 | tier1 | 2.157 | 1.00x | 15.56 | OK (reference) |
 | gemm | 256x256x256 | walker | 2206.25 | 0.00x | 0.015 | OK |
 | gemm | 256x256x256 | cpp | 2.789 | 0.77x | 12.03 | OK |
-| gemm | 256x256x256 | asm | 90.30 | 0.02x | 0.37 | OK |
+| gemm | 256x256x256 | asm | 43.14 | 0.05x | 0.78 | OK |
 | softmax | 64x64 | tier1 | 0.025 | 1.00x | 0.82 | OK (reference) |
 | softmax | 64x64 | walker | 0.640 | 0.04x | 0.032 | OK |
 | softmax | 64x64 | cpp | 0.035 | 0.72x | 0.59 | OK |
@@ -76,14 +78,19 @@ Reading (honest interpretation, Rule 90 — no headline shopping):
   rides the executor's blocked Call kernel, which the naive generated
   triple loop does not beat on this 2-thread box; elementwise/reduce
   chains win 1.3–1.4x once the fused chain survives compilation.
-- **asm artifacts are correctness-first**: scalar SSE2 with the
-  interpreter's exact FP operation order (no FMA contraction, no
-  reassociation), so they trade throughput for bit-exact provenance —
-  the 0.28–0.37 GFLOP/s numbers are the cost of that guarantee, not a
-  code quality claim. Packed `mulpd/addpd` remains legal only across an
-  independent output dim (lanes keep each cell's k-chain order), needs a
-  j-innermost interchange from the codegen, and stays the best-payoff
-  asm roadmap item.
+- **asm artifacts are correctness-first**: the interpreter's exact FP
+  operation order (no FMA contraction, no reassociation), now with
+  **packed-2 innermost loops**: where the schedule puts a stride-1
+  elementwise dim innermost (GEMM output columns), the emitter runs two
+  iterations per pass with `movupd/mulpd/addpd` — each lane performs
+  exactly the scalar iteration's IEEE ops in the original per-cell
+  order, so rows stay bit-exact while GEMM gains 2.1x (0.37 → 0.78
+  GFLOP/s). Loops that cannot pack honestly keep the scalar form:
+  softmax (Max-select + libm calls) and ReduceSum (the innermost loop
+  is the k-reduction itself — packing it would re-associate the
+  accumulation), which is why their rows are unchanged at 0.27–0.29
+  GFLOP/s. Odd trip counts take a scalar remainder loop (the original
+  body).
 - **the polyhedral walker is an interpreter**, not a code path to ship:
   its value is the bit-exact differential oracle for every schedule the
   compiler produces.

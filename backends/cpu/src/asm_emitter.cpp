@@ -47,6 +47,14 @@ inline constexpr std::size_t kAsmMaxTempSlots = 64;
     return v >= -2147483648 && v <= 2147483647;
 }
 
+[[nodiscard]] int64_t coeffAt(const SmallVector<int64_t, 4>& coeffs,
+                              const int depth) noexcept {
+    return depth >= 0 &&
+                   static_cast<std::size_t>(depth) < coeffs.size()
+               ? coeffs[static_cast<std::size_t>(depth)]
+               : 0;
+}
+
 struct AsmEmitter {
     const KernelModule& km;
     SymbolTable& symbols;
@@ -54,6 +62,16 @@ struct AsmEmitter {
     bool needsPoly7{false};  // a Sin site applies the verified poly7 family
     std::size_t parallelLoops{0};
     std::size_t simdLoops{0};
+    // Packed-2 execution (see emitPackedLoop): innermost loops whose body
+    // qualifies run two iterations per pass with SSE2 pair ops. Each lane
+    // performs EXACTLY the scalar iteration's IEEE double operations in
+    // the original per-cell order, so results stay bit-exact by
+    // construction; odd trip counts take the scalar remainder loop.
+    std::vector<bool> packable{};  // per node id (loops only)
+    bool packingEnabled{false};    // frame supports pair temps + vec slots
+    std::size_t packedLoops{0};
+    int frameTemps{0};             // temp-slot region size (slots)
+    int vecSlots{0};               // 0 or 2: even-end + saved end slots
     std::string text{};    // .text section (prologue comments + function)
     std::string rodata{};  // .rodata literal pool
     std::size_t litCount{0};
@@ -75,14 +93,26 @@ struct AsmEmitter {
         return i64(-8 * (d + 1)) + "(%rbp)";
     }
 
-    /// Temp slot address for fused-chain index k.
+    /// Temp slot address for fused-chain index k. In packed bodies temp
+    /// k occupies the PAIR (2k, 2k+1) — callers pass pre-doubled indices;
+    /// scalar bodies keep the dense k indexing (same region, no overlap:
+    /// a packed main loop finishes before any scalar tail runs).
     [[nodiscard]] std::string tempSlot(const int k) const {
         return i64(-8 * (maxDepth + 1 + k)) + "(%rbp)";
     }
 
     /// Scratch double slot (survives PLT calls; all xmm are volatile).
     [[nodiscard]] std::string scratchSlot() const {
-        return i64(-8 * (maxDepth + maxTemps + 1)) + "(%rbp)";
+        return i64(-8 * (maxDepth + frameTemps + 1)) + "(%rbp)";
+    }
+
+    /// Packed-loop reserved slots (when vecSlots == 2): slot 0 holds the
+    /// main loop's exclusive even end, slot 1 the saved inclusive end for
+    /// the scalar remainder loop. Vectorized loops never nest (only
+    /// innermost loops pack; subtrees run sequentially), so two shared
+    /// slots serve every packed loop in the module.
+    [[nodiscard]] std::string vecSlot(const int k) const {
+        return i64(-8 * (maxDepth + frameTemps + 1 + 1 + k)) + "(%rbp)";
     }
 
     /// Byte displacement for a disp32 memory operand; larger forms are
@@ -108,7 +138,8 @@ struct AsmEmitter {
 
     /// Home slot of argument k (above the var/temp/scratch slots).
     [[nodiscard]] std::string argSlot(const int k) const {
-        return i64(-8 * (maxDepth + maxTemps + 2 + k)) + "(%rbp)";
+        return i64(-8 * (maxDepth + frameTemps + vecSlots + 2 + k)) +
+               "(%rbp)";
     }
 
     /// Loads an int64 immediate into %rax.
@@ -608,6 +639,276 @@ struct AsmEmitter {
         return {};
     }
 
+    /// Loads one PACKED (2-lane) operand into xmm. Lane 0 is iteration v,
+    /// lane 1 is iteration v+1 of the packed loop (var slot varSlot(d)):
+    ///   coeff of v == +1 -> the two iterations read ADJACENT cells: one
+    ///                       movupd fetches both (flat form of v);
+    ///   coeff of v == 0  -> both iterations read the SAME cell: one
+    ///                       scalar load, duplicated with unpcklpd;
+    ///   Const            -> one scalar literal, duplicated (or pxor for
+    ///                       exact +0.0 in both lanes);
+    ///   Temp index t     -> the chain's pair temp (slots 2t, 2t+1).
+    [[nodiscard]] Result<void> emitOperandPacked(const KernelOperand& o,
+                                                 const int varDepth,
+                                                 const char* xmm) {
+        switch (o.kind) {  // Rule 78: exhaustive
+            case KernelOperand::Kind::Const: {
+                const auto bits = std::bit_cast<uint64_t>(o.constValue);
+                if (bits == 0) {
+                    text += std::string("pxor ") + xmm + ", " + xmm +
+                            "\n";  // exact +0.0 in BOTH lanes
+                } else {
+                    text += "movabsq $" + i64(static_cast<int64_t>(bits)) +
+                            ", %rax\nmovq %rax, " + xmm + "\n";
+                    text += std::string("unpcklpd ") + xmm + ", " + xmm +
+                            "\n";
+                }
+                return {};
+            }
+            case KernelOperand::Kind::Temp: {
+                if (o.index < 0 ||
+                    static_cast<std::size_t>(o.index) >=
+                        kAsmMaxTempSlots / 2) {
+                    return err(ErrorCode::InvalidGraph,
+                               "asm emitter: temp index out of range");
+                }
+                // The slot layout DESCENDS with the index (slot k+1 sits
+                // 8 bytes below slot k), so the 16-byte pair access must
+                // start at the LOWER address — tempSlot(2t+1) — covering
+                // exactly the (2t, 2t+1) pair without touching the var
+                // region above it.
+                text += "movupd " +
+                        tempSlot(2 * static_cast<int>(o.index) + 1) +
+                        ", " + std::string(xmm) + "\n";
+                return {};
+            }
+            case KernelOperand::Kind::ElemIdx: {
+                auto ok = emitElemAddress(o.index);
+                if (!ok.has_value()) {
+                    return std::unexpected<Error>(ok.error());
+                }
+                auto flat = emitAffineToRax(o.idxCoeffs, o.idxOffset);
+                if (!flat.has_value()) {
+                    return std::unexpected<Error>(flat.error());
+                }
+                emitLoadArg(ptrArgIdx[static_cast<std::size_t>(o.index)],
+                            "%r10");
+                text += "salq $3, %rax\n";
+                if (coeffAt(o.idxCoeffs, varDepth) == 1) {
+                    text += std::string("movupd (%r10,%rax,1), ") + xmm +
+                            "\n";
+                } else {
+                    text += "movsd (%r10,%rax,1), " + std::string(xmm) +
+                            "\n";
+                    text += std::string("unpcklpd ") + xmm + ", " + xmm +
+                            "\n";
+                }
+                return {};
+            }
+            case KernelOperand::Kind::ElemA:
+            case KernelOperand::Kind::ElemB:
+            case KernelOperand::Kind::ScalarParam:
+                // Excluded by analyzePackedLoop; reaching here is a
+                // pre-pass contract bug — fail honestly, never emit a
+                // scalar operand into a pair context.
+                return err(ErrorCode::InvalidGraph,
+                           "asm emitter: non-packable operand in a "
+                           "packed body");
+        }
+        return err(ErrorCode::InvalidGraph,
+                   "asm emitter: unknown operand kind");
+    }
+
+    /// One packed op application — pair result in %xmm0. Only the
+    /// elementwise associative-free forms with an exact per-lane match to
+    /// the scalar op are packable (analyzePackedLoop gates this): each
+    /// lane performs the SAME IEEE double operation the scalar iteration
+    /// performs, in the same order (Rules 33/90).
+    [[nodiscard]] Result<void> emitApplyPacked(const KernelExpr& e) {
+        auto a = emitOperandPacked(e.a, depth - 1, "%xmm0");
+        if (!a.has_value()) return std::unexpected<Error>(a.error());
+        auto bv = emitOperandPacked(e.b, depth - 1, "%xmm1");
+        if (!bv.has_value()) return std::unexpected<Error>(bv.error());
+        switch (e.op) {  // gated to Add/Sub/Mul by analyzePackedLoop
+            case MathOp::Add:
+                text += "addpd %xmm1, %xmm0\n";
+                return {};
+            case MathOp::Sub:
+                text += "subpd %xmm1, %xmm0\n";
+                return {};
+            case MathOp::Mul:
+                text += "mulpd %xmm1, %xmm0\n";
+                return {};
+            default:
+                return err(ErrorCode::InvalidGraph,
+                           "asm emitter: non-packable math op");
+        }
+    }
+
+    /// A Compute+Store pair in packed form (the pair twin of
+    /// emitComputePair's multi-dim branch). The chain runs on pair
+    /// values (temp k = slots 2k, 2k+1); the store is one movupd RMW /
+    /// overwrite of the two adjacent cells the two iterations write.
+    [[nodiscard]] Result<void> emitComputePairPacked(
+        const KernelNode& compute, const KernelNode& store) {
+        if (compute.exprs.size() > kAsmMaxTempSlots / 2) {
+            return err(ErrorCode::InvalidGraph,
+                       "asm emitter: packed chain exceeds the temp-slot "
+                       "cap");
+        }
+        for (std::size_t k = 0; k < compute.exprs.size(); ++k) {
+            const KernelExpr& e = compute.exprs[k];
+            const auto badTemp = [&](const KernelOperand& o) {
+                return o.kind == KernelOperand::Kind::Temp &&
+                       o.index >= static_cast<int64_t>(k);
+            };
+            if (badTemp(e.a) || badTemp(e.b)) {
+                return err(ErrorCode::InvalidGraph,
+                           "asm emitter: temp operand is not earlier in "
+                           "the chain");
+            }
+            auto r = emitApplyPacked(e);
+            if (!r.has_value()) return r;
+            // Pair spill at the LOWER address of the (2k, 2k+1) pair —
+            // see the slot-layout note in emitOperandPacked.
+            text += "movupd %xmm0, " +
+                    tempSlot(2 * static_cast<int>(k) + 1) + "\n";
+        }
+        // Chain value: last temp pair (or the +0.0 pair for the
+        // documented degenerate empty-chain shape, exactly like the
+        // walker's scalar path).
+        if (compute.exprs.empty()) {
+            text += "pxor %xmm0, %xmm0\n";
+        } else {
+            text += "movupd " +
+                    tempSlot(2 * static_cast<int>(
+                                 compute.exprs.size() - 1) +
+                             1) +
+                    ", %xmm0\n";
+        }
+        auto ok = emitElemAddress(static_cast<int64_t>(store.bufferOut));
+        if (!ok.has_value()) {
+            return std::unexpected<Error>(ok.error());
+        }
+        auto flat = emitAffineToRax(store.outIndexCoeffs,
+                                    store.outIndexOffset);
+        if (!flat.has_value()) {
+            return std::unexpected<Error>(flat.error());
+        }
+        emitLoadArg(ptrArgIdx[store.bufferOut], "%r10");
+        text += "salq $3, %rax\n";
+        text += "testq %rax, %rax\n";
+        text += "js .Lmlk_neg_store\n";
+        if (store.accum == AccumMode::Add) {
+            text += "movupd (%r10,%rax,1), %xmm1\n";
+            text += "addpd %xmm0, %xmm1\n";
+            text += "movupd %xmm1, (%r10,%rax,1)\n";
+        } else {
+            text += "movupd %xmm0, (%r10,%rax,1)\n";
+        }
+        return {};
+    }
+
+    /// Emits the innermost loop in PACKED-2 form: a main loop stepping
+    /// the induction var by 2 whose body evaluates every Compute/Store
+    /// pair on lane pairs (v, v+1), plus a scalar remainder loop running
+    /// the ORIGINAL body for the final trip%2 iterations. Both loops
+    /// share the var slot; the inclusive end is saved in a vec slot for
+    /// the remainder's exit test.
+    ///
+    /// Bit-exactness: lane 0 replays the even iterations, lane 1 the odd
+    /// ones — each with the scalar op sequence — and the remainder loop
+    /// is the unmodified scalar body; per-cell operation order is
+    /// therefore exactly the scalar order (the gates in
+    /// analyzePackedLoop keep every cell's chain self-contained).
+    [[nodiscard]] Result<void> emitPackedLoop(const KernelNode& n,
+                                             const int varDepth) {
+        const std::string top = newLabel("Lpkmain");
+        const std::string mainEnd = newLabel("Lpkmainend");
+        const std::string tailTop = newLabel("Lpktail");
+        const std::string loopEnd = newLabel("Lpkend");
+        // begin -> var slot (const | affine over the enclosing stack).
+        if (n.beginCoeffs.empty()) {
+            emitLoadI64(n.begin);
+        } else {
+            auto r = emitAffineToRax(n.beginCoeffs, n.beginOffset);
+            if (!r.has_value()) return r;
+        }
+        text += "movq %rax, " + varSlot(varDepth) + "\n";
+        // endInclusive -> %rax (existing three-form discipline).
+        if (!n.endCoeffs.empty()) {
+            auto r = emitAffineToRax(n.endCoeffs, n.endOffset);
+            if (!r.has_value()) return r;
+        } else if (n.end == constants::kKernelLoopDynamicBound &&
+                   n.endBuf != constants::kInvalidId &&
+                   n.endBuf < km.buffers.size() && n.endDim >= 0 &&
+                   n.endDim < static_cast<int32_t>(
+                                  km.buffers[n.endBuf].dims.size())) {
+            if (!bindable[n.endBuf]) {
+                return err(ErrorCode::InvalidGraph,
+                           "asm emitter: bound source buffer is not "
+                           "bindable");
+            }
+            emitLoadArg(ptrArgIdx[n.endBuf], "%r10");
+            auto disp =
+                checkDisp(static_cast<int64_t>(n.endDim) * 8);
+            if (!disp.has_value()) {
+                return std::unexpected<Error>(disp.error());
+            }
+            text += "movq " + i64(*disp) + "(%r10), %rax\n";
+            text += "subq $1, %rax\n";
+        } else {
+            emitLoadI64(n.end - 1);
+        }
+        // Empty range: the scalar exit test skips both loops.
+        text += "cmpq %rax, " + varSlot(varDepth) + "\n";
+        text += "jg " + loopEnd + "\n";
+        // evenTrip = trip & ~1; evenEndExclusive = v + evenTrip.
+        text += "movq %rax, %rcx\n";
+        text += "subq " + varSlot(varDepth) + ", %rcx\n";
+        text += "incq %rcx\n";
+        text += "andq $-2, %rcx\n";
+        text += "addq " + varSlot(varDepth) + ", %rcx\n";
+        text += "movq %rcx, " + vecSlot(0) + "\n";
+        text += "movq %rax, " + vecSlot(1) + "\n";
+        // Main packed loop: for (v; v < evenEndExclusive; v += 2).
+        text += top + ":\n";
+        text += "movq " + vecSlot(0) + ", %rcx\n";
+        text += "cmpq %rcx, " + varSlot(varDepth) + "\n";
+        text += "jge " + mainEnd + "\n";
+        ++depth;
+        if (n.parallel) ++parallelLoops;
+        if (n.vectorHint) ++simdLoops;
+        ++packedLoops;
+        for (std::size_t ci = 0; ci < n.children.size(); ++ci) {
+            const uint32_t cid = n.children[ci];
+            const KernelNode& c = km.nodes[cid];
+            if (c.op == KernelOp::Store) continue;  // unconsumed: no-op
+            const KernelNode& store = km.nodes[n.children[ci + 1]];
+            auto r = emitComputePairPacked(c, store);
+            if (!r.has_value()) return r;
+            ++ci;  // consume the paired store
+        }
+        --depth;
+        text += "addq $2, " + varSlot(varDepth) + "\n";
+        text += "jmp " + top + "\n" + mainEnd + ":\n";
+        // Scalar remainder loop: the ORIGINAL body, unmodified.
+        text += tailTop + ":\n";
+        text += "movq " + vecSlot(1) + ", %rax\n";
+        text += "cmpq %rax, " + varSlot(varDepth) + "\n";
+        text += "jg " + loopEnd + "\n";
+        ++depth;
+        auto kids = emitChildList(n.children, false);
+        if (!kids.has_value()) {
+            return std::unexpected<Error>(kids.error());
+        }
+        --depth;
+        text += "incq " + varSlot(varDepth) + "\n";
+        text += "jmp " + tailTop + "\n";
+        text += loopEnd + ":\n";
+        return {};
+    }
+
     /// Sibling list with the executor's pairing discipline: multi-dim
     /// pairs a Compute with the IMMEDIATE next sibling when it is a
     /// Store (walker execChildList); the legacy 1-D form pairs every
@@ -676,6 +977,17 @@ struct AsmEmitter {
                     return err(ErrorCode::UnsupportedCapability,
                                "asm emitter: non-unit loop step in a "
                                "multi-dim nest");
+                }
+                // Packed-2 fast form: qualifying innermost loops run two
+                // iterations per pass (see analyzePackedLoop for the
+                // legality gates; the header records the packed count).
+                if (packingEnabled && nodeId < packable.size() &&
+                    packable[nodeId]) {
+                    auto r = emitPackedLoop(n, depth);
+                    if (!r.has_value()) {
+                        return std::unexpected<Error>(r.error());
+                    }
+                    return {};
                 }
                 const std::string top = newLabel("Lloop");
                 const std::string endl = newLabel("Lloopend");
@@ -819,6 +1131,144 @@ struct AsmEmitter {
             if (!r.has_value()) return r;
         }
         return {};
+    }
+
+    /// Packed-2 pre-pass: marks the innermost loops whose body can run
+    /// two iterations per pass with SSE2 pair ops (emitPackedLoop).
+    ///
+    /// Legality contract (bit-exact by construction):
+    ///   - every lane performs EXACTLY the scalar iteration's double
+    ///     operations in the original per-cell order (a packed mul/add is
+    ///     the same IEEE op as its scalar twin, one lane per cell);
+    ///   - the packed loop's var v must be an elementwise (not reduction)
+    ///     dimension of every statement: each Store's flat coefficient of
+    ///     v is +1 (the two iterations write ADJACENT DISTINCT cells — a
+    ///     v-invariant Add store would double-accumulate and is rejected;
+    ///     Max's NaN select has no pair form);
+    ///   - every ElemIdx read has coefficient of v in {0, +1}: +1 loads
+    ///     the two adjacent cells one `movupd` fetches; 0 reads one cell
+    ///     shared by both iterations (identical values — nothing writes
+    ///     it in between, enforced by the buffer-disjointness gate);
+    ///   - chains use only Add/Sub/Mul over Const / ElemIdx / earlier
+    ///     Temps (Div's zero-divisor branch, transcendentals' PLT calls
+    ///     and ScalarParam's bounds branch have no pair form);
+    ///   - a chain operand may read the pair's OWN store buffer only with
+    ///     the store's exact address form (in-place per-cell update — the
+    ///     RMW stays self-contained per cell); reads from a buffer any
+    ///     OTHER store of the body writes are rejected (unroll-jam
+    ///     read-after-write hazard across the two lanes);
+    ///   - guards never appear below a packed loop (a +1 lane could exit
+    ///     the guarded domain).
+    ///
+    /// Anything else keeps the scalar form — the gate is all-or-nothing
+    /// per loop, and the differential tests hold either way.
+    [[nodiscard]] bool analyzePackedLoop(const KernelNode& loop,
+                                         const int varDepth) const {
+        if (!multiDim) return false;
+        // Mirror emitChildList's pairing discipline exactly: a Compute
+        // pairs with the IMMEDIATE next sibling when it is a Store; a
+        // bare Store child is the walker's no-op; anything else (nested
+        // Loop, Guard, ...) disqualifies the loop.
+        bool sawPair = false;
+        for (std::size_t ci = 0; ci < loop.children.size(); ++ci) {
+            const uint32_t cid = loop.children[ci];
+            if (cid >= km.nodes.size()) return false;
+            const KernelNode& c = km.nodes[cid];
+            if (c.op == KernelOp::Store) continue;  // unconsumed: no-op
+            if (c.op != KernelOp::Compute) return false;
+            if (ci + 1 >= loop.children.size() ||
+                loop.children[ci + 1] >= km.nodes.size() ||
+                km.nodes[loop.children[ci + 1]].op != KernelOp::Store) {
+                return false;  // bare compute: scalar path records it
+            }
+            const KernelNode& store = km.nodes[loop.children[ci + 1]];
+            if (!store.hasAffineStore()) return false;
+            if (store.accum != AccumMode::None &&
+                store.accum != AccumMode::Add) {
+                return false;
+            }
+            if (coeffAt(store.outIndexCoeffs, varDepth) != 1) return false;
+            // Pair temps: chain k lives in slots (2k, 2k+1).
+            if (c.exprs.size() > kAsmMaxTempSlots / 2) return false;
+            for (std::size_t k = 0; k < c.exprs.size(); ++k) {
+                const KernelExpr& e = c.exprs[k];
+                if (e.op != MathOp::Add && e.op != MathOp::Sub &&
+                    e.op != MathOp::Mul) {
+                    return false;
+                }
+                const KernelOperand* ops[2] = {&e.a, &e.b};
+                const std::size_t nOps = isUnaryOp(e.op) ? 1 : 2;
+                for (std::size_t oi = 0; oi < nOps; ++oi) {
+                    const KernelOperand& o = *ops[oi];
+                    switch (o.kind) {  // Rule 78: exhaustive
+                        case KernelOperand::Kind::Const:
+                            break;
+                        case KernelOperand::Kind::Temp:
+                            if (o.index >= static_cast<int64_t>(k)) {
+                                return false;
+                            }
+                            break;
+                        case KernelOperand::Kind::ElemIdx: {
+                            const int64_t coeff =
+                                coeffAt(o.idxCoeffs, varDepth);
+                            if (coeff != 0 && coeff != 1) return false;
+                            if (o.index < 0 ||
+                                static_cast<std::size_t>(o.index) >=
+                                        km.buffers.size() ||
+                                    !bindable[static_cast<std::size_t>(
+                                        o.index)]) {
+                                return false;
+                            }
+                            // Buffer-disjointness gate: an operand may
+                            // read the pair's OWN store buffer only with
+                            // the store's exact address form (in-place
+                            // per-cell update); any other overlap with a
+                            // written buffer is a cross-lane hazard.
+                            for (std::size_t sj = 0;
+                                 sj < loop.children.size(); ++sj) {
+                                const uint32_t sid = loop.children[sj];
+                                if (sid >= km.nodes.size()) return false;
+                                const KernelNode& s = km.nodes[sid];
+                                if (s.op != KernelOp::Store ||
+                                    !s.hasAffineStore()) {
+                                    continue;
+                                }
+                                if (s.bufferOut !=
+                                    static_cast<uint32_t>(o.index)) {
+                                    continue;
+                                }
+                                const bool ownStore =
+                                    sid == loop.children[ci + 1];
+                                const bool sameForm =
+                                    ownStore &&
+                                    s.outIndexCoeffs == o.idxCoeffs &&
+                                    s.outIndexOffset == o.idxOffset;
+                                if (!sameForm) return false;
+                            }
+                            break;
+                        }
+                        case KernelOperand::Kind::ElemA:
+                        case KernelOperand::Kind::ElemB:
+                        case KernelOperand::Kind::ScalarParam:
+                            return false;
+                    }
+                }
+            }
+            sawPair = true;
+            ++ci;  // consume the paired store
+        }
+        return sawPair;
+    }
+
+    void scanPackable(uint32_t nodeId, int loopDepth) {
+        if (nodeId >= km.nodes.size()) return;
+        const KernelNode& n = km.nodes[nodeId];
+        const int childDepth =
+            n.op == KernelOp::Loop ? loopDepth + 1 : loopDepth;
+        if (n.op == KernelOp::Loop) {
+            packable[nodeId] = analyzePackedLoop(n, loopDepth);
+        }
+        for (const uint32_t c : n.children) scanPackable(c, childDepth);
     }
 
     /// Emits the "poly7" (Sin) family helpers once per module: local
@@ -1031,12 +1481,36 @@ Result<std::string> emitAsmSource(const KernelModule& kernel,
                    "cap");
     }
 
+    // Packed-2 pre-pass (bit-exactness gates in analyzePackedLoop). The
+    // frame reserves PAIR temp slots (2 per chain temp) and the two
+    // packed-loop control slots whenever any loop qualifies; the packed
+    // paths stay disabled when that would not fit the slot cap.
+    em.packable.assign(kernel.nodes.size(), false);
+    for (uint32_t i = 0; i < kernel.nodes.size(); ++i) {
+        bool referenced = false;
+        for (const KernelNode& n : kernel.nodes) {
+            for (const uint32_t c : n.children) {
+                referenced = referenced || c == i;
+            }
+        }
+        if (referenced) continue;
+        em.scanPackable(i, 0);
+    }
+    bool anyPackable = false;
+    for (const bool p : em.packable) anyPackable = anyPackable || p;
+    em.packingEnabled =
+        anyPackable && 2 * em.maxTemps <= static_cast<int>(kAsmMaxTempSlots);
+    em.frameTemps = em.packingEnabled ? 2 * em.maxTemps : em.maxTemps;
+    em.vecSlots = em.packingEnabled ? 2 : 0;
+
     // Frame: var slots + temp slots + one call-surviving scratch double
-    // + one HOME SLOT per argument (spilled in the prologue — argument
-    // registers are caller-saved and do not survive PLT calls), rounded
-    // to the 16-byte ABI alignment.
-    const int64_t slots = static_cast<int64_t>(em.maxDepth + em.maxTemps +
-                                               1 + em.totalArgs);
+    // + packed-loop control slots (when packing) + one HOME SLOT per
+    // argument (spilled in the prologue — argument registers are
+    // caller-saved and do not survive PLT calls), rounded to the
+    // 16-byte ABI alignment.
+    const int64_t slots = static_cast<int64_t>(em.maxDepth + em.frameTemps +
+                                               em.vecSlots + 1 +
+                                               em.totalArgs);
     const int64_t frame = ((slots * 8 + 15) / 16) * 16;
 
     // Function prologue. The header comment block is assembled AFTER the
@@ -1191,7 +1665,20 @@ Result<std::string> emitAsmSource(const KernelModule& kernel,
     header += "# Kernel: " + kernelName +
               "  hash: " + std::to_string(kernel.hash()) + "\n";
     header += "# Target: x86-64, System V AMD64 ABI, AT&T syntax, "
-              "position-independent, SSE2 scalar IEEE-754 doubles.\n";
+              "position-independent, SSE2 IEEE-754 doubles";
+    if (em.packedLoops > 0) {
+        header += " + 2-wide packed innermost loops (movupd/mulpd/addpd)";
+    }
+    header += ".\n";
+    if (em.packedLoops > 0) {
+        header += "# Packed-2 execution: " + std::to_string(em.packedLoops) +
+                  " innermost loop(s) evaluate two iterations per pass; "
+                  "each lane performs exactly the scalar iteration's IEEE "
+                  "double ops in the original per-cell order, so results "
+                  "are bit-exact by construction; odd trip counts take the "
+                  "scalar remainder loop (gates: "
+                  "asm_emitter.cpp analyzePackedLoop).\n";
+    }
     header += "# Semantics mirror the buffer executor "
               "(runtime/src/execution/kernel_buffers.cpp); differential "
               "verification is bit-exact by construction "

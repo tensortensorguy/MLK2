@@ -3478,6 +3478,235 @@ MLK_TEST(poly, asm_backend_text_snapshot) {
     MLK_CHECK(s2.has_value() && *s2 == *s);
 }
 
+#if defined(__x86_64__) || defined(_M_X64)
+MLK_TEST(poly, asm_backend_packed_text_and_structure) {
+    // Packed-2 emission contract (pure text — no toolchain): the
+    // scheduled GEMM's innermost output-column loops qualify (the
+    // reduction rides an OUTER level; the innermost store is stride-1 in
+    // its own var), so the artifact must contain the pair forms, the
+    // packed control labels, the remainder loop, and the header record.
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    auto mod = buildScheduledGemm(symbols, base, 0);
+    MLK_CHECK(mod.has_value());
+    if (!mod.has_value()) return;
+    auto s = mlk::emitAsmSource(*mod, symbols);
+    MLK_CHECK(s.has_value());
+    if (!s.has_value()) {
+        std::fprintf(stderr, "  emit/asm: %s\n",
+                     s.error().message.c_str());
+        return;
+    }
+    // Packed pair ops + pair addressing are present.
+    MLK_CHECK(s->find("mulpd %xmm1, %xmm0") != std::string::npos);
+    MLK_CHECK(s->find("addpd %xmm0, %xmm1") != std::string::npos);
+    MLK_CHECK(s->find("movupd (%r10,%rax,1), %xmm0") !=
+              std::string::npos);  // contiguous pair load
+    MLK_CHECK(s->find("movupd %xmm1, (%r10,%rax,1)") !=
+              std::string::npos);  // pair accumulate store
+    MLK_CHECK(s->find("unpcklpd %xmm0, %xmm0") !=
+              std::string::npos);  // shared-operand broadcast
+    // Control structure: main loop, its end, the scalar remainder.
+    // (Label numbers share one counter with the scalar loop labels, so
+    // only the prefix is asserted.)
+    MLK_CHECK(s->find(".Lpkmain") != std::string::npos);
+    MLK_CHECK(s->find("addq $2, ") != std::string::npos);
+    MLK_CHECK(s->find(".Lpktail") != std::string::npos);
+    MLK_CHECK(s->find(".Lpkend") != std::string::npos);
+    // The scalar forms survive in the remainder loop and the
+    // non-packable nests (init statements, outer reduction bands).
+    MLK_CHECK(s->find("mulsd %xmm1, %xmm0") != std::string::npos);
+    MLK_CHECK(s->find("addsd %xmm1, %xmm0") != std::string::npos);
+    // Header records the packed count (Rule 148-style reporting).
+    MLK_CHECK(s->find("# Packed-2 execution: ") != std::string::npos);
+    // No libm calls anywhere in this pure-arithmetic kernel.
+    MLK_CHECK(s->find("call ") == std::string::npos);
+    // Determinism: re-emission is byte-identical (Rule 53).
+    auto s2 = mlk::emitAsmSource(*mod, symbols);
+    MLK_CHECK(s2.has_value() && *s2 == *s);
+}
+
+MLK_TEST(poly, asm_backend_packed_remainder_bitexact) {
+    // Odd innermost trip (N=5): the packed main loop covers the even
+    // prefix, the scalar remainder loop runs the final iteration with
+    // the ORIGINAL body — the artifact must agree with the walker
+    // bit-exact (the remainder path is where an off-by-one would show).
+    SymbolTable symbols;
+    KernelModule base = buildGemmKernel(symbols);
+    auto mod = buildScheduledGemm(symbols, base, 0);
+    MLK_CHECK(mod.has_value());
+    if (!mod.has_value()) return;
+    auto s = mlk::emitAsmSource(*mod, symbols);
+    MLK_CHECK(s.has_value());
+    if (!s.has_value()) return;
+    // N=5 -> some packed loop must carry a non-empty remainder.
+    MLK_CHECK(s->find(".Lpktail") != std::string::npos);
+
+    constexpr std::size_t nA = static_cast<std::size_t>(kTestM * kTestK);
+    constexpr std::size_t nB = static_cast<std::size_t>(kTestK * kTestN);
+    constexpr std::size_t nC = static_cast<std::size_t>(kTestM * kTestN);
+    SmallVector<double, 8> bufA(nA), bufB(nB);
+    for (std::size_t i = 0; i < nA; ++i) {
+        bufA[i] = static_cast<double>(i % 7) * 0.25 - 0.5;
+    }
+    for (std::size_t i = 0; i < nB; ++i) {
+        bufB[i] = static_cast<double>(i % 5) * 0.5;
+    }
+    SmallVector<double, 8> outW(nC, 0.0), outAsm(nC, 0.0);
+    auto bind = [&](SmallVector<double, 8>& outC) {
+        mlk::KernelBufferBindings io;
+        io.inputs.push_back(bufA.data());
+        io.inputs.push_back(bufB.data());
+        io.outputs.push_back(outC.data());
+        io.elements = nC;
+        return io;
+    };
+    auto rw =
+        mlk::executeKernelOnBuffers(*mod, symbols, bind(outW), nullptr);
+    MLK_CHECK(rw.has_value());
+    if (!rw.has_value()) return;
+
+    MLK_CHECK(backendToolchainReady());
+    if (!backendToolchainReady()) return;
+    mlk::BackendDriverConfig cfg;
+    auto asmArt = mlk::buildKernelArtifact(*mod, symbols,
+                                           mlk::ArtifactKind::Asm, cfg);
+    MLK_CHECK(asmArt.has_value());
+    if (!asmArt.has_value()) {
+        std::fprintf(stderr, "  emit/asm: %s\n",
+                     asmArt.error().message.c_str());
+        return;
+    }
+    auto rAsm = asmArt->run(*mod, symbols, bind(outAsm));
+    MLK_CHECK(rAsm.has_value());
+    if (!rAsm.has_value()) {
+        std::fprintf(stderr, "  run/asm: %s\n",
+                     rAsm.error().message.c_str());
+        return;
+    }
+    for (std::size_t i = 0; i < nC; ++i) {
+        MLK_CHECK(outAsm[i] == outW[i]);  // Rule 43: bit-exact
+    }
+}
+
+MLK_TEST(poly, asm_backend_packed_fallback_div_stays_scalar) {
+    // Graceful fallback (Rule 30): a Div chain in the innermost body has
+    // no pair form (the zero-divisor select), so the loop must keep the
+    // scalar form — no packed labels, no pair ops — and stay bit-exact.
+    SymbolTable symbols;
+    KernelModule km;
+    KernelBuffer a;
+    a.name = symbols.intern("A");
+    a.dims = SmallVector<int64_t, 4>{3, 8};
+    a.isInput = true;
+    KernelBuffer b;
+    b.name = symbols.intern("B");
+    b.dims = SmallVector<int64_t, 4>{3, 8};
+    b.isInput = true;
+    KernelBuffer y;
+    y.name = symbols.intern("Y");
+    y.dims = SmallVector<int64_t, 4>{3, 8};
+    y.isOutput = true;
+    const uint32_t bufA = km.addBuffer(a);
+    const uint32_t bufB = km.addBuffer(b);
+    const uint32_t bufY = km.addBuffer(y);
+    const SymbolId vi = symbols.intern("i");
+    const SymbolId vj = symbols.intern("j");
+    // innermost j: Y[i][j] = A[i][j] / B[i][j] (b != 0 walker select).
+    KernelNode compute;
+    compute.op = mlk::KernelOp::Compute;
+    KernelExpr div;
+    div.op = mlk::MathOp::Div;
+    div.a.kind = KernelOperand::Kind::ElemIdx;
+    div.a.index = static_cast<int64_t>(bufA);
+    div.a.idxCoeffs = SmallVector<int64_t, 4>{8, 1};
+    div.b.kind = KernelOperand::Kind::ElemIdx;
+    div.b.index = static_cast<int64_t>(bufB);
+    div.b.idxCoeffs = SmallVector<int64_t, 4>{8, 1};
+    compute.exprs.push_back(div);
+    KernelNode store;
+    store.op = mlk::KernelOp::Store;
+    store.bufferOut = bufY;
+    store.outIndexCoeffs = SmallVector<int64_t, 4>{8, 1};
+    KernelNode jLoop;
+    jLoop.op = mlk::KernelOp::Loop;
+    jLoop.var = vj;
+    jLoop.begin = 0;
+    jLoop.end = 8;
+    {
+        const uint32_t c = km.addNode(compute);
+        const uint32_t st = km.addNode(store);
+        jLoop.children.push_back(c);
+        jLoop.children.push_back(st);
+    }
+    KernelNode iLoop;
+    iLoop.op = mlk::KernelOp::Loop;
+    iLoop.var = vi;
+    iLoop.begin = 0;
+    iLoop.end = 3;
+    {
+        const uint32_t j = km.addNode(jLoop);
+        iLoop.children.push_back(j);
+    }
+    (void)km.addNode(iLoop);
+
+    auto s = mlk::emitAsmSource(km, symbols);
+    MLK_CHECK(s.has_value());
+    if (!s.has_value()) {
+        std::fprintf(stderr, "  emit/asm: %s\n",
+                     s.error().message.c_str());
+        return;
+    }
+    // The Div gate rejects the loop: scalar form only.
+    MLK_CHECK(s->find(".Lpkmain") == std::string::npos);
+    MLK_CHECK(s->find("movupd") == std::string::npos);
+    MLK_CHECK(s->find("divsd %xmm1, %xmm0") != std::string::npos);
+    MLK_CHECK(s->find("# Packed-2 execution") == std::string::npos);
+
+    constexpr std::size_t n = static_cast<std::size_t>(3 * 8);
+    SmallVector<double, 8> bufInA(n), bufInB(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        bufInA[i] = static_cast<double>(i) * 0.5 - 2.0;
+        bufInB[i] = static_cast<double>((i % 5)) * 0.25 + 0.5;  // nonzero
+    }
+    SmallVector<double, 8> outW(n, 0.0), outAsm(n, 0.0);
+    auto bind = [&](SmallVector<double, 8>& outC) {
+        mlk::KernelBufferBindings io;
+        io.inputs.push_back(bufInA.data());
+        io.inputs.push_back(bufInB.data());
+        io.outputs.push_back(outC.data());
+        io.elements = n;
+        return io;
+    };
+    auto rw = mlk::executeKernelOnBuffers(km, symbols, bind(outW), nullptr);
+    MLK_CHECK(rw.has_value());
+    if (!rw.has_value()) return;
+
+    MLK_CHECK(backendToolchainReady());
+    if (!backendToolchainReady()) return;
+    mlk::BackendDriverConfig cfg;
+    auto asmArt =
+        mlk::buildKernelArtifact(km, symbols, mlk::ArtifactKind::Asm, cfg);
+    MLK_CHECK(asmArt.has_value());
+    if (!asmArt.has_value()) {
+        std::fprintf(stderr, "  emit/asm: %s\n",
+                     asmArt.error().message.c_str());
+        return;
+    }
+    auto rAsm = asmArt->run(km, symbols, bind(outAsm));
+    MLK_CHECK(rAsm.has_value());
+    if (!rAsm.has_value()) {
+        std::fprintf(stderr, "  run/asm: %s\n",
+                     rAsm.error().message.c_str());
+        return;
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        MLK_CHECK(outAsm[i] == outW[i]);  // Rule 43: bit-exact
+    }
+}
+
+#endif  // __x86_64__
+
 MLK_TEST(poly, softmax_synth_pipeline_bitexact) {
     // Softmax synthesis milestone: baseline Call(Softmax) -> poly.synth
     // (stable-form chain with materialized rowmax/exp/sum temps, four
